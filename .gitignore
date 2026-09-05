@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# 虚拟环境（部署时用 setup.cmd 自动重建）
+.venv/
+venv/
+env/
+
+# 模型（约 2GB，rembg 首次使用时自动下载到 models/）
+models/
+*.onnx
+
+# 生成产物（每张卡一个目录 + 临时缓存 + 卡牌定义）
+assets/output/
+cards/
+cards.zip
+album.html
+demo-all-layers.png
+
+# 临时/测试脚本与诊断图（_ 前缀；工具脚本豁免）
+_*.py
+_*.png
+_*.html
+webcard.py.bak
+!_generate_seals.py
+!_regen_cards.py
+
+# IDE / 系统
+.idea/
+.vscode/
+*.log
+Thumbs.db
+.DS_Store

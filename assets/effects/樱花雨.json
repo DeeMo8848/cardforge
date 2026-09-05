@@ -1,0 +1,11 @@
+{
+  "name": "樱花雨",
+  "def": {
+    "count": 3,
+    "image": "text:🌸",
+    "lifetime": 3,
+    "relOffsetY": -1.2,
+    "speedY": 0.5,
+    "spin": 2
+  }
+}

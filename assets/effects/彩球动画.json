@@ -1,0 +1,19 @@
+{
+  "name": "彩球动画",
+  "def": {
+    "image": "image:sprite-demo.png",
+    "count": 2,
+    "frameWidth": 64,
+    "frameHeight": 64,
+    "totalFrames": 4,
+    "frameSpeed": 0.6,
+    "frameLoop": true,
+    "lifetime": 3,
+    "delay": 0.8,
+    "delayRandom": 1.5,
+    "startScale": 0.4,
+    "endScale": 1,
+    "fadeIn": 0.2,
+    "fadeOut": 0.5
+  }
+}

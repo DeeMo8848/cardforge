@@ -1,0 +1,30 @@
+{
+  "id": "hasunosora-duo",
+  "name": "莲之空双人组",
+  "description": "登场时：使我方全体攻击力 +2。回合结束时，若我方场上有 3 名以上成员，额外恢复 1 点体力。",
+  "style": "transparent",
+  "engine": "local(birefnet-massive)",
+  "source": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\hasunosora-duo\\source.png",
+  "front": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\hasunosora-duo\\front.png",
+  "foreground": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\hasunosora-duo\\foreground.png",
+  "back": "assets/backs/three-kingdoms-back.png",
+  "layers": {
+    "background": null,
+    "face": null,
+    "frame": null,
+    "effect": null
+  },
+  "text": {
+    "title": null,
+    "description": "登场时：使我方全体攻击力 +2。回合结束时，若我方场上有 3 名以上成员，额外恢复 1 点体力。",
+    "type": "transparent",
+    "pos": {
+      "x1": 0.05,
+      "x2": 0.95,
+      "y1": 0.55,
+      "y2": 0.78
+    }
+  },
+  "card_size": "900x1200",
+  "composed": true
+}

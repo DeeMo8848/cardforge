@@ -88,6 +88,21 @@ GitHub 仓库只包含本体程序（约几 MB），**虚拟环境和模型都�
 - 依赖：`requirements.txt`（rembg + Pillow）
 - 调用入口：`webui.cmd` / `cardforge.cmd`（自动检测环境，缺失时先部署再运行）
 
+## GitHub 备份
+
+- 仓库只跟踪本体程序：源码（`.py`/`.cmd`）、素材（`assets/` 下除 `output/`）、说明文档
+- **不跟踪**（自动下载/生成，勿手动提交）：`.venv/`、`models/`（约 2GB 模型）、`assets/output/`（生成的卡片）、`cards.zip`、`album.html` 等临时产物
+- 卡封效果生成器 `_generate_seals.py` 与卡牌重建脚本 `_regen_cards.py` 为保留工具脚本，其余 `_` 开头的临时脚本不入库
+- `cards/` 下的卡牌定义默认不入库，仅随仓库保存的样例卡除外（含 `hasunosora-duo` 等 7 张）
+- 备份时机：按需执行（需要时再让我提交推送，不会每次修改自动备份）
+
+## 卡牌效果在线预览
+
+GitHub 不直接渲染 HTML，仓库内 `preview/` 目录存放自包含的卡牌预览页（图片已内嵌，不依赖本地资源），点击以下链接即可查看 3D 卡效果（拖动可旋转，由 htmlpreview 服务渲染）：
+
+- [🃏 莲之空双人组（hasunosora-duo）](https://htmlpreview.github.io/?https://github.com/DeeMo8848/cardforge/blob/main/preview/hasunosora-duo.html)
+
+> 重新生成预览页：`.venv\Scripts\python.exe scripts\make_gh_preview.py <卡牌id>`
 
 ## 开发
 

@@ -1,0 +1,33 @@
+{
+  "id": "描边测试",
+  "name": "描边测试",
+  "description": "",
+  "style": "transparent",
+  "engine": "不使用抠图",
+  "source": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\描边测试\\source.png",
+  "front": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\描边测试\\front.png",
+  "foreground": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\描边测试\\foreground.png",
+  "back": "assets/backs/three-kingdoms-back.png",
+  "layers": {
+    "background": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\backgrounds\\sample-1.png",
+    "face": null,
+    "frame": null,
+    "seal": null
+  },
+  "text": {
+    "title": null,
+    "description": null,
+    "type": "none",
+    "pos": {
+      "x1": 0.08,
+      "x2": 0.92,
+      "y1": 0.7,
+      "y2": 0.92
+    }
+  },
+  "card_size": "900x1200",
+  "composed": true,
+  "animation": "none",
+  "subject_over_frame": false,
+  "subject_outline": true
+}

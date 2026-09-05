@@ -1,0 +1,27 @@
+{
+  "id": "seal-dot-test",
+  "name": "点状卡封测试",
+  "description": "",
+  "style": "transparent",
+  "engine": "不使用抠图",
+  "source": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\seal-dot-test\\source.png",
+  "front": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\seal-dot-test\\front.png",
+  "foreground": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\seal-dot-test\\foreground.png",
+  "back": "assets/backs/three-kingdoms-back.png",
+  "layers": {
+    "background": null,
+    "face": null,
+    "frame": null,
+    "seal": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\seals\\十字膜.png"
+  },
+  "text": {
+    "title": "",
+    "description": "",
+    "type": "none",
+    "pos": null
+  },
+  "card_size": "900x1200",
+  "composed": true,
+  "animation": "none",
+  "subject_over_frame": false
+}

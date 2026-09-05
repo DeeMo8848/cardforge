@@ -1,0 +1,27 @@
+{
+  "id": "测试-主体在边框之上",
+  "name": "测试-主体在边框之上",
+  "description": "",
+  "style": "transparent",
+  "engine": "local(birefnet-massive)",
+  "source": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\测试-主体在边框之上\\source.png",
+  "front": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\测试-主体在边框之上\\front.png",
+  "foreground": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\测试-主体在边框之上\\foreground.png",
+  "back": "assets/backs/three-kingdoms-back.png",
+  "layers": {
+    "background": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\backgrounds\\8635.jpg",
+    "face": null,
+    "frame": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\frames\\sample-1.png",
+    "seal": null
+  },
+  "text": {
+    "title": null,
+    "description": null,
+    "type": "none",
+    "pos": null
+  },
+  "card_size": "900x1200",
+  "composed": true,
+  "animation": "none",
+  "subject_over_frame": true
+}

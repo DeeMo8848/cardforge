@@ -13,9 +13,15 @@ env/
 models/
 *.onnx
 
-# 生成产物（每张卡一个目录 + 临时缓存 + 卡牌定义）
+# 生成产物（每张卡一个目录 + 临时缓存；卡牌定义默认不入库，cards/ 下样例除外）
 assets/output/
-cards/
+cards/*
+!cards/a55-snowflake-test.json
+!cards/seal-dot-test.json
+!cards/描边测试.json
+!cards/测试-主体在边框之上.json
+!cards/测试-整幅抠图.json
+!cards/测试-整幅裁剪.json
 cards.zip
 album.html
 demo-all-layers.png

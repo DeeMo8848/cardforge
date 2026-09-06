@@ -2,6 +2,13 @@
 
 输入一张图像，自动完成抠图（rembg + BiRefNet，离线本地运行）并产出卡牌资产，可被脚本或其他工具调用。
 
+## 卡牌效果在线预览
+
+点击以下链接即可查看 3D 卡效果（拖动可旋转，由 raw.githack 在线渲染）：
+
+- [🃏 预览](https://raw.githack.com/DeeMo8848/cardforge/main/preview/%E9%A2%84%E8%A7%88.html)
+
+
 ## 快速上手
 
 ### 可视化界面（日常使用推荐）
@@ -87,14 +94,6 @@ GitHub 仓库只包含本体程序（约几 MB），**虚拟环境和模型都�
 - Python 虚拟环境：`.venv`（用系统 Python 3.10 创建，避免依赖冲突；`setup.cmd` 自动创建）
 - 依赖：`requirements.txt`（rembg + Pillow）
 - 调用入口：`webui.cmd` / `cardforge.cmd`（自动检测环境，缺失时先部署再运行）
-
-## 卡牌效果在线预览
-
-GitHub 不直接渲染 HTML，仓库内 `preview/` 目录存放自包含的卡牌预览页（图片已内嵌，不依赖本地资源），点击以下链接即可查看 3D 卡效果（拖动可旋转，由 raw.githack 在线渲染）：
-
-- [🃏 预览](https://raw.githack.com/DeeMo8848/cardforge/main/preview/%E9%A2%84%E8%A7%88.html)
-
-> 重新生成预览页：`.venv\Scripts\python.exe scripts\make_gh_preview.py <卡牌id>`
 
 ## 开发
 

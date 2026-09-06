@@ -1,34 +1,32 @@
 @echo off
-rem ============================================================
-rem  cardforge 一键部署：创建虚拟环境 + 安装依赖
-rem  首次克隆后运行一次即可；之后直接使用 webui.cmd / cardforge.cmd
-rem  模型约 2GB 不在仓库内，首次抠图时由 rembg 自动下载到 models/
-rem ============================================================
+rem cardforge one-click deploy: create .venv + install dependencies
+rem Run once after cloning; then use webui.cmd / cardforge.cmd
+rem Models (~2GB) are not in the repo, auto-downloaded by rembg to models/
 setlocal
 set "ROOT=%~dp0"
 cd /d "%ROOT%"
 
 if exist "%ROOT%.venv\Scripts\python.exe" (
-    echo [cardforge] 已存在 .venv，跳过创建
+    echo [cardforge] .venv already exists, skip creation
 ) else (
-    echo [cardforge] 创建虚拟环境 .venv ...
+    echo [cardforge] Creating virtual environment .venv ...
     python -m venv .venv
     if errorlevel 1 (
-        echo [cardforge] 创建失败：请确认已安装 Python 3.10+ 且已加入 PATH
+        echo [cardforge] Failed: please install Python 3.10+ and add it to PATH
         pause
         exit /b 1
     )
 )
 
-echo [cardforge] 安装依赖 ...
+echo [cardforge] Installing dependencies ...
 "%ROOT%.venv\Scripts\python.exe" -m pip install --upgrade pip
 "%ROOT%.venv\Scripts\python.exe" -m pip install -r requirements.txt
 if errorlevel 1 (
-    echo [cardforge] 依赖安装失败，请检查网络后重试
+    echo [cardforge] Dependency install failed, check your network and retry
     pause
     exit /b 1
 )
 
 echo.
-echo [cardforge] 部署完成！使用 webui.cmd 启动 Web 界面
+echo [cardforge] Deploy done! Start the web UI with webui.cmd
 pause

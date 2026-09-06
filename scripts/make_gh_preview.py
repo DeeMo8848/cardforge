@@ -46,7 +46,7 @@ def build(card_id: str) -> None:
     if layers.get("seal"):
         seal_path = Path(str(layers["seal"]))
         seal_rel = _b64(seal_path if seal_path.is_absolute() else ROOT / seal_path)
-        seal_name = seal_path.name
+        seal_name = card.get("seal_name") or seal_path.name
 
     text = card.get("text") or {}
     html = webcard.build_card_html(
@@ -55,6 +55,9 @@ def build(card_id: str) -> None:
         description=text.get("description"),
         text_type=text.get("type", "none"),
         text_pos=text.get("pos"),
+        subject_over_frame=bool(card.get("subject_over_frame")),
+        seal_strength_front=float(card.get("seal_strength_front", 0.945)),
+        seal_strength_back=float(card.get("seal_strength_back", 0.5775)),
     )
     PREVIEW_DIR.mkdir(exist_ok=True)
     dest = PREVIEW_DIR / f"{card_id}.html"

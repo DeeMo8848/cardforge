@@ -1,0 +1,36 @@
+{
+  "id": "预览",
+  "name": "预览",
+  "description": "登场时：使我方全体攻击力 +2。回合结束时，若我方场上有 3 名以上成员，额外恢复 1 点体力。",
+  "style": "transparent",
+  "engine": "assembly",
+  "source": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\预览\\front.png",
+  "front": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\预览\\front.png",
+  "foreground": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\预览\\foreground.png",
+  "back": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\预览\\back.png",
+  "layers": {
+    "background": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\预览\\front.png",
+    "face": null,
+    "frame": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\预览\\frame.png",
+    "seal": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\预览\\seal.png"
+  },
+  "text": {
+    "title": "预览",
+    "description": "登场时：使我方全体攻击力 +2。回合结束时，若我方场上有 3 名以上成员，额外恢复 1 点体力。",
+    "type": "transparent",
+    "pos": {
+      "x1": 0.08,
+      "x2": 0.92,
+      "y1": 0.7,
+      "y2": 0.92
+    }
+  },
+  "composed": false,
+  "assembly": true,
+  "subject_over_frame": false,
+  "subject_outline": false,
+  "seal_strength_front": 0.9,
+  "seal_strength_back": 0.5775,
+  "seal_name": "句号膜.png",
+  "effects": []
+}

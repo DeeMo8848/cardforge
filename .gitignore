@@ -23,6 +23,7 @@ cards/*
 !cards/测试-整幅抠图.json
 !cards/测试-整幅裁剪.json
 !cards/hasunosora-duo.json
+!cards/预览.json
 cards.zip
 album.html
 demo-all-layers.png

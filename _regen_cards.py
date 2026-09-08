@@ -35,11 +35,22 @@ def regen(card_json: Path) -> bool:
     frame_path = layers.get("frame")
     seal_path = layers.get("seal")
     frame_rel = seal_rel = None
+    interior_rel = None
     if frame_path and Path(frame_path).exists():
         frame_dst = out_dir / "frame.png"
         if Path(frame_path) != frame_dst:
             shutil.copy(frame_path, frame_dst)
         frame_rel = "frame.png"
+        # 边框内区域蒙版：整卡内容仅绘制在边框外围以内（与 webapp 保存逻辑一致）
+        try:
+            from compositor import save_frame_interior_mask
+            save_frame_interior_mask(Image.open(frame_dst), out_dir / "interior.png")
+            interior_rel = "interior.png"
+        except Exception as e:  # noqa: BLE001
+            print(f"  [interior] {cid}: 蒙版生成失败 {e}")
+            interior_rel = None
+    elif (out_dir / "interior.png").exists():
+        (out_dir / "interior.png").unlink()
     if seal_path and Path(seal_path).exists():
         seal_dst = out_dir / "seal.png"
         if Path(seal_path) != seal_dst:
@@ -88,6 +99,7 @@ def regen(card_json: Path) -> bool:
         seal_strength_front=seal_front,
         seal_strength_back=seal_back,
         content_scale=content_scale,
+        interior_rel=interior_rel,
     )
     (out_dir / "card.html").write_text(html, encoding="utf-8")
 

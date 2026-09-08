@@ -287,7 +287,7 @@ def parse_size(text: str) -> tuple[int, int]:
 _LAYER_DIRS = {
     "background": "backgrounds",
     "face": "faces",
-    "frame": "frames",
+    "frame": ("frames", "frames-text"),  # 边框可能放在普通边框或文本框边框目录
     "seal": "seals",
     "back": "backs",
 }
@@ -300,8 +300,10 @@ def _load_layer(path: str | None, kind: str | None = None) -> str | None:
     p = Path(path)
     if not p.is_absolute() and not p.exists():
         candidates = [PROJECT_ROOT / "assets" / p]
-        sub = _LAYER_DIRS.get(kind or "")
-        if sub:
+        subs = _LAYER_DIRS.get(kind or "")
+        if isinstance(subs, str):
+            subs = [subs]
+        for sub in subs or []:
             candidates.append(PROJECT_ROOT / "assets" / sub / p)
         for candidate in candidates:
             if candidate.exists():
@@ -326,6 +328,7 @@ def make_card(
     face: str | None = None,
     frame: str | None = None,
     seal: str | None = None,
+    seal_frame: str | None = None,
     animation: str = "none",
     effects: list | None = None,
     back: str | None = None,
@@ -333,6 +336,9 @@ def make_card(
     compose: bool = True,
     subject_over_frame: bool = False,
     subject_outline: bool = False,
+    scale: float = 1.0,
+    adaptive: bool = True,
+    adaptive_mode: int = 1,
     progress=None,
 ) -> dict:
     """核心制作流程（CLI 与 Web 界面共用）。
@@ -346,6 +352,8 @@ def make_card(
 
     if style not in ("transparent", "full-bleed"):
         raise ValueError(f"未知风格: {style}")
+    if desc and text_type == "none":
+        text_type = "transparent"  # 有描述但未指定类型时按特殊文本型处理
 
     # 特效实例：优先取 effects 列表；兼容旧 animation 单特效参数
     if effects:
@@ -387,9 +395,24 @@ def make_card(
         engine_desc = engine.describe()
     step += 1
 
-    # 上传图按风格等比缩放+居中裁剪/透明画布贴图（原图与抠图同步处理，不变形、不留白）
-    source = _fit_card(source, CARD_W, CARD_H, style)
-    foreground = _fit_card(foreground, CARD_W, CARD_H, style)
+    # 上传图按所选自适应方式等比缩放+居中裁剪/透明画布贴图（原图与抠图同步处理）。
+    # 文本型卡的实际显示范围缩小为卡图区（卡顶到文本区顶部 y1），主体按剩余范围判定；
+    # 底图（front）恒整幅铺满。
+    # 仅文本型（boxed）主体按卡图区（剩余显示范围）判定（无论是否已输入描述）；无文本型/特殊文本型整幅显示
+    text_adapt = text_type == "boxed"
+    adapt_limit = 0.70
+    if text_pos and all(k in text_pos for k in ("x1", "x2", "y1", "y2")):
+        try:
+            adapt_limit = min(1.0, max(0.05, float(text_pos["y1"])))
+        except (TypeError, ValueError):
+            pass
+    adapt_h = max(1, round(CARD_H * adapt_limit))
+
+    source = _fit_card(source, CARD_W, CARD_H, adaptive=True, mode=1)
+    foreground = _fit_card(
+        foreground, CARD_W, adapt_h if text_adapt else CARD_H,
+        adaptive=adaptive, mode=adaptive_mode,
+    )
 
     # 2. 保存资产
     log("保存卡牌资产…")
@@ -412,11 +435,19 @@ def make_card(
 
     # 3. 卡牌定义
     log("生成卡牌定义…")
+    frame_path = _load_layer(frame, "frame")
+    seal_path = _load_layer(seal, "seal")
+    # 边框卡封"与卡封一致"：与卡牌卡封使用同一素材（只记录一次）
+    seal_frame_same = seal_frame == "same"
+    if seal_frame_same:
+        seal_frame = seal
+    seal_frame_path = _load_layer(seal_frame, "seal")
     layers = {
         "background": _load_layer(background, "background"),
         "face": _load_layer(face, "face"),
-        "frame": _load_layer(frame, "frame"),
-        "seal": _load_layer(seal, "seal"),
+        "frame": frame_path,
+        "seal": seal_path,
+        "seal_frame": seal_frame_path,
     }
     text = {"title": title, "description": desc, "type": text_type, "pos": text_pos}
     back = _load_layer(back, "back") or "assets/backs/three-kingdoms-back.png"
@@ -432,7 +463,13 @@ def make_card(
         layers=layers,
         text=text,
         extra={"card_size": card_size, "composed": compose, "animation": animation,
-               "subject_over_frame": subject_over_frame, "subject_outline": subject_outline},
+               "subject_over_frame": subject_over_frame, "subject_outline": subject_outline,
+               "seal_name": Path(seal_path).name if seal_path else None,
+               "seal_strength_front": 0.945, "seal_strength_back": 0.5775,
+               "seal_frame_name": Path(seal_frame_path).name if seal_frame_path else None,
+               "seal_frame_strength_front": 0.8, "seal_frame_strength_back": 0.5,
+               "seal_frame_same": seal_frame_same,
+               "card_scale": scale},
     )
     save_card_def(card, PROJECT_ROOT / "cards" / f"{card_id}.json")
     step += 1
@@ -443,12 +480,13 @@ def make_card(
         log("合成预览卡图…")
         size = parse_size(card_size)
         composed = compose_card(
-            foreground if style == "transparent" else None,
+            foreground if (style == "transparent" or text_adapt) else None,
             style=style,
-            background=_load_layer(background),
-            face=_load_layer(face) or (str(image_path) if style == "full-bleed" else None),
-            frame=_load_layer(frame),
-            seal=_load_layer(seal),
+            background=_load_layer(background, "background"),
+            face=_load_layer(face, "face") or (str(image_path) if style == "full-bleed" else None),
+            frame=_load_layer(frame, "frame"),
+            seal=_load_layer(seal, "seal"),
+            seal_frame=_load_layer(seal_frame, "seal"),
             title=title,
             description=desc,
             text_type=text_type,
@@ -457,9 +495,11 @@ def make_card(
             subject_outline=subject_outline,
             size=size,
             front=str(out_dir / "front.png"),
+            content_scale=scale,
+            face_scales=style == "full-bleed",
         )
         composed_path = out_dir / "card.png"
-        composed.convert("RGB").save(composed_path)
+        composed.save(composed_path)
         step += 1
 
     # 5. 3D 卡网页（自包含单 HTML，双击即开）
@@ -475,24 +515,43 @@ def make_card(
     # 边框/卡封复制到输出目录，保证 card.html 自包含（本地双击与 HTTP 访问均可用）
     frame_path = _load_layer(frame, "frame")
     seal_path = _load_layer(seal, "seal")
-    frame_rel = seal_rel = None
+    seal_frame_path = _load_layer(seal_frame, "seal")
+    frame_rel = seal_rel = seal_frame_rel = None
     if frame_path:
         shutil.copy(frame_path, out_dir / "frame.png")
         frame_rel = "frame.png"
     if seal_path:
         shutil.copy(seal_path, out_dir / "seal.png")
         seal_rel = "seal.png"
+    if seal_frame_path:
+        shutil.copy(seal_frame_path, out_dir / "seal_frame.png")
+        seal_frame_rel = "seal_frame.png"
+    # 边框内区域蒙版：整卡内容仅绘制在边框外围以内（3D shader 裁剪，与 2D 一致）
+    interior_rel = None
+    if frame_path:
+        from compositor import save_frame_interior_mask
+
+        try:
+            save_frame_interior_mask(Image.open(frame_path), out_dir / "interior.png")
+            interior_rel = "interior.png"
+        except Exception:
+            interior_rel = None
     # 未开启浮于边框时：边框按主体包围盒缩放（3D 卡，浏览器端计算包围盒）
     web_path.write_text(
         build_card_html(name, "front.png", "foreground.png", "back.png", effects=effect_instances,
                         frame_rel=frame_rel,
                         seal_rel=seal_rel,
                         seal_name=Path(seal_path).name if seal_path else None,
+                        seal_frame_rel=seal_frame_rel,
+                        seal_frame_name=Path(seal_frame_path).name if seal_frame_path else None,
                         description=desc, text_type=text_type, text_pos=text_pos,
                         subject_over_frame=subject_over_frame,
-                        round_foreground=(style == "full-bleed"),
+                        round_foreground=True,
                         frame_fit_subject=(style != "full-bleed"),
-                        outline_rel=outline_rel),
+                        outline_rel=outline_rel,
+                        content_scale=scale,
+                        face_scales=style == "full-bleed",
+                        interior_rel=interior_rel),
         encoding="utf-8",
     )
 
@@ -530,17 +589,21 @@ def _center_crop_ratio(im: Image.Image, ratio: float) -> Image.Image:
     return im.crop((0, y, w, y + new_h))
 
 
-def _fit_card(im: Image.Image, w: int, h: int, style: str) -> Image.Image:
-    """上传图按风格等比缩放并居中处理（不变形、不留白、主体不裁切）。
+def _fit_card(im: Image.Image, w: int, h: int, adaptive: bool = True, mode: int = 1) -> Image.Image:
+    """上传图按所选自适应方式处理到目标尺寸 (w, h)，不变形。
 
-    full-bleed（整幅卡面）：图像宽于卡牌(3:4)时高适配（裁左右），窄于卡牌时宽适配
-        （裁上下），即"铺满 + 居中裁"，输出恒为 w×h，无留白。
-    transparent（透明主体卡）：横图宽适配（3.3）、纵图/方图高适配（3.4）；另一方向
-        不足卡牌时居中贴到透明 3:4 画布（contain），主体完整不裁切；超出时居中裁剪铺满。
+    adaptive=True 时按上传图与目标尺寸的大小/比例判定：
+      mode=1（整幅判定）：图像宽于目标时按高度缩放（裁左右），窄于目标时按宽度缩放
+          （裁上下），恒铺满（cover），与整幅卡面一致；
+      mode=2（透明主体判定）：横图按宽度缩放、纵图/方图按高度缩放；另一方向不足目标时
+          居中贴到透明画布（contain，主体完整不裁切），超出时居中裁剪铺满。
+    adaptive=False（最原始）：不做任何判定，直接拉伸填满目标尺寸（可能变形）。
     """
+    if not adaptive:
+        return im.convert("RGBA").resize((w, h), Image.LANCZOS)
     ratio = w / h
     cur = im.width / im.height
-    if style == "full-bleed":
+    if mode == 1:
         if cur > ratio:
             scale = h / im.height
         else:
@@ -550,9 +613,9 @@ def _fit_card(im: Image.Image, w: int, h: int, style: str) -> Image.Image:
         scaled = im.convert("RGBA").resize((nw, nh), Image.LANCZOS)
         x, y = (nw - w) // 2, (nh - h) // 2
         return scaled.crop((x, y, x + w, y + h))
-    if cur > 1.0:  # 横向长方形 → 宽与卡牌一致
+    if cur > 1.0:  # 横向长方形 → 宽与目标一致
         scale = w / im.width
-    else:  # 纵向长方形或正方形 → 高与卡牌一致
+    else:  # 纵向长方形或正方形 → 高与目标一致
         scale = h / im.height
     nw = max(1, round(im.width * scale))
     nh = max(1, round(im.height * scale))
@@ -566,16 +629,22 @@ def _fit_card(im: Image.Image, w: int, h: int, style: str) -> Image.Image:
 
 
 def build_front(source: Image.Image, foreground: Image.Image, style: str, background_path: str | None) -> Image.Image:
-    """生成 3D 应用底图层 front。"""
+    """生成 3D 应用底图层 front（恒整卡尺寸）。
+
+    full-bleed（整幅卡面）：用户选择背景层时背景作底（文本型卡的主体区外露背景），
+        未选背景时整幅原图即底图；
+    transparent：选了背景用背景（等比裁剪铺满），未选背景用深色底。
+    """
+    w, h = CARD_W, CARD_H
+    if background_path is not None:
+        bg = Image.open(background_path).convert("RGBA")
+        scale = max(w / bg.width, h / bg.height)
+        bg = bg.resize((max(1, round(bg.width * scale)), max(1, round(bg.height * scale))), Image.LANCZOS)
+        x, y = (bg.width - w) // 2, (bg.height - h) // 2
+        return bg.crop((x, y, x + w, y + h))
     if style == "full-bleed":
-        return source.convert("RGBA")  # 整幅原图即底图
-    if background_path is None:
-        return Image.new("RGBA", foreground.size, (14, 11, 9, 255))  # 无背景时用深色底
-    bg = Image.open(background_path).convert("RGBA")
-    scale = max(foreground.width / bg.width, foreground.height / bg.height)
-    bg = bg.resize((max(1, round(bg.width * scale)), max(1, round(bg.height * scale))), Image.LANCZOS)
-    x, y = (bg.width - foreground.width) // 2, (bg.height - foreground.height) // 2
-    return bg.crop((x, y, x + foreground.width, y + foreground.height))
+        return source.convert("RGBA")  # source 已按整幅 cover 适配
+    return Image.new("RGBA", (w, h), (14, 11, 9, 255))  # 无背景时用深色底
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -602,6 +671,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--face", default=None, help="DIY 卡面底图（assets/faces/ 下）")
     parser.add_argument("--frame", default=None, help="DIY 边框（assets/frames/ 下）")
     parser.add_argument("--seal", default=None, help="DIY 卡封层（assets/seals/ 下，如镭射覆层）")
+    parser.add_argument("--seal-frame", default=None,
+                        help="DIY 边框卡封（assets/seals/ 下）；传 same 表示与卡牌卡封同素材")
+    parser.add_argument("--scale", type=float, default=1.0, help="卡面缩放（0.5~1.5，默认 1 不缩放）")
     parser.add_argument("--effect", default="none",
                         help="动画特效（3D 网页卡触发），可用逗号分隔多个 '名称@位置'，如 love@top,sparkle@右下 或 love@0.3:0.7")
     parser.add_argument("--back", default=None, help="卡背图片（默认 assets/backs/three-kingdoms-back.png）")
@@ -611,6 +683,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="透明主体浮于边框之上（PVZ 式立体感；默认边框盖住主体）")
     parser.add_argument("--outline", action="store_true",
                         help="透明主体加白色贴纸描边（类似贴纸边缘）")
+    parser.add_argument("--adaptive", type=int, choices=[0, 1], default=1,
+                        help="自适应开关：1=按上传图与卡面比例缩放裁剪；0=直接拉伸填满")
+    parser.add_argument("--adaptive-mode", type=int, choices=[1, 2], default=1,
+                        help="自适应方式：1=整幅判定（恒铺满，推荐）；2=透明主体判定（不足留白）")
     parser.add_argument("--json", action="store_true", help="以 JSON 输出结果（供其他工具解析）")
     args = parser.parse_args(argv)
 
@@ -646,12 +722,16 @@ def main(argv: list[str] | None = None) -> int:
             face=args.face,
             frame=args.frame,
             seal=args.seal,
+            seal_frame=args.seal_frame,
+            scale=args.scale,
             effects=effect_specs,
             back=args.back,
             card_size=args.card_size,
             compose=not args.no_compose,
             subject_over_frame=args.float_fg,
             subject_outline=args.outline,
+            adaptive=bool(args.adaptive),
+            adaptive_mode=args.adaptive_mode,
             progress=lambda step, total, msg: print(f"[{step}/{total}] {msg}", file=sys.stderr),
         )
     except ValueError as e:

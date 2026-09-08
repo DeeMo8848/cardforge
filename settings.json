@@ -1,4 +1,6 @@
 {
-  "seal_strength_front": 0.9,
-  "seal_strength_back": 0.5775
+  "seal_strength_front": 0.945,
+  "seal_strength_back": 0.5775,
+  "seal_frame_strength_front": 0.8,
+  "seal_frame_strength_back": 0.5
 }

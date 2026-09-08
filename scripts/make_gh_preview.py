@@ -56,6 +56,7 @@ def build(card_id: str) -> None:
         text_type=text.get("type", "none"),
         text_pos=text.get("pos"),
         subject_over_frame=bool(card.get("subject_over_frame")),
+        round_foreground=True,
         seal_strength_front=float(card.get("seal_strength_front", 0.945)),
         seal_strength_back=float(card.get("seal_strength_back", 0.5775)),
     )

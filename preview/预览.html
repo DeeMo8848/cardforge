@@ -6,11 +6,13 @@
 <title>预览 · 3D 镭射卡</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  html, body { width: 100%; height: 100%; overflow: hidden; }
+  html, body { width: 100%; height: 100%; overflow: hidden; overscroll-behavior: none; }
   body {
     background: radial-gradient(1200px 700px at 50% 20%, #2b2119 0%, #120d09 55%, #080605 100%);
     font-family: "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+    -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
   }
+  canvas { touch-action: none; }
   #stage { position: fixed; inset: 0; }
   .hud {
     position: fixed; top: 18px; left: 0; right: 0; text-align: center;
@@ -71,6 +73,40 @@ console.warn( 'Scripts "build/three.js" and "build/three.min.js" are deprecated 
     t.anisotropy = 8;
   }
   
+  (function () {
+    var orig = foregroundTexture;
+    var cv = document.createElement('canvas');
+    var t = new THREE.CanvasTexture(cv);
+    t.colorSpace = THREE.SRGBColorSpace;
+    t.anisotropy = 8;
+    foregroundTexture = t;
+    function round() {
+      var img = orig.image;
+      if (!img || !img.width || !img.height) { setTimeout(round, 30); return; }
+      cv.width = img.width;
+      cv.height = img.height;
+      var ctx = cv.getContext('2d');
+      ctx.clearRect(0, 0, cv.width, cv.height);
+      ctx.drawImage(img, 0, 0);
+      var r = Math.min(38.4 * cv.width / 900, cv.height * 0.5);
+      ctx.globalCompositeOperation = 'destination-in';
+      ctx.beginPath();
+      ctx.moveTo(r, 0);
+      ctx.lineTo(cv.width - r, 0);
+      ctx.arcTo(cv.width, 0, cv.width, r, r);
+      ctx.lineTo(cv.width, cv.height - r);
+      ctx.arcTo(cv.width, cv.height, cv.width - r, cv.height, r);
+      ctx.lineTo(r, cv.height);
+      ctx.arcTo(0, cv.height, 0, cv.height - r, r);
+      ctx.lineTo(0, r);
+      ctx.arcTo(0, 0, r, 0, r);
+      ctx.closePath();
+      ctx.fill();
+      t.needsUpdate = true;
+    }
+    round();
+  })();
+
 
   // ---- 主卡面 shader（复刻：镭射箔光 + 背面景深平移 + 圆角） ----
   const cardMaterial = new THREE.ShaderMaterial({
@@ -278,6 +314,7 @@ console.warn( 'Scripts "build/three.js" and "build/three.min.js" are deprecated 
   foregroundGroup.add(fgMesh);
 
   // ---- 主体描边层（白色贴纸边，可选；随前景组视差移动） ----
+  
   
 
   // ---- 边框 / 卡封叠加层（可选） ----
@@ -897,6 +934,7 @@ console.warn( 'Scripts "build/three.js" and "build/three.min.js" are deprecated 
       state.targetPhi = THREE.MathUtils.clamp(state.targetPhi, 0.42, Math.PI - 0.42);
       pointers.set(e.pointerId, e);
     } else if (pointers.size === 2) {
+      pointers.set(e.pointerId, e);
       const d = pinchDistance();
       if (prevPinch > 0 && d > 0) setRadius(state.targetRadius * (prevPinch / d));
       prevPinch = d;
@@ -962,18 +1000,23 @@ console.warn( 'Scripts "build/three.js" and "build/three.min.js" are deprecated 
     }
   }
 
-  // ---- 相机响应式 ----
+  // ---- 相机响应式（移动端用 visualViewport，避免地址栏伸缩触发缩放重置） ----
+  let wasNarrow = false;
   function resize() {
-    const w = window.innerWidth, h = window.innerHeight;
+    const vv = window.visualViewport;
+    const w = vv ? vv.width : window.innerWidth;
+    const h = vv ? vv.height : window.innerHeight;
     renderer.setSize(w, h);
     camera.aspect = w / h;
     const narrow = w / h < 0.72;
     camera.position.set(0, 0, narrow ? 6.8 : 5.1);
     camera.fov = narrow ? 40 : 38;
     camera.updateProjectionMatrix();
-    if (narrow) state.targetRadius = 6.8;
+    if (narrow && !wasNarrow) state.targetRadius = 6.8;
+    wasNarrow = narrow;
   }
   window.addEventListener('resize', resize);
+  if (window.visualViewport) window.visualViewport.addEventListener('resize', resize);
   resize();
 
   // ---- 主循环 ----

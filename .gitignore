@@ -42,3 +42,6 @@ webcard.py.bak
 *.log
 Thumbs.db
 .DS_Store
+
+# 浏览器自动化临时配置目录（browser profile）
+_edge_profile/

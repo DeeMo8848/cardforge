@@ -106,6 +106,7 @@ EFFECT_ENGINE_JS = r"""
       var mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false, toneMapped: false, rotation: 0 });
       if (color) mat.color.setHex(color);
       var s = new THREE.Sprite(mat);
+      s.renderOrder = 7;
       anchor.add(s);
       return s;
     }
@@ -210,7 +211,7 @@ EFFECT_ENGINE_JS = r"""
       var mo = motionParams(def);
       if (mo.type) p.motion = mo;
       p.sprite = spawnSprite(tex, def.color);
-      p.sprite.position.set(p.x, p.y, 0.02 + Math.random() * 0.02);
+      p.sprite.position.set(p.x, p.y, 0.03);
       particles.push(p);
     }
 
@@ -319,7 +320,7 @@ EFFECT_ENGINE_JS = r"""
 #   默认 —— 主体被边框遮盖（renderOrder 2/3，边框 4、卡封 5、文本 6）
 #   浮于边框上 —— 主体提升到边框之上、卡封之下（z 0.013/0.014，renderOrder 4.2/4.4）
 CARD_HTML_TEMPLATE_FG = r"""  const foregroundGroup = new THREE.Group();
-  flipGroup.add(foregroundGroup);
+  cardContent.add(foregroundGroup);
   const shadowMesh = new THREE.Mesh(
     new THREE.PlaneGeometry(CARD_WIDTH, CARD_HEIGHT),
     new THREE.MeshBasicMaterial({ map: foregroundTexture, color: 0x1c1008, transparent: true, opacity: 0.42, alphaTest: 0.02, depthWrite: false, side: THREE.FrontSide, toneMapped: false })
@@ -336,7 +337,7 @@ CARD_HTML_TEMPLATE_FG = r"""  const foregroundGroup = new THREE.Group();
   foregroundGroup.add(fgMesh);"""
 
 CARD_HTML_TEMPLATE_FG_FLOAT = r"""  const foregroundGroup = new THREE.Group();
-  flipGroup.add(foregroundGroup);
+  cardContent.add(foregroundGroup);
   const shadowMesh = new THREE.Mesh(
     new THREE.PlaneGeometry(CARD_WIDTH, CARD_HEIGHT),
     new THREE.MeshBasicMaterial({ map: foregroundTexture, color: 0x1c1008, transparent: true, opacity: 0.42, alphaTest: 0.02, depthWrite: false, side: THREE.FrontSide, toneMapped: false })
@@ -360,11 +361,13 @@ CARD_HTML_TEMPLATE = r"""<!DOCTYPE html>
 <title>__CARD_NAME__ · 3D 镭射卡</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  html, body { width: 100%; height: 100%; overflow: hidden; }
+  html, body { width: 100%; height: 100%; overflow: hidden; overscroll-behavior: none; }
   body {
     background: radial-gradient(1200px 700px at 50% 20%, #2b2119 0%, #120d09 55%, #080605 100%);
     font-family: "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+    -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
   }
+  canvas { touch-action: none; }
   #stage { position: fixed; inset: 0; }
   .hud {
     position: fixed; top: 18px; left: 0; right: 0; text-align: center;
@@ -432,6 +435,7 @@ __THREE_JS__
       uHover: { value: 0 },
       uAspect: { value: CARD_WIDTH / CARD_HEIGHT },
       uSeal: { value: 1.0 },
+      uContentScale: { value: 1.0 },
     },
     vertexShader: `
       varying vec2 vUv;
@@ -452,10 +456,12 @@ __THREE_JS__
     fragmentShader: `
       uniform sampler2D uFrontTexture;
       uniform sampler2D uBackTexture;
+      uniform sampler2D uInteriorMap;
       uniform vec2 uPointer;
       uniform float uHover;
       uniform float uAspect;
       uniform float uSeal;
+      uniform float uContentScale;
       varying vec2 vUv;
       varying vec3 vWorldNormal;
       varying vec3 vWorldPosition;
@@ -490,6 +496,12 @@ __THREE_JS__
         vec4 base;
         if (gl_FrontFacing) {
           base = texture2D(uFrontTexture, uv);
+          // 边框内区域蒙版：正面内容仅绘制在边框外围以内（含中空）；卡背不受蒙版限制。
+          // 卡面随 content_scale 缩放时（网格在 cardContent 组内），UV 需反算回卡片坐标，
+          // 否则蒙版随卡面一起缩放导致边缘错位（采样点偏离真实卡片位置）
+          // 缩放后网格 vUv 0..1 覆盖整卡几何，卡片坐标 = (vUv-0.5)*s + 0.5（s=uContentScale）
+          vec2 cardUv = (vUv - 0.5) * max(uContentScale, 1e-4) + 0.5;
+          base.a *= texture2D(uInteriorMap, cardUv).a;
         } else {
           vec2 pointerLook = (uPointer - vec2(0.5)) * uHover;
           vec2 cameraLook = vec2(
@@ -510,6 +522,9 @@ __THREE_JS__
           vec2 translation = look * (0.005 + 0.011 * depth);
           vec2 backUv = clamp(uv + translation * sceneMask, 0.001, 0.999);
           base = texture2D(uBackTexture, backUv);
+          // 卡背同样按边框内区域蒙版裁剪（与正面一致：翻面后轮廓跟随边框形状）
+          // 蒙版按物理坐标 vUv 采样（不随视差平移、不镜像）——镜像会导致蒙版左右颠倒，露出黑底
+          base.a *= texture2D(uInteriorMap, vUv).a;
         }
         if (!gl_FrontFacing) {
           // 复刻原版 xiaoqishuo 背面：卡背图 + 暖色边缘光（默认无箔光，卡封另加效果）
@@ -550,7 +565,7 @@ __THREE_JS__
     `,
   });
 
-  // ---- 辉光 aura ----
+  // ---- 辉光 aura（沿蒙版边缘绘制：采样蒙版有符号距离场，不再用固定圆角矩形） ----
   const auraMaterial = new THREE.ShaderMaterial({
     transparent: true,
     depthWrite: false,
@@ -558,7 +573,7 @@ __THREE_JS__
     side: THREE.DoubleSide,
     blending: THREE.AdditiveBlending,
     toneMapped: false,
-    uniforms: { uAspect: { value: CARD_WIDTH / CARD_HEIGHT }, uScale: { value: AURA_SCALE } },
+    uniforms: { uSdfMap: { value: null } },
     vertexShader: `
       varying vec2 vUv;
       void main() {
@@ -567,18 +582,17 @@ __THREE_JS__
       }
     `,
     fragmentShader: `
-      uniform float uAspect;
-      uniform float uScale;
+      uniform sampler2D uSdfMap;
       varying vec2 vUv;
-      float cardDistance(vec2 uv) {
-        vec2 scaled = vec2((uv.x - 0.5) * uAspect * uScale, (uv.y - 0.5) * uScale);
-        vec2 halfSize = vec2(0.5 * uAspect, 0.5);
-        float radius = 0.032;
-        vec2 edge = abs(scaled) - (halfSize - vec2(radius));
-        return length(max(edge, 0.0)) + min(max(edge.x, edge.y), 0.0) - radius;
+      // 蒙版有符号距离（卡高 UV 单位，正=蒙版外）：由 SDF 画布解码
+      // 编码约定：128=蒙版边缘；>128=外部距离（127 分度对应 0.15 卡高）；<128=内部（不发光）
+      // SDF 画布覆盖整张 aura 网格（uv 0..1），卡体位于画布中央、四周留辉光余量
+      float maskDistance(vec2 uv) {
+        float v = texture2D(uSdfMap, uv).r;
+        return (v * 255.0 - 128.0) / 127.0 * 0.15;
       }
       void main() {
-        float distance = cardDistance(vUv);
+        float distance = maskDistance(vUv);
         float outside = step(0.0, distance);
         float tightGlow = 1.0 - smoothstep(0.0, 0.014, distance);
         float softGlow = 1.0 - smoothstep(0.006, 0.06, distance);
@@ -589,6 +603,109 @@ __THREE_JS__
     `,
   });
 
+  // ---- 边框内区域蒙版画布（白=边框环+中空，黑=边框外围）----
+  // 正面整卡内容（卡面/主体/层1卡封）仅绘制在边框外围以内；默认全白（无边框时内容完整）
+  const interiorCanvas = document.createElement('canvas');
+  interiorCanvas.width = 450;
+  interiorCanvas.height = 600;
+  const interiorCtx = interiorCanvas.getContext('2d');
+  interiorCtx.fillStyle = '#ffffff';
+  interiorCtx.fillRect(0, 0, 450, 600);
+  const interiorTexture = new THREE.CanvasTexture(interiorCanvas);
+  cardMaterial.uniforms.uInteriorMap = { value: interiorTexture };
+
+  // ---- 蒙版有符号距离场画布（辉光沿蒙版边缘绘制，随蒙版重绘同步更新） ----
+  // 编码：128=蒙版边缘；>128=外部距离（127 分度对应 0.15 卡高 UV，≈0.35px/分度）；<128=内部（不发光）
+  const sdfCanvas = document.createElement('canvas');
+  sdfCanvas.width = 450;
+  sdfCanvas.height = 600;
+  const sdfCtx = sdfCanvas.getContext('2d');
+  const sdfTexture = new THREE.CanvasTexture(sdfCanvas);
+  sdfTexture.colorSpace = THREE.NoColorSpace;
+  function updateInteriorSdf() {
+    const W = 450, H = 600;
+    const N = W * H;
+    const out = sdfCtx.createImageData(W, H);
+    const od = out.data;
+    const src = interiorCtx.getImageData(0, 0, W, H).data;
+    let hasOutside = false;
+    for (let i = 0; i < N; i++) { if (src[i * 4 + 3] <= 8) { hasOutside = true; break; } }
+    // 画布覆盖整张 aura 网格（uv 0..1），卡体位于画布中央、四周留辉光余量（卡体占 1/AURA_SCALE）
+    const axScale = CARD_WIDTH / CARD_HEIGHT * AURA_SCALE; // 网格 x 范围（卡高单位）
+    const ayScale = AURA_SCALE;                            // 网格 y 范围（卡高单位）
+    const halfW = 0.5 * CARD_WIDTH / CARD_HEIGHT;          // 卡体半宽（卡高单位）
+    const halfH = 0.5;                                     // 卡体半高（卡高单位）
+    const radius = 0.032;                                  // 圆角半径（卡高单位），与原版辉光一致
+    if (!hasOutside) {
+      // 无边框（蒙版全白铺满）：回退为卡体圆角矩形距离，与旧辉光一致（卡体中央、四周为正距离）
+      for (let y = 0; y < H; y++) {
+        for (let x = 0; x < W; x++) {
+          const i = y * W + x;
+          const ax = (x / W - 0.5) * axScale, ay = (y / H - 0.5) * ayScale;
+          const ex = Math.abs(ax) - (halfW - radius), ey = Math.abs(ay) - (halfH - radius);
+          const s = Math.hypot(Math.max(ex, 0), Math.max(ey, 0)) + Math.min(Math.max(ex, ey), 0) - radius;
+          const v8 = Math.max(0, Math.min(255, Math.round(128 + s / 0.15 * 127)));
+          od[i * 4] = od[i * 4 + 1] = od[i * 4 + 2] = v8;
+          od[i * 4 + 3] = 255;
+        }
+      }
+      sdfCtx.putImageData(out, 0, 0);
+      sdfTexture.needsUpdate = true;
+      return;
+    }
+    // 有蒙版：把卡尺寸内蒙版嵌入画布中央（卡体占 1/AURA_SCALE），再做 3-4 倒角距离变换。
+    // 内部（蒙版白区）作为距离源 0 向四周传播；编码时内部仍为负值（不发光），外部为正距离
+    const d = new Float32Array(N);
+    const INF = 1e6;
+    const insideFlag = new Uint8Array(N);
+    const offX = W * 0.5 * (1 - 1 / AURA_SCALE);
+    const offY = H * 0.5 * (1 - 1 / AURA_SCALE);
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const i = y * W + x;
+        const mx = Math.round((x - offX) * AURA_SCALE);
+        const my = Math.round((y - offY) * AURA_SCALE);
+        const isIn = (mx >= 0 && mx < W && my >= 0 && my < H && src[(my * W + mx) * 4 + 3] > 8);
+        insideFlag[i] = isIn ? 1 : 0;
+        d[i] = isIn ? 0 : INF;
+      }
+    }
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const i = y * W + x;
+        let best = d[i], v;
+        if (x > 0 && (v = d[i - 1] + 3) < best) best = v;
+        if (x > 0 && y > 0 && (v = d[i - 451] + 4) < best) best = v;
+        if (y > 0 && (v = d[i - 450] + 3) < best) best = v;
+        if (x < 449 && y > 0 && (v = d[i - 449] + 4) < best) best = v;
+        d[i] = best;
+      }
+    }
+    for (let y = 599; y >= 0; y--) {
+      for (let x = 449; x >= 0; x--) {
+        const i = y * W + x;
+        let best = d[i], v;
+        if (x < 449 && (v = d[i + 1] + 3) < best) best = v;
+        if (x < 449 && y < 599 && (v = d[i + 451] + 4) < best) best = v;
+        if (y < 599 && (v = d[i + 450] + 3) < best) best = v;
+        if (x > 0 && y < 599 && (v = d[i + 449] + 4) < best) best = v;
+        d[i] = best;
+      }
+    }
+    const pxToChu = ayScale / H; // 1 画布像素 = ayScale/H 卡高
+    for (let i = 0; i < N; i++) {
+      // 内部像素 → -1.0（不发光）；外部：倒角权重÷3 得像素数，再换算卡高 UV 距离
+      const s = insideFlag[i] ? -1.0 : d[i] / 3 * pxToChu;
+      const v8 = Math.max(0, Math.min(255, Math.round(128 + s / 0.15 * 127)));
+      od[i * 4] = od[i * 4 + 1] = od[i * 4 + 2] = v8;
+      od[i * 4 + 3] = 255;
+    }
+    sdfCtx.putImageData(out, 0, 0);
+    sdfTexture.needsUpdate = true;
+  }
+  auraMaterial.uniforms.uSdfMap.value = sdfTexture;
+  updateInteriorSdf();
+
   // ---- 卡片组 ----
   const floatGroup = new THREE.Group();
   const tiltGroup = new THREE.Group();
@@ -596,8 +713,16 @@ __THREE_JS__
   floatGroup.add(tiltGroup);
   tiltGroup.add(flipGroup);
 
+  // 卡牌内容组：卡面/主体/特效锚点随 content_scale 缩放（背景/层1卡封/边框/文字/层2卡封整卡尺寸），
+  // 由界面"缩放"输入控制，默认 1.0 不缩放；卡面网格仅在卡面素材时随缩放组（背景底图不缩放）
+  const cardContent = new THREE.Group();
+  flipGroup.add(cardContent);
+
   const cardMesh = new THREE.Mesh(new THREE.PlaneGeometry(CARD_WIDTH, CARD_HEIGHT), cardMaterial);
   flipGroup.add(cardMesh);
+  const hitMeshes = [cardMesh];
+  __FACE_MESH_JS__
+  __BG_LAYER__
 
   const aura = new THREE.Mesh(
     new THREE.PlaneGeometry(CARD_WIDTH * AURA_SCALE, CARD_HEIGHT * AURA_SCALE),
@@ -611,6 +736,7 @@ __THREE_JS__
 
   // ---- 主体描边层（白色贴纸边，可选；随前景组视差移动） ----
   __OUTLINE_LAYER__
+  __FG_ADAPT_JS__
 
   // ---- 边框 / 卡封叠加层（可选） ----
   __FRAME_LAYER__
@@ -623,7 +749,7 @@ __THREE_JS__
 
   // ---- 特效系统（__EFFECTS__ 注入特效列表） ----
   var effectAnchor = new THREE.Group();
-  flipGroup.add(effectAnchor);
+  cardContent.add(effectAnchor);
   window.__EFFECT_ANCHOR__ = effectAnchor;
 __ENGINE_JS__
 
@@ -672,6 +798,7 @@ __ENGINE_JS__
       state.targetPhi = THREE.MathUtils.clamp(state.targetPhi, 0.42, Math.PI - 0.42);
       pointers.set(e.pointerId, e);
     } else if (pointers.size === 2) {
+      pointers.set(e.pointerId, e);
       const d = pinchDistance();
       if (prevPinch > 0 && d > 0) setRadius(state.targetRadius * (prevPinch / d));
       prevPinch = d;
@@ -726,7 +853,7 @@ __ENGINE_JS__
     const rect = canvas.getBoundingClientRect();
     ndc.set(((px - rect.left) / rect.width) * 2 - 1, -((py - rect.top) / rect.height) * 2 + 1);
     raycaster.setFromCamera(ndc, camera);
-    const hits = raycaster.intersectObject(cardMesh);
+    const hits = raycaster.intersectObjects(hitMeshes);
     if (hits.length) {
       pointer.copy(hits[0].uv);
       hover.current = 1;
@@ -737,18 +864,23 @@ __ENGINE_JS__
     }
   }
 
-  // ---- 相机响应式 ----
+  // ---- 相机响应式（移动端用 visualViewport，避免地址栏伸缩触发缩放重置） ----
+  let wasNarrow = false;
   function resize() {
-    const w = window.innerWidth, h = window.innerHeight;
+    const vv = window.visualViewport;
+    const w = vv ? vv.width : window.innerWidth;
+    const h = vv ? vv.height : window.innerHeight;
     renderer.setSize(w, h);
     camera.aspect = w / h;
     const narrow = w / h < 0.72;
     camera.position.set(0, 0, narrow ? 6.8 : 5.1);
     camera.fov = narrow ? 40 : 38;
     camera.updateProjectionMatrix();
-    if (narrow) state.targetRadius = 6.8;
+    if (narrow && !wasNarrow) state.targetRadius = 6.8;
+    wasNarrow = narrow;
   }
   window.addEventListener('resize', resize);
+  if (window.visualViewport) window.visualViewport.addEventListener('resize', resize);
   resize();
 
   // ---- 主循环 ----
@@ -796,6 +928,8 @@ __ENGINE_JS__
 __SEAL_TICK__
 
     __fx.tick(dt);
+    // 特效属于正面装饰：翻到背面（绕 Y 转过 90°）时隐藏，避免叠在卡背上
+    effectAnchor.visible = Math.abs(flipGroup.rotation.y) < Math.PI * 0.5;
 
     renderer.render(scene, camera);
   }
@@ -925,9 +1059,9 @@ def _overlay_layer_js(rel: str | None, z: float, order: int, side: str = "THREE.
         "      new THREE.MeshBasicMaterial({ map: t, transparent: true, depthWrite: false, side: " + side + ", toneMapped: false, opacity: " + str(opacity) + " })\n"
         "    );\n"
         "    m.position.set(0, 0, " + str(z) + ");\n"
-        "    m.renderOrder = " + str(order) + ";\n"
-        "    flipGroup.add(m);\n"
-        "  })();\n"
+    "    m.renderOrder = " + str(order) + ";\n"
+    "    flipGroup.add(m);\n"
+    "  })();\n"
     )
 
 
@@ -951,11 +1085,15 @@ def _outline_layer_js(rel: str | None, z: float, order: float) -> str:
     )
 
 
-def _frame_layer_js(rel: str | None, z: float, order: int, fit_subject: bool = False) -> str:
+def _frame_layer_js(rel: str | None, z: float, order: int, fit_subject: bool = False,
+                    adapt_limit: float | None = None, interior_rel: str | None = None) -> str:
     """边框叠加层 JS。fit_subject 时按前景主体包围盒缩放边框（否则整卡），仅正面渲染。
 
     主体包围盒在浏览器端从前景纹理 alpha 计算（无需服务端 numpy），
     边框缩放到包围盒 + 边距并居中，保证未开启浮于边框时边框与主体等高或略高。
+    adapt_limit: 文本型主体自适应缩放比例（<1 时边框随主体同步缩小上移）。
+    interior_rel: 边框内区域蒙版图（白=边框环+中空，黑=边框外围），按边框实际绘制
+    形态缩放到全卡画布，作为整卡内容的裁剪蒙版（卡面/主体/层1卡封不超出边框外围）。
     """
     if not rel:
         return ""
@@ -966,6 +1104,17 @@ def _frame_layer_js(rel: str | None, z: float, order: int, fit_subject: bool = F
             "    t.colorSpace = THREE.SRGBColorSpace;\n"
             "    t.anisotropy = 8;\n"
             "    var pad = 0.03;\n"
+            "    var adaptLimit = " + ("null" if adapt_limit is None else json.dumps(adapt_limit)) + ";\n"
+            "    var lastFit = null;\n"
+            "    var interiorMaskImg = null;\n"
+            + ("    loader.load(" + json.dumps(interior_rel) + ", function (it) { interiorMaskImg = it.image; if (lastFit) drawInterior(lastFit); });\n" if interior_rel else "")
+            + "    function drawInterior(f) {\n"
+            "      if (!interiorMaskImg || !interiorMaskImg.width) return;\n"
+            "      interiorCtx.clearRect(0, 0, 450, 600);\n"
+            "      interiorCtx.drawImage(interiorMaskImg, (f.cx - f.fw / 2) * 450, (f.cy - f.fh / 2) * 600, f.fw * 450, f.fh * 600);\n"
+            "      interiorTexture.needsUpdate = true;\n"
+            "      updateInteriorSdf();\n"
+            "    }\n"
             "    function addFrame(fw, fh, cx, cy) {\n"
             "      var m = new THREE.Mesh(\n"
             "        new THREE.PlaneGeometry(fw * CARD_WIDTH, fh * CARD_HEIGHT),\n"
@@ -979,7 +1128,7 @@ def _frame_layer_js(rel: str | None, z: float, order: int, fit_subject: bool = F
             "    var tries = 0;\n"
             "    function fit() {\n"
             "      var img = foregroundTexture.image;\n"
-            "      if (!img || !img.width) { if (++tries > 200) { addFrame(1, 1, 0.5, 0.5); return; } setTimeout(fit, 30); return; }\n"
+            "      if (!img || !img.width) { if (++tries > 200) { var dl = adaptLimit || 1; lastFit = { fw: dl, fh: dl, cx: 0.5, cy: 0.5 * dl }; addFrame(dl, dl, 0.5, 0.5 * dl); drawInterior(lastFit); return; } setTimeout(fit, 30); return; }\n"
             "      var sw = 200, sh = Math.max(1, Math.round(sw * img.height / img.width));\n"
             "      var cv = document.createElement('canvas');\n"
             "      cv.width = sw; cv.height = sh;\n"
@@ -995,60 +1144,67 @@ def _frame_layer_js(rel: str | None, z: float, order: int, fit_subject: bool = F
             "          }\n"
             "        }\n"
             "      }\n"
-            "      if (x1 < 0) { addFrame(1, 1, 0.5, 0.5); return; }\n"
+            "      if (x1 < 0) { var dl = adaptLimit || 1; lastFit = { fw: dl, fh: dl, cx: 0.5, cy: 0.5 * dl }; addFrame(dl, dl, 0.5, 0.5 * dl); drawInterior(lastFit); return; }\n"
             "      var fw = Math.min((x1 - x0 + 1) / sw + 2 * pad, 1.0);\n"
             "      var fh = Math.min((y1 - y0 + 1) / sh + 2 * pad, 1.0);\n"
             "      var cx = Math.min(Math.max(((x0 + x1 + 1) / 2) / sw, fw / 2), 1 - fw / 2);\n"
             "      var cy = Math.min(Math.max(((y0 + y1 + 1) / 2) / sh, fh / 2), 1 - fh / 2);\n"
+            "      if (adaptLimit) {\n"
+            "        fw = Math.min(fw * adaptLimit, 1);\n"
+            "        fh = Math.min(fh * adaptLimit, 1);\n"
+            "        cx = Math.min(Math.max(cx, fw / 2), 1 - fw / 2);\n"
+            "        cy = cy * adaptLimit;\n"
+            "      }\n"
+            "      lastFit = { fw: fw, fh: fh, cx: cx, cy: cy };\n"
             "      addFrame(fw, fh, cx, cy);\n"
+            "      drawInterior(lastFit);\n"
             "    }\n"
             "    fit();\n"
             "  })();\n"
         )
-    return _overlay_layer_js(rel, z, order, "THREE.FrontSide")
+    overlay = _overlay_layer_js(rel, z, order, "THREE.FrontSide")
+    if interior_rel:
+        overlay += (
+            "  (function () {\n"
+            "    loader.load(" + json.dumps(interior_rel) + ", function (t) {\n"
+            "      interiorCtx.clearRect(0, 0, 450, 600);\n"
+            "      interiorCtx.drawImage(t.image, 0, 0, 450, 600);\n"
+            "      interiorTexture.needsUpdate = true;\n"
+            "      updateInteriorSdf();\n"
+            "    });\n"
+            "  })();\n"
+        )
+    return overlay
 
 
 # ---- 冷裱膜动态光效（内置膜名 → 光效参数） ----
-# mode: sparkle=图案点阵闪烁 / beam=定向光带 / rainbow=随角变色 / glow=柔光晕 / none=无
+# mode: sparkle=图案点阵闪烁 / beam=定向光带 / rainbow=随角变色 / glow=柔光晕 / matte=哑光雾面 / none=无
 # pattern: canvas 图样（dot/sparkle/cross/diamond/star5/heart/snowflake/sakura/butterfly/pinwheel）
+# jitter/randScale: sparkle 不规则分布（每格随机偏移 + 随机大小，整体仍均匀铺满）
 SEAL_EFFECTS = {
-    "透明膜": {"mode": "none"},
-    "哑光膜": {"mode": "none"},
+    "亚光膜": {"mode": "matte", "color": (255, 255, 250), "strength": 0.36, "grain": 7.0},
     "磨砂膜": {"mode": "glow", "color": (214, 222, 232), "strength": 0.22, "grain": 7.0, "speed": 0.8, "rainbow": 0.3},
-    "满天星闪光膜": {"mode": "sparkle", "pattern": "sparkle", "color": (255, 240, 200), "scale": 9.0, "strength": 0.72, "speed": 1.3, "rainbow": 0.65, "twinkle": 1.0, "twinkleShape": 1.0},
-    "拉丝闪光膜": {"mode": "beam", "dir": (0.97, 0.26), "color": (238, 222, 190), "scale": 26.0, "power": 3.5, "strength": 0.68, "speed": 1.2, "rainbow": 0.7},
-    "星幻细闪膜": {"mode": "sparkle", "pattern": "dot", "color": (255, 255, 250), "scale": 16.0, "strength": 0.5, "speed": 1.0, "rainbow": 0.55, "twinkle": 1.0, "twinkleShape": 1.0},
-    "蚕丝膜": {"mode": "beam", "dir": (0.35, 0.94), "color": (226, 228, 236), "scale": 9.0, "power": 2.5, "strength": 0.7, "speed": 0.9, "rainbow": 0.6},
-    "钻石膜": {"mode": "sparkle", "pattern": "diamond", "color": (255, 250, 232), "scale": 8.0, "strength": 0.68, "speed": 1.2, "rainbow": 0.65, "twinkle": 1.0, "twinkleShape": 1.0},
-    "油画膜": {"mode": "glow", "color": (226, 192, 142), "strength": 0.5, "grain": 4.5, "speed": 0.7, "rainbow": 0.35},
+    "米字膜2": {"mode": "sparkle", "pattern": "sparkle", "color": (255, 240, 200), "scale": 9.0, "strength": 0.72, "speed": 1.3, "rainbow": 0.65, "twinkle": 1.0, "twinkleShape": 1.0},
+    "菱形": {"mode": "sparkle", "pattern": "diamond", "color": (255, 250, 232), "scale": 8.0, "strength": 0.68, "speed": 1.2, "rainbow": 0.65, "twinkle": 1.0, "twinkleShape": 1.0},
     "十字膜": {"mode": "sparkle", "pattern": "cross", "color": (255, 248, 226), "scale": 10.0, "strength": 0.68, "speed": 1.3, "rainbow": 0.6, "twinkle": 1.0, "twinkleShape": 1.0},
-    "皮纹膜": {"mode": "glow", "color": (212, 182, 142), "strength": 0.42, "grain": 12.0, "speed": 0.9, "rainbow": 0.3},
-    "猫眼膜": {"mode": "sparkle", "pattern": "dot", "color": (255, 244, 212), "scale": 5.0, "strength": 0.85, "speed": 0.6, "rainbow": 0.7, "twinkle": 1.0, "twinkleShape": 1.0},
     "玻璃膜": {"mode": "beam", "dir": (0.8, 0.6), "color": (255, 255, 255), "scale": 4.0, "power": 2.0, "strength": 0.7, "speed": 0.7, "rainbow": 0.6},
     "彩虹膜": {"mode": "rainbow", "strength": 0.9, "power": 2.5, "dir": (0.87, 0.5)},
-    "星空膜": {"mode": "sparkle", "pattern": "dot", "color": (196, 210, 255), "scale": 18.0, "strength": 0.8, "speed": 0.5, "rainbow": 0.55, "twinkle": 1.0, "twinkleShape": 1.0},
-    "烟花膜": {"mode": "sparkle", "pattern": "sparkle", "color": (255, 182, 162), "scale": 6.0, "strength": 0.75, "speed": 1.5, "rainbow": 0.6, "twinkle": 1.0, "twinkleShape": 1.0},
+    "星空膜": {"mode": "sparkle", "pattern": "dot", "color": (196, 210, 255), "scale": 20.0, "strength": 0.8, "speed": 0.5, "rainbow": 0.55, "twinkle": 1.0, "twinkleShape": 1.0, "jitter": 0.32, "randScale": 0.65},
+    "米字膜1": {"mode": "sparkle", "pattern": "sparkle", "color": (255, 182, 162), "scale": 6.0, "strength": 0.75, "speed": 1.5, "rainbow": 0.6, "twinkle": 1.0, "twinkleShape": 1.0},
     "爱心膜": {"mode": "sparkle", "pattern": "heart", "color": (255, 170, 186), "scale": 9.0, "strength": 0.7, "speed": 1.2, "rainbow": 0.65, "twinkle": 1.0, "twinkleShape": 1.0},
     "小星星膜": {"mode": "sparkle", "pattern": "star5", "color": (255, 236, 172), "scale": 12.0, "strength": 0.72, "speed": 1.1, "rainbow": 0.6, "twinkle": 1.0, "twinkleShape": 1.0},
     "星星膜": {"mode": "sparkle", "pattern": "star5", "color": (255, 230, 152), "scale": 6.0, "strength": 0.72, "speed": 1.0, "rainbow": 0.6, "twinkle": 1.0, "twinkleShape": 1.0},
-    "雪花膜": {"mode": "sparkle", "pattern": "snowflake", "color": (226, 240, 255), "scale": 8.0, "strength": 0.75, "speed": 1.0, "rainbow": 0.5, "twinkle": 1.0, "twinkleShape": 1.0},
+    "雪花膜": {"mode": "sparkle", "pattern": "snowflake", "color": (226, 240, 255), "scale": 8.0, "strength": 0.75, "speed": 1.0, "rainbow": 0.5, "twinkle": 1.0, "twinkleShape": 1.0, "jitter": 0.24, "randScale": 0.38},
     "樱花膜": {"mode": "sparkle", "pattern": "sakura", "color": (255, 190, 206), "scale": 10.0, "strength": 0.72, "speed": 1.1, "rainbow": 0.6, "twinkle": 1.0, "twinkleShape": 1.0},
-    "闪点膜": {"mode": "sparkle", "pattern": "dot", "color": (255, 250, 236), "scale": 14.0, "strength": 0.68, "speed": 1.2, "rainbow": 0.55, "twinkle": 1.0, "twinkleShape": 1.0},
     "星光细闪膜": {"mode": "sparkle", "pattern": "dot", "color": (255, 250, 235), "scale": 7.0, "strength": 0.62, "speed": 1.0, "rainbow": 0.6, "twinkle": 1.0},
     "测试膜": {"mode": "sparkle", "pattern": "dot", "color": (255, 250, 235), "scale": 7.0, "strength": 0.62, "speed": 1.0, "rainbow": 0.6, "twinkle": 1.0, "twinkleShape": 1.0},
     "流麻膜": {"mode": "sparkle", "pattern": "dot", "color": (255, 250, 235), "scale": 14.0, "strength": 0.6, "speed": 1.2, "rainbow": 0.55, "twinkleFlow": 1.0, "twinkleOnly": 1.0},
-    "彩珠膜": {"mode": "sparkle", "pattern": "dot", "color": (255, 222, 182), "scale": 7.0, "strength": 0.75, "speed": 1.1, "rainbow": 0.6, "twinkle": 1.0, "twinkleShape": 1.0},
-    "句号膜": {"mode": "sparkle", "pattern": "dot", "color": (255, 246, 226), "scale": 11.0, "strength": 0.7, "speed": 1.0, "rainbow": 0.5, "twinkle": 1.0, "twinkleShape": 1.0},
-    "蝴蝶膜": {"mode": "sparkle", "pattern": "butterfly", "color": (255, 202, 192), "scale": 6.0, "strength": 0.72, "speed": 0.9, "rainbow": 0.6, "twinkle": 1.0, "twinkleShape": 1.0},
-    "斜光柱膜": {"mode": "beam", "dir": (0.87, 0.5), "color": (255, 240, 200), "scale": 3.5, "power": 1.8, "strength": 0.68, "speed": 0.9, "rainbow": 0.7},
-    "风车膜": {"mode": "sparkle", "pattern": "pinwheel", "color": (255, 212, 152), "scale": 8.0, "strength": 0.72, "speed": 1.2, "rainbow": 0.6, "twinkle": 1.0, "twinkleShape": 1.0},
+    "点状膜1": {"mode": "sparkle", "pattern": "dot", "color": (255, 222, 182), "scale": 7.0, "strength": 0.75, "speed": 1.1, "rainbow": 0.6, "twinkle": 1.0, "twinkleShape": 1.0},
+    "点状膜2": {"mode": "sparkle", "pattern": "dot", "color": (255, 246, 226), "scale": 11.0, "strength": 0.7, "speed": 1.0, "rainbow": 0.5, "twinkle": 1.0, "twinkleShape": 1.0},
+    "风车膜": {"mode": "sparkle", "pattern": "pinwheel", "color": (255, 212, 152), "scale": 8.0, "strength": 0.72, "speed": 1.2, "rainbow": 0.6, "twinkle": 1.0, "twinkleShape": 1.0, "jitter": 0.26, "randScale": 0.45},
     # A 类：真密铺（格子形状即图案，图案互相重叠、无方块感，整格闪光，学星光细闪膜）
-    "A11三角格膜": {"mode": "grid", "gridType": "tri", "color": (255, 248, 226), "scale": 6.0, "strength": 0.72, "speed": 1.1, "rainbow": 0.6, "twinkle": 1.0},
-    "A22圆格膜": {"mode": "grid", "gridType": "circle", "color": (255, 250, 235), "scale": 6.5, "strength": 0.72, "speed": 1.0, "rainbow": 0.6, "twinkle": 1.0},
     "A33六角格膜": {"mode": "grid", "gridType": "hex", "pattern": "hexagon", "color": (255, 248, 226), "scale": 5.0, "strength": 0.7, "speed": 1.0, "rainbow": 0.6, "twinkle": 1.0},
     "A44碎玻璃膜": {"mode": "voronoi", "color": (255, 250, 238), "scale": 7.0, "strength": 0.72, "speed": 1.0, "rainbow": 0.75},
-    "A55雪花格膜": {"mode": "grid", "gridType": "hex", "pattern": "snowflake6", "color": (226, 240, 255), "scale": 4.5, "strength": 0.75, "speed": 1.0, "rainbow": 0.55, "twinkle": 1.0},
-    "A66几何格膜": {"mode": "grid", "gridType": "hex", "pattern": "hexagram", "color": (255, 248, 226), "scale": 4.5, "strength": 0.72, "speed": 1.1, "rainbow": 0.6, "twinkle": 1.0},
     # B 类：格子平铺后格子内再画图形（仅图形闪光，学测试膜）
     "B11圆环膜": {"mode": "sparkle", "pattern": "ring", "color": (255, 250, 235), "scale": 7.0, "strength": 0.7, "speed": 1.1, "rainbow": 0.6, "twinkle": 1.0, "twinkleShape": 1.0},
     "B22闪电膜": {"mode": "sparkle", "pattern": "lightning", "color": (255, 244, 210), "scale": 7.0, "strength": 0.72, "speed": 1.3, "rainbow": 0.6, "twinkle": 1.0, "twinkleShape": 1.0},
@@ -1213,8 +1369,17 @@ _SEAL_PATTERN_JS = r"""
 """
 
 
-def _seal_layer_js(effect: dict, front_strength: float = 0.945, back_strength: float = 0.5775) -> str:
-    """冷裱膜动态光效层 JS：独立 ShaderMaterial，光线随悬停聚焦、随视角与时间流动。"""
+def _seal_layer_js(effect: dict, front_strength: float = 0.945, back_strength: float = 0.5775,
+                   parent: str = "flipGroup", z: float = 0.02, order: float = 5.2,
+                   mask_rel: str | None = None, front_only: bool = False,
+                   mask_canvas: str | None = None) -> str:
+    """冷裱膜动态光效层 JS：独立 ShaderMaterial，光线随悬停聚焦、随视角与时间流动。
+
+    front_only: True 时仅正面渲染（有边框时层1卡封不再出现在卡背，卡背统一用边框卡封）。
+    mask_rel: 静态蒙版图路径（如边框 PNG 的 alpha 作层2 卡封裁剪）。
+    mask_canvas: 共享动态蒙版画布纹理的 JS 变量名（如 interiorTexture，层1 卡封按
+    边框内区域裁剪，随边框实际绘制形态由 drawInterior 更新），与 mask_rel 二选一。
+    """
     mode = effect.get("mode", "none")
     if mode == "none":
         return ""
@@ -1228,6 +1393,10 @@ def _seal_layer_js(effect: dict, front_strength: float = 0.945, back_strength: f
     pat = effect.get("pattern")
     col = int(color[0]) << 16 | int(color[1]) << 8 | int(color[2])
     d0, d1 = effect.get("dir", (0.87, 0.5))
+    # 不规则分布（雪花/风车/星空等）：每格随机偏移 + 随机大小，打破规则网格（整体仍均匀铺满）
+    jitter = float(effect.get("jitter", 0.0))
+    rand_scale = float(effect.get("randScale", 0.0))
+    irregular = jitter > 0.0 or rand_scale > 0.0
 
     tex_code = ""
     uniform_decl = ""
@@ -1240,6 +1409,9 @@ def _seal_layer_js(effect: dict, front_strength: float = 0.945, back_strength: f
             "    sealPatternTex.colorSpace = THREE.SRGBColorSpace;\n"
         )
         uniform_decl = "    uPattern: { value: sealPatternTex },\n"
+        if irregular:
+            uniform_decl += "    uJitter: { value: " + str(jitter) + " },\n"
+            uniform_decl += "    uRandScale: { value: " + str(rand_scale) + " },\n"
 
     # 各模式光效：共享「薄膜基面 sheen + 边缘菲涅尔 edge + 随视角扫动的光带 bandLight」，
     # 无时间动画、无指针光球（杜绝频闪），光效由拖动旋转卡片触发
@@ -1249,7 +1421,12 @@ def _seal_layer_js(effect: dict, front_strength: float = 0.945, back_strength: f
         tile_code = (
             "    vec2 tile = vUv * uScale;\n"
             + ("    tile.x += 0.5 * mod(floor(tile.y), 2.0);\n" if brick else "")
-            + "    float pat = texture2D(uPattern, fract(tile)).a;\n"
+            + ("    // 不规则：每格按 cell hash 随机偏移与缩放（大小不一、分布不均，整体仍均匀铺满）\n"
+               "    vec2 cellId = floor(tile);\n"
+               "    vec2 jh = sealHash2(cellId);\n"
+               "    vec2 puv = (fract(tile + (jh - 0.5) * uJitter) - 0.5) * (1.0 + (jh.x * 2.0 - 1.0) * uRandScale) + 0.5;\n"
+               "    float pat = texture2D(uPattern, puv).a;\n" if irregular else
+               "    float pat = texture2D(uPattern, fract(tile)).a;\n")
         )
         tw = float(effect.get("twinkle", 0.0))
         flow = float(effect.get("twinkleFlow", 0.0))
@@ -1404,6 +1581,14 @@ def _seal_layer_js(effect: dict, front_strength: float = 0.945, back_strength: f
             "    glow = min(glow, 1.0);\n"
             "    gl_FragColor = vec4(col * glow * uStrength, 1.0);\n"
         )
+    elif mode == "matte":
+        # 亚光：压掉高光反射，柔和漫反射雾面（随视角轻微变化，无时间动画）
+        frag = (
+            "    float matteN = 0.5 + 0.5 * sin(vUv.x * 80.0 * uGrain + vUv.y * 97.0 * uGrain + along * 1.8);\n"
+            "    float glow = 0.10 + 0.20 * facing + matteN * 0.07 + fres * 0.08;\n"
+            "    glow = min(glow, 1.0);\n"
+            "    gl_FragColor = vec4(uColor * glow * uStrength, 1.0);\n"
+        )
     else:  # glow
         frag = (
             "    float n = 0.0;\n"
@@ -1416,6 +1601,17 @@ def _seal_layer_js(effect: dict, front_strength: float = 0.945, back_strength: f
             "    vec3 effColor = mix(uColor, sealHueColor(uColor, uRainbow * (along * 0.6 + vUv.x * 0.5 + vUv.y * 0.4)), min(1.0, uRainbow * 1.2));\n"
             "    gl_FragColor = vec4(effColor * glow * uStrength, 1.0);\n"
         )
+
+    # 层2 边框蒙版：frag 追加 alpha 裁剪（须在 prefix 拼接前定义，否则不生效）
+    # 正面按当前蒙版源裁剪（层2=边框纹理 alpha，层1=边框内区域蒙版）；
+    # 卡背同样按边框内区域蒙版限制（与卡背主画面一致，不再整卡容器铺满）；蒙版统一按物理坐标 vUv 采样（不镜像）
+    mask_frag = ""
+    if mask_rel or mask_canvas:
+        mask_frag = ("  if (gl_FrontFacing) {\n"
+                     "    gl_FragColor.a *= texture2D(uFrameMap, vUv).a;\n"
+                     "  } else {\n"
+                     "    gl_FragColor.a *= texture2D(uInteriorMap, vUv).a;\n"
+                     "  }\n")
 
     vertex = (
         "varying vec2 vUv;\n"
@@ -1444,8 +1640,9 @@ def _seal_layer_js(effect: dict, front_strength: float = 0.945, back_strength: f
         "uniform float uRainbow;\n"
         "uniform float uFrontStrength;\n"
         "uniform float uBackStrength;\n"
+        + ("uniform float uJitter;\nuniform float uRandScale;\n" if irregular else "")
         + ("uniform sampler2D uPattern;\n" if mode == "sparkle" else "")
-        + ("vec2 sealHash2(vec2 p) {\n  return fract(sin(vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)))) * 43758.5453123);\n}\n" if mode == "voronoi" else "")
+        + ("vec2 sealHash2(vec2 p) {\n  return fract(sin(vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)))) * 43758.5453123);\n}\n" if (mode == "voronoi" or irregular) else "")
         + (("vec2 sealHexCell(vec2 p) {\n"
             "  vec2 r = vec2(1.0, 1.7320508);\n"
             "  vec2 h = r * 0.5;\n"
@@ -1525,21 +1722,41 @@ def _seal_layer_js(effect: dict, front_strength: float = 0.945, back_strength: f
         "  float bandLight = pow(max(0.0, along), uPower) * smoothstep(0.12, 0.6, tiltAmt);\n"
         "  float sheen = 0.03 + 0.045 * smoothstep(0.1, 0.7, tiltAmt);\n"
         "  float edge = fres * 0.18;\n"
-        + frag
+        + frag + mask_frag
         + "  // 卡背一面减弱卡封效果（翻面后 gl_FrontFacing 为 false），强度由界面可调\n"
         + "  gl_FragColor *= gl_FrontFacing ? uFrontStrength : uBackStrength;\n"
         + "  }\n"
     )
 
+    # 层2 边框蒙版：加载边框纹理，alpha 作蒙版（卡封只出现在边框非透明区域）
+    mask_js = ""
+    if mask_canvas:
+        # 共享动态蒙版画布（层1 卡封按边框内区域裁剪，随边框实际绘制形态更新）
+        mask_js = "    var sealFrameTex = " + mask_canvas + ";\n"
+        uniform_decl += "    uFrameMap: { value: sealFrameTex },\n"
+        prefix = prefix.replace("void main() {", "uniform sampler2D uFrameMap;\nvoid main() {", 1)
+    elif mask_rel:
+        mask_js = (
+            "    var sealFrameTex = loader.load(" + json.dumps(mask_rel) + ");\n"
+            "    sealFrameTex.colorSpace = THREE.SRGBColorSpace;\n"
+        )
+        uniform_decl += "    uFrameMap: { value: sealFrameTex },\n"
+        prefix = prefix.replace("void main() {", "uniform sampler2D uFrameMap;\nvoid main() {", 1)
+    if mask_rel or mask_canvas:
+        # 卡背蒙版：边框内区域蒙版（与卡背主画面一致），整卡脚本内定义的 interiorTexture
+        uniform_decl += "    uInteriorMap: { value: interiorTexture },\n"
+        prefix = prefix.replace("void main() {", "uniform sampler2D uInteriorMap;\nvoid main() {", 1)
+
     return (
         _SEAL_PATTERN_JS
         + "  (function () {\n"
         + tex_code
+        + mask_js
         + "    var sealMat = new THREE.ShaderMaterial({\n"
         "      transparent: true,\n"
         "      depthWrite: false,\n"
-        "      side: THREE.DoubleSide,\n"
-        "      blending: THREE.AdditiveBlending,\n"
+        + ("      side: THREE.FrontSide,\n" if front_only else "      side: THREE.DoubleSide,\n")
+        + "      blending: THREE.AdditiveBlending,\n"
         "      toneMapped: false,\n"
         "      uniforms: {\n"
       "        uAspect: { value: CARD_WIDTH / CARD_HEIGHT },\n"
@@ -1558,15 +1775,18 @@ def _seal_layer_js(effect: dict, front_strength: float = 0.945, back_strength: f
         "      fragmentShader: " + json.dumps(prefix) + ",\n"
         "    });\n"
         "    var sealMesh = new THREE.Mesh(new THREE.PlaneGeometry(CARD_WIDTH, CARD_HEIGHT), sealMat);\n"
-        "    sealMesh.position.set(0, 0, 0.02);\n"
-        "    sealMesh.renderOrder = 5.2;\n"
-        "    flipGroup.add(sealMesh);\n"
+        "    sealMesh.position.set(0, 0, " + str(z) + ");\n"
+        "    sealMesh.renderOrder = " + str(order) + ";\n"
+        "    " + parent + ".add(sealMesh);\n"
         "    window.__sealMat = sealMat;\n"
         "  })();\n"
     )
 
 
-def _custom_seal_layer_js(rel: str | None, front_strength: float = 0.945, back_strength: float = 0.5775) -> str:
+def _custom_seal_layer_js(rel: str | None, front_strength: float = 0.945, back_strength: float = 0.5775,
+                          parent: str = "flipGroup", z: float = 0.02, order: float = 5.2,
+                          mask_rel: str | None = None, front_only: bool = False,
+                          mask_canvas: str | None = None) -> str:
     """自定义 PNG 卡封动态光效层：整张贴图 + 随视角扫动的箔光带 + 彩虹色相迁移，正反双面显示。
 
     与内置膜（_seal_layer_js）相同的视角光效架构（sheen 基面 / edge 边缘菲涅尔 /
@@ -1574,6 +1794,9 @@ def _custom_seal_layer_js(rel: str | None, front_strength: float = 0.945, back_s
       - 图案直接整张采样用户 PNG（不平铺、不切割），PNG 的 alpha 作图案遮罩；
       - 图案之外完全透明（不留整卡光迹）；
       - 双面渲染，正面/背面强度由 uFrontStrength/uBackStrength 控制（与内置膜一致）。
+
+    front_only: True 时仅正面渲染（有边框时层1卡封不再出现在卡背，卡背统一用边框卡封）。
+    mask_canvas: 共享动态蒙版画布纹理的 JS 变量名（层1 卡封按边框内区域裁剪），与 mask_rel 二选一。
     """
     if not rel:
         return ""
@@ -1589,6 +1812,16 @@ def _custom_seal_layer_js(rel: str | None, front_strength: float = 0.945, back_s
         "    float a = pat * (gl_FrontFacing ? uFrontStrength : uBackStrength);\n"
         "    gl_FragColor = vec4(rgb, a);\n"
     )
+    # 层2 边框蒙版：frag 追加 alpha 裁剪（须在 prefix 拼接前定义，否则不生效）
+    # 正面按当前蒙版源裁剪（层2=边框纹理 alpha，层1=边框内区域蒙版）；
+    # 卡背同样按边框内区域蒙版限制（与卡背主画面一致，不再整卡容器铺满）；蒙版统一按物理坐标 vUv 采样（不镜像）
+    mask_frag = ""
+    if mask_rel or mask_canvas:
+        mask_frag = ("  if (gl_FrontFacing) {\n"
+                     "    gl_FragColor.a *= texture2D(uFrameMap, vUv).a;\n"
+                     "  } else {\n"
+                     "    gl_FragColor.a *= texture2D(uInteriorMap, vUv).a;\n"
+                     "  }\n")
     vertex = (
         "varying vec2 vUv;\n"
         "varying vec3 vWorldNormal;\n"
@@ -1661,19 +1894,35 @@ def _custom_seal_layer_js(rel: str | None, front_strength: float = 0.945, back_s
         "  float bandLight = pow(max(0.0, along), uPower) * smoothstep(0.12, 0.6, tiltAmt);\n"
         "  float sheen = 0.03 + 0.045 * smoothstep(0.1, 0.7, tiltAmt);\n"
         "  float edge = fres * 0.18;\n"
-        + frag
+        + frag + mask_frag
         + "  }\n"
     )
+    # 层2 边框蒙版：加载边框纹理，alpha 作蒙版（卡封只出现在边框非透明区域）
+    mask_js = ""
+    if mask_canvas:
+        mask_js = "    var sealFrameTex = " + mask_canvas + ";\n"
+        prefix = prefix.replace("void main() {", "uniform sampler2D uFrameMap;\nvoid main() {", 1)
+    elif mask_rel:
+        mask_js = (
+            "    var sealFrameTex = loader.load(" + json.dumps(mask_rel) + ");\n"
+            "    sealFrameTex.colorSpace = THREE.SRGBColorSpace;\n"
+        )
+        prefix = prefix.replace("void main() {", "uniform sampler2D uFrameMap;\nvoid main() {", 1)
+    if mask_rel or mask_canvas:
+        # 卡背蒙版：边框内区域蒙版（与卡背主画面一致），整卡脚本内定义的 interiorTexture
+        prefix = prefix.replace("void main() {", "uniform sampler2D uInteriorMap;\nvoid main() {", 1)
+
     return (
         "  (function () {\n"
         "    var t = loader.load(" + json.dumps(rel) + ");\n"
         "    t.colorSpace = THREE.SRGBColorSpace;\n"
         "    t.anisotropy = 8;\n"
-        "    var sealMat = new THREE.ShaderMaterial({\n"
+        + mask_js
+        + "    var sealMat = new THREE.ShaderMaterial({\n"
         "      transparent: true,\n"
         "      depthWrite: false,\n"
-        "      side: THREE.DoubleSide,\n"
-        "      toneMapped: false,\n"
+        + ("      side: THREE.FrontSide,\n" if front_only else "      side: THREE.DoubleSide,\n")
+        + "      toneMapped: false,\n"
         "      uniforms: {\n"
         "        uAspect: { value: CARD_WIDTH / CARD_HEIGHT },\n"
         "        uStrength: { value: " + str(strength) + " },\n"
@@ -1683,14 +1932,16 @@ def _custom_seal_layer_js(rel: str | None, front_strength: float = 0.945, back_s
         "        uFrontStrength: { value: " + str(front_strength) + " },\n"
         "        uBackStrength: { value: " + str(back_strength) + " },\n"
         "        uMap: { value: t },\n"
-        "      },\n"
+        + ("        uFrameMap: { value: sealFrameTex },\n" if (mask_rel or mask_canvas) else "")
+        + ("        uInteriorMap: { value: interiorTexture },\n" if (mask_rel or mask_canvas) else "")
+        + "      },\n"
         "      vertexShader: " + json.dumps(vertex) + ",\n"
         "      fragmentShader: " + json.dumps(prefix) + ",\n"
         "    });\n"
         "    var sealMesh = new THREE.Mesh(new THREE.PlaneGeometry(CARD_WIDTH, CARD_HEIGHT), sealMat);\n"
-        "    sealMesh.position.set(0, 0, 0.02);\n"
-        "    sealMesh.renderOrder = 5.2;\n"
-        "    flipGroup.add(sealMesh);\n"
+        "    sealMesh.position.set(0, 0, " + str(z) + ");\n"
+        "    sealMesh.renderOrder = " + str(order) + ";\n"
+        "    " + parent + ".add(sealMesh);\n"
         "    window.__sealMat = sealMat;\n"
         "  })();\n"
     )
@@ -1699,6 +1950,129 @@ def _custom_seal_layer_js(rel: str | None, front_strength: float = 0.945, back_s
 _SEAL_TICK_JS = (
     "  // 膜光效完全由视角驱动（拖动旋转触发）：无时间动画、无指针光球，杜绝频闪\n"
 )
+
+
+def _text_adapt_limit(text_type: str, description: str | None, text_pos: dict | None) -> float | None:
+    """文本型主体自适应缩放比例（文本区顶部 y1，默认 0.70）；非文本型返回 None。
+
+    文本型（boxed）无论是否已输入描述都缩放到卡图区（切换类型立即生效）；
+    无文本型/特殊文本型即使带描述也整幅显示。
+    """
+    if text_type != "boxed":
+        return None
+    limit = 0.70
+    if text_pos and all(k in text_pos for k in ("x1", "x2", "y1", "y2")):
+        try:
+            limit = min(1.0, max(0.05, float(text_pos["y1"])))
+        except (TypeError, ValueError):
+            pass
+    return limit
+
+
+def _fg_mask_js(content_scale: float = 1.0) -> str:
+    """边框内蒙版裁剪主体 JS：未浮于边框时，前景主体/描边/阴影不超出边框外围（与 2D 一致）。
+
+    把 interiorTexture 挂为主体材质 alphaMap（乘算 alpha），并用纹理 offset/repeat
+    把网格局部 UV 换算到卡片坐标：cardUv = (局部位置 / CARD_W) * s + 0.5。
+    主体组随 cardContent 缩放（s=content_scale），文本型几何还会被 _fg_adapt_js
+    运行时缩放/移位，这里轮询到稳定后同步变换（同 _fg_adapt_js 的节奏）。
+    """
+    return (
+        "  (function () {\n"
+        "    var s = " + str(content_scale) + ";\n"
+        "    function applyMask(m) {\n"
+        "      if (!m.isMesh || !m.material || !m.geometry || m.geometry.type !== 'PlaneGeometry') return;\n"
+        "      if (m.material.alphaMap === interiorTexture) return;\n"
+        "      m.material.alphaMap = interiorTexture;\n"
+        "      interiorTexture.center.set(0, 0);\n"
+        "      m.material.needsUpdate = true;\n"
+        "    }\n"
+        "    function syncTransform(m) {\n"
+        "      var g = m.geometry.parameters;\n"
+        "      var w = g.width, h = g.height;\n"
+        "      var t = m.material.alphaMap;\n"
+        "      t.repeat.set((w * s) / CARD_WIDTH, (h * s) / CARD_HEIGHT);\n"
+        "      t.offset.set((m.position.x - w / 2) * s / CARD_WIDTH + 0.5,\n"
+        "                   (m.position.y - h / 2) * s / CARD_HEIGHT + 0.5);\n"
+        "      t.needsUpdate = true;\n"
+        "    }\n"
+        "    function syncAll() {\n"
+        "      var pending = false;\n"
+        "      foregroundGroup.children.forEach(function (m) {\n"
+        "        if (!m.isMesh || !m.material || !m.geometry || m.geometry.type !== 'PlaneGeometry') return;\n"
+        "        applyMask(m);\n"
+        "        var g = m.geometry.parameters, t = m.material.alphaMap;\n"
+        "        var rw = (g.width * s) / CARD_WIDTH, rh = (g.height * s) / CARD_HEIGHT;\n"
+        "        var ox = (m.position.x - g.width / 2) * s / CARD_WIDTH + 0.5;\n"
+        "        var oy = (m.position.y - g.height / 2) * s / CARD_HEIGHT + 0.5;\n"
+        "        if (Math.abs(t.repeat.x - rw) > 1e-4 || Math.abs(t.repeat.y - rh) > 1e-4 ||\n"
+        "            Math.abs(t.offset.x - ox) > 1e-4 || Math.abs(t.offset.y - oy) > 1e-4) {\n"
+        "          syncTransform(m);\n"
+        "          pending = true;\n"
+        "        }\n"
+        "      });\n"
+        "      return pending;\n"
+        "    }\n"
+        "    // 主体描边层在本段之后才创建：轮询直到所有网格挂上蒙版且变换稳定\n"
+        "    (function tick() { if (syncAll()) setTimeout(tick, 30); })();\n"
+        "  })();\n"
+    )
+
+
+def _fg_adapt_js(adapt_limit: float | None, content_scale: float = 1.0) -> str:
+    """文本型前景适配 JS：前景平面按源图比例等比缩放（contain），完整显示、不裁剪、不变形，
+    居中于卡图区（卡顶到文本区顶部 y1），主体中心 = 余卡面范围中心（文本区下移时主体随之上移）。
+
+    与 2D 合成（compositor._contain）保持一致。
+    content_scale: 卡面缩放系数，同步用于 alphaMap 蒙版换算（主体随卡面缩放后蒙版不错位）。
+    """
+    if adapt_limit is None:
+        return ""
+    return (
+        "  (function () {\n"
+        "    var limit = " + json.dumps(adapt_limit) + ";\n"
+        "    var s = " + str(content_scale) + ";\n"
+        "    var adaptH = CARD_HEIGHT * limit;\n"
+        "    function fitMesh(m) {\n"
+        "      var tex = m.material && m.material.map;\n"
+        "      var img = tex && tex.image;\n"
+        "      if (!img || !img.width || !img.height) return false;\n"
+        "      var scale = Math.min(CARD_WIDTH / img.width, adaptH / img.height);\n"
+        "      var w = img.width * scale, h = img.height * scale;\n"
+        "      // px/py 是卡图区（卡顶到 y1，y 向下）内主体的左上角坐标，转成 three.js 中心坐标（y 向上）\n"
+        "      var px = (CARD_WIDTH - w) / 2;\n"
+        "      var py = (adaptH - h) / 2;\n"
+        "      var cx = px + w / 2 - CARD_WIDTH / 2;\n"
+        "      var cy = CARD_HEIGHT / 2 - (py + h / 2);\n"
+        "      if (Math.abs(m.geometry.parameters.width - w) > 1e-4 ||\n"
+        "          Math.abs(m.geometry.parameters.height - h) > 1e-4) {\n"
+        "        m.geometry = new THREE.PlaneGeometry(w, h);\n"
+        "      }\n"
+        "      m.position.x = cx;\n"
+        "      m.position.y = cy + (m.renderOrder <= 2 ? -0.034 : 0);\n"
+        "      tex.offset.set(0, 0);\n"
+        "      tex.repeat.set(1, 1);\n"
+        "      // 边框内蒙版：随几何/位置同步换算（主体缩放后仍精确裁剪在边框外围以内）\n"
+        "      var am = m.material.alphaMap;\n"
+        "      if (am) {\n"
+        "        am.center.set(0, 0);\n"
+        "        am.repeat.set((w * s) / CARD_WIDTH, (h * s) / CARD_HEIGHT);\n"
+        "        am.offset.set((cx - w / 2) * s / CARD_WIDTH + 0.5, (cy - h / 2) * s / CARD_HEIGHT + 0.5);\n"
+        "        am.needsUpdate = true;\n"
+        "      }\n"
+        "      return true;\n"
+        "    }\n"
+        "    function adapt() {\n"
+        "      var pending = false;\n"
+        "      foregroundGroup.children.forEach(function (m) {\n"
+        "        if (!m.isMesh || !m.geometry || m.geometry.type !== 'PlaneGeometry') return;\n"
+        "        if (!fitMesh(m)) pending = true;\n"
+        "      });\n"
+        "      if (pending) setTimeout(adapt, 30);\n"
+        "    }\n"
+        "    adapt();\n"
+        "  })();\n"
+    )
 
 
 def _text_layer_js(description: str | None, text_type: str, text_pos: dict | None) -> str:
@@ -1787,36 +2161,40 @@ def _text_layer_js(description: str | None, text_type: str, text_pos: dict | Non
 )
 
 
-# 整幅卡面：前景主体圆角与卡面一致（radius 0.032 与主卡 shader 一致，900x1200 下为 38.4px）
+# 主体圆角与卡面一致（radius 0.032 与主卡 shader 一致，900x1200 下为 38.4px）。
+# 按纹理实际尺寸重绘（不拉伸变形），圆角半径随宽度等比换算。
 FG_ROUND_JS = r"""
   (function () {
     var orig = foregroundTexture;
-    var cv = document.createElement('canvas');
-    cv.width = 900;
-    cv.height = 1200;
-    var ctx = cv.getContext('2d');
-    var t = new THREE.CanvasTexture(cv);
+    var t = new THREE.Texture();
     t.colorSpace = THREE.SRGBColorSpace;
     t.anisotropy = 8;
     foregroundTexture = t;
     function round() {
       var img = orig.image;
       if (!img || !img.width || !img.height) { setTimeout(round, 30); return; }
-      ctx.drawImage(img, 0, 0, cv.width, cv.height);
-      var r = 38.4;
+      var nv = document.createElement('canvas');
+      nv.width = img.width;
+      nv.height = img.height;
+      var ctx = nv.getContext('2d');
+      ctx.clearRect(0, 0, nv.width, nv.height);
+      ctx.drawImage(img, 0, 0);
+      var r = Math.min(38.4 * nv.width / 900, nv.height * 0.5);
       ctx.globalCompositeOperation = 'destination-in';
       ctx.beginPath();
       ctx.moveTo(r, 0);
-      ctx.lineTo(cv.width - r, 0);
-      ctx.arcTo(cv.width, 0, cv.width, r, r);
-      ctx.lineTo(cv.width, cv.height - r);
-      ctx.arcTo(cv.width, cv.height, cv.width - r, cv.height, r);
-      ctx.lineTo(r, cv.height);
-      ctx.arcTo(0, cv.height, 0, cv.height - r, r);
+      ctx.lineTo(nv.width - r, 0);
+      ctx.arcTo(nv.width, 0, nv.width, r, r);
+      ctx.lineTo(nv.width, nv.height - r);
+      ctx.arcTo(nv.width, nv.height, nv.width - r, nv.height, r);
+      ctx.lineTo(r, nv.height);
+      ctx.arcTo(0, nv.height, 0, nv.height - r, r);
       ctx.lineTo(0, r);
       ctx.arcTo(0, 0, r, 0, r);
       ctx.closePath();
       ctx.fill();
+      // three.js 对"创建纹理后再改画布尺寸"的重传不可靠，故加载完成后新建画布再挂载
+      t.image = nv;
       t.needsUpdate = true;
     }
     round();
@@ -1824,9 +2202,90 @@ FG_ROUND_JS = r"""
 """
 
 
+def _bg_layer_js(rel: str | None, face_scales: bool) -> str:
+    """独立背景层 JS：卡面单独缩放时背景/深色底整卡铺满（与 2D 合成一致）。
+
+    face_scales（卡面素材随缩放）时创建：整卡尺寸、挂 flipGroup 不随缩放、仅正面渲染；
+    有背景图时 cover 裁剪铺满整卡，无图时用深色底（14,11,9，同 2D 画布底色）；
+    圆角 + 边框内蒙版裁剪（与正面整卡内容一致）。返回空串时无需背景层。
+    """
+    if not face_scales:
+        return ""
+    if rel:
+        return (
+            "  (function () {\n"
+            "    var bgTex = loader.load(" + json.dumps(rel) + ");\n"
+            "    bgTex.colorSpace = THREE.SRGBColorSpace;\n"
+            "    bgTex.anisotropy = 8;\n"
+            "    var bgMat = new THREE.ShaderMaterial({\n"
+            "      transparent: true, depthWrite: false, side: THREE.FrontSide, toneMapped: false,\n"
+            "      uniforms: {\n"
+            "        uBgTexture: { value: bgTex },\n"
+            "        uTexAspect: { value: 0.75 },\n"
+            "        uAspect: { value: CARD_WIDTH / CARD_HEIGHT },\n"
+            "        uInteriorMap: { value: interiorTexture },\n"
+            "      },\n"
+            "      vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }',\n"
+            "      fragmentShader: [\n"
+            "        'uniform sampler2D uBgTexture; uniform float uTexAspect; uniform float uAspect; uniform sampler2D uInteriorMap; varying vec2 vUv;',\n"
+            "        'float bgRounded(vec2 uv, float radius){ vec2 s = vec2((uv.x-0.5)*uAspect, uv.y-0.5); vec2 hs = vec2(0.5*uAspect, 0.5); vec2 e = abs(s) - (hs - vec2(radius)); return length(max(e,0.0)) + min(max(e.x,e.y),0.0) - radius; }',\n"
+            "        'void main(){ if (bgRounded(vUv, 0.032) > 0.0) discard; vec2 bv = vUv; if (uTexAspect > uAspect) { bv.x = (vUv.x-0.5)*(uAspect/uTexAspect)+0.5; } else { bv.y = (vUv.y-0.5)*(uTexAspect/uAspect)+0.5; } vec4 c = texture2D(uBgTexture, clamp(bv, 0.001, 0.999)); c.a *= texture2D(uInteriorMap, vUv).a; gl_FragColor = c; }'\n"
+            "      ].join('\\n'),\n"
+            "    });\n"
+            "    loader.load(" + json.dumps(rel) + ", function (t) { bgMat.uniforms.uTexAspect.value = t.image.width / t.image.height; });\n"
+            "    var bgMesh = new THREE.Mesh(new THREE.PlaneGeometry(CARD_WIDTH, CARD_HEIGHT), bgMat);\n"
+            "    bgMesh.position.z = -0.004; bgMesh.renderOrder = -2; flipGroup.add(bgMesh);\n"
+            "  })();\n"
+        )
+    return (
+        "  (function () {\n"
+        "    var bgMat = new THREE.ShaderMaterial({\n"
+        "      transparent: true, depthWrite: false, side: THREE.FrontSide, toneMapped: false,\n"
+        "      uniforms: {\n"
+        "        uColor: { value: new THREE.Color(0x0e0b09) },\n"
+        "        uAspect: { value: CARD_WIDTH / CARD_HEIGHT },\n"
+        "        uInteriorMap: { value: interiorTexture },\n"
+        "      },\n"
+        "      vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }',\n"
+        "      fragmentShader: [\n"
+        "        'uniform vec3 uColor; uniform float uAspect; uniform sampler2D uInteriorMap; varying vec2 vUv;',\n"
+        "        'float bgRounded(vec2 uv, float radius){ vec2 s = vec2((uv.x-0.5)*uAspect, uv.y-0.5); vec2 hs = vec2(0.5*uAspect, 0.5); vec2 e = abs(s) - (hs - vec2(radius)); return length(max(e,0.0)) + min(max(e.x,e.y),0.0) - radius; }',\n"
+        "        'void main(){ if (bgRounded(vUv, 0.032) > 0.0) discard; vec4 c = vec4(uColor, 1.0); c.a *= texture2D(uInteriorMap, vUv).a; gl_FragColor = c; }'\n"
+        "      ].join('\\n'),\n"
+        "    });\n"
+        "    var bgMesh = new THREE.Mesh(new THREE.PlaneGeometry(CARD_WIDTH, CARD_HEIGHT), bgMat);\n"
+        "    bgMesh.position.z = -0.004; bgMesh.renderOrder = -2; flipGroup.add(bgMesh);\n"
+        "  })();\n"
+    )
+
+
+def _face_mesh_js(face_scales: bool) -> str:
+    """卡面/卡背双网格拆分 JS。
+
+    face_scales（卡面为卡面素材随缩放）时：主网格只渲染背面（卡背整卡不缩放），
+    另建卡面网格随 cardContent 缩放——缩放只作用卡面，卡背保持整卡尺寸。
+    """
+    if not face_scales:
+        return ""
+    return (
+        "  (function () {\n"
+        "    cardMaterial.side = THREE.BackSide;\n"
+        "    var faceMat = cardMaterial.clone();\n"
+        "    faceMat.side = THREE.FrontSide;\n"
+        "    faceMat.uniforms = cardMaterial.uniforms;\n"
+        "    var faceMesh = new THREE.Mesh(new THREE.PlaneGeometry(CARD_WIDTH, CARD_HEIGHT), faceMat);\n"
+        "    cardContent.add(faceMesh);\n"
+        "    hitMeshes.push(faceMesh);\n"
+        "    window.__FACE_MAT__ = faceMat;\n"
+        "  })();\n"
+    )
+
+
 def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: str, effects=None,
                     frame_rel: str | None = None, seal_rel: str | None = None,
                     seal_name: str | None = None,
+                    seal_frame_rel: str | None = None,
+                    seal_frame_name: str | None = None,
                     description: str | None = None, text_type: str = "none",
                     text_pos: dict | None = None,
                     subject_over_frame: bool = False,
@@ -1834,18 +2293,31 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
                     frame_fit_subject: bool = False,
                     outline_rel: str | None = None,
                     seal_strength_front: float = 0.945,
-                    seal_strength_back: float = 0.5775) -> str:
+                    seal_strength_back: float = 0.5775,
+                    seal_frame_strength_front: float = 0.8,
+                    seal_frame_strength_back: float = 0.5,
+                    content_scale: float = 1.0,
+                    face_scales: bool = False,
+                    interior_rel: str | None = None,
+                    background_rel: str | None = None) -> str:
     """生成自包含 3D 卡网页 HTML。
 
     effects: 特效实例列表 [{"name":..., "def": {...}, "pos": {...}}]，def 为完整特效参数。
     frame_rel/seal_rel: 可选的边框/卡封图片相对路径（叠加在卡面之上）。
     seal_name: 卡封素材原始文件名（如「拉丝闪光膜.png」）；命中内置冷裱膜时改用动态光效层。
+    seal_frame_rel/seal_frame_name: 层2 边框卡封（仅边框非透明区域显示，边框作蒙版）。
     description/text_type/text_pos: 卡面描述文字（text_type: none/transparent/boxed）。
     subject_over_frame: 透明主体浮于边框之上（PVZ 式立体感）；默认边框盖住主体。
     round_foreground: 整幅卡面时对前景主体做圆角遮罩（与卡面圆角一致）。
     frame_fit_subject: 未开启浮于边框时，边框按前景主体包围盒缩放（否则整卡）。
     outline_rel: 主体白色描边图（贴纸边，叠加在主体层之下、随前景视差移动）。
-    seal_strength_front/back: 卡封效果强度（正面/背面，默认 0.945/0.5775）。
+    seal_strength_front/back: 层1 卡牌卡封效果强度（正面/背面，默认 0.945/0.5775）。
+    seal_frame_strength_front/back: 层2 边框卡封效果强度（正面/背面，默认 0.8/0.5）。
+    face_scales: front 是否为卡面素材（True 时卡面网格随 content_scale 缩放；False 时
+    front 为背景底图整卡不缩放，仅主体随缩放）。缩放只作用卡面，背景/层1卡封不跟随。
+    interior_rel: 边框内区域蒙版图（白=边框环+中空，黑=边框外围），正面整卡内容按此裁剪，
+    边框实际绘制形态（整卡或按主体包围盒）在浏览器端动态对齐。
+    background_rel: 独立背景层素材（卡面单独缩放时背景整卡铺满，不随缩放；缺省用深色底）。
     """
     three_js = THREE_JS.read_text(encoding="utf-8")
     fg_js = (
@@ -1854,19 +2326,64 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
         if subject_over_frame else
         CARD_HTML_TEMPLATE_FG
     )
+    # 未浮于边框时：前景主体/描边/阴影按边框内区域蒙版裁剪（整卡内容不超出边框外围，与 2D 一致）
+    if frame_rel and not subject_over_frame:
+        fg_js += _fg_mask_js(content_scale)
+    # 层1 卡牌卡封：整卡尺寸、不随缩放（挂 flipGroup，z/order 介于主体与边框之间）；
+    # 有边框时仅正面渲染（卡背统一用边框卡封），并按边框内区域蒙版裁剪
     seal_layer = ""
+    effect = None
+    seal1_mask = "interiorTexture" if frame_rel else None
     if seal_name:
         key = Path(str(seal_name)).stem
         effect = SEAL_EFFECTS.get(key)
         if effect:
-            seal_layer = _seal_layer_js(effect, seal_strength_front, seal_strength_back)
+            seal_layer = _seal_layer_js(effect, seal_strength_front, seal_strength_back,
+                                        parent="flipGroup", z=0.008, order=3.5,
+                                        front_only=bool(frame_rel), mask_canvas=seal1_mask)
     if not seal_layer:
-        seal_layer = _custom_seal_layer_js(seal_rel, seal_strength_front, seal_strength_back)
+        seal_layer = _custom_seal_layer_js(seal_rel, seal_strength_front, seal_strength_back,
+                                           parent="flipGroup", z=0.008, order=3.5,
+                                           front_only=bool(frame_rel), mask_canvas=seal1_mask)
     if seal_layer:
-        # 使用卡封时默认箔光弱化一半（无卡封保持 uSeal=1.0 全量）
-        seal_layer += "  (function () { cardMaterial.uniforms.uSeal.value = 0.5; })();\n"
-    # 边框层：未开启浮于边框且 frame_fit_subject 时按主体包围盒缩放，否则整卡；均仅正面渲染
-    frame_layer = _frame_layer_js(frame_rel, 0.012, 4, frame_fit_subject and not subject_over_frame)
+        # 亚光膜（matte）几乎无箔光高光（更哑光），其余卡封默认箔光弱化一半
+        seal_u = 0.12 if (effect and effect.get("mode") == "matte") else 0.5
+        seal_layer += "  (function () { cardMaterial.uniforms.uSeal.value = " + str(seal_u) + "; })();\n"
+    # 层2 边框卡封：仅边框非透明区域显示（边框 PNG 的 alpha 作蒙版），整卡尺寸、高于边框；
+    # 无边框时无蒙版源，不绘制层2（保持现状仅层1）；双面渲染，卡背卡封与边框卡封统一
+    seal_frame_layer = ""
+    if frame_rel:
+        effect2 = None
+        if seal_frame_name:
+            key2 = Path(str(seal_frame_name)).stem
+            effect2 = SEAL_EFFECTS.get(key2)
+            if effect2:
+                seal_frame_layer = _seal_layer_js(
+                    effect2, seal_frame_strength_front, seal_frame_strength_back,
+                    parent="flipGroup", z=0.02, order=5.2, mask_rel=frame_rel)
+        if not seal_frame_layer:
+            seal_frame_layer = _custom_seal_layer_js(
+                seal_frame_rel, seal_frame_strength_front, seal_frame_strength_back,
+                parent="flipGroup", z=0.02, order=5.2, mask_rel=frame_rel)
+    # 卡面渲染缩放：可选项（默认 1.0 不缩放），由界面填写；仅缩放卡面/主体，背景与层1卡封不跟随。
+    # 卡面网格随缩放时（face_scales），主 shader 需按内容缩放反算蒙版采样坐标（uContentScale）
+    scale_js = ""
+    if content_scale != 1.0:
+        scale_js += "  (function () { cardContent.scale.setScalar(" + str(content_scale) + "); })();\n"
+    if face_scales and content_scale != 1.0:
+        scale_js += ("  (function () { cardMaterial.uniforms.uContentScale.value = " + str(content_scale)
+                     + "; if (window.__FACE_MAT__) window.__FACE_MAT__.uniforms.uContentScale.value = "
+                     + str(content_scale) + "; })();\n")
+    # 边框层：未开启浮于边框且 frame_fit_subject 时按主体包围盒缩放，否则整卡；均仅正面渲染。
+    # boxed 文本框边框素材按整卡设计（文本框在底部），不随主体缩放；
+    # 文本型卡图 cover 铺满卡图区，边框按整卡覆盖、不向内收缩
+    adapt_limit = _text_adapt_limit(text_type, description, text_pos)
+    frame_layer = _frame_layer_js(
+        frame_rel, 0.012, 4,
+        frame_fit_subject and not subject_over_frame and text_type != "boxed" and adapt_limit is None,
+        None,
+        interior_rel,
+    )
     # 主体描边层：渲染在主体之上（盖住主体边缘锯齿），浮起时随前景组抬升到边框之上
     outline_layer = _outline_layer_js(
         outline_rel, 0.0145 if subject_over_frame else 0.0065,
@@ -1879,11 +2396,15 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
         .replace("__FRONT__", front_rel)
         .replace("__FOREGROUND__", foreground_rel)
         .replace("__BACK__", back_rel)
+        .replace("__MESH_PARENT__", "flipGroup")
+        .replace("__FACE_MESH_JS__", _face_mesh_js(face_scales))
+        .replace("__BG_LAYER__", _bg_layer_js(background_rel, face_scales))
         .replace("__FG_BLOCK__", fg_js)
+        .replace("__FG_ADAPT_JS__", _fg_adapt_js(adapt_limit, content_scale))
         .replace("__FG_ROUND_JS__", FG_ROUND_JS if round_foreground else "")
         .replace("__OUTLINE_LAYER__", outline_layer)
         .replace("__FRAME_LAYER__", frame_layer)
-        .replace("__SEAL_LAYER__", seal_layer)
+        .replace("__SEAL_LAYER__", seal_layer + seal_frame_layer + scale_js)
         .replace("__SEAL_TICK__", _SEAL_TICK_JS)
         .replace("__TEXT_LAYER__", _text_layer_js(description, text_type, text_pos))
         .replace("__ENGINE_JS__", EFFECT_ENGINE_JS)

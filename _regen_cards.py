@@ -36,10 +36,14 @@ def regen(card_json: Path) -> bool:
     seal_path = layers.get("seal")
     frame_rel = seal_rel = None
     if frame_path and Path(frame_path).exists():
-        shutil.copy(frame_path, out_dir / "frame.png")
+        frame_dst = out_dir / "frame.png"
+        if Path(frame_path) != frame_dst:
+            shutil.copy(frame_path, frame_dst)
         frame_rel = "frame.png"
     if seal_path and Path(seal_path).exists():
-        shutil.copy(seal_path, out_dir / "seal.png")
+        seal_dst = out_dir / "seal.png"
+        if Path(seal_path) != seal_dst:
+            shutil.copy(seal_path, seal_dst)
         seal_rel = "seal.png"
     subject_over_frame = bool(d.get("subject_over_frame", extra.get("subject_over_frame")))
     subject_outline = bool(d.get("subject_outline", extra.get("subject_outline")))
@@ -50,6 +54,10 @@ def regen(card_json: Path) -> bool:
         seal_back = min(2.0, max(0.0, float(seal_back)))
     except (TypeError, ValueError):
         seal_front, seal_back = 0.945, 0.5775
+    try:
+        content_scale = min(1.5, max(0.5, float(extra.get("card_scale", 1.0))))
+    except (TypeError, ValueError):
+        content_scale = 1.0
     style = d.get("style") or "transparent"
     # 主体白色描边：启用时从前景图重新生成（贴纸边）
     outline_rel = None
@@ -69,16 +77,17 @@ def regen(card_json: Path) -> bool:
         "back.png",
         frame_rel=frame_rel,
         seal_rel=seal_rel,
-        seal_name=Path(seal_path).name if seal_path else None,
+        seal_name=d.get("seal_name") or (Path(seal_path).name if seal_path else None),
         description=text.get("description"),
         text_type=text.get("type") or "none",
         text_pos=text.get("pos"),
         subject_over_frame=subject_over_frame,
-        round_foreground=(style == "full-bleed"),
+        round_foreground=True,
         frame_fit_subject=(style != "full-bleed"),
         outline_rel=outline_rel,
         seal_strength_front=seal_front,
         seal_strength_back=seal_back,
+        content_scale=content_scale,
     )
     (out_dir / "card.html").write_text(html, encoding="utf-8")
 

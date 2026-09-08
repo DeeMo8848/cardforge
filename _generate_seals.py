@@ -111,13 +111,6 @@ def v_gradient(img: Image.Image, top_color, bottom_color, alpha_top, alpha_botto
 
 # ---------------- 各膜效果 ----------------
 
-def make_transparent():
-    img = new_canvas()
-    d = ImageDraw.Draw(img)
-    d.rectangle([0, 0, W, H], fill=(255, 255, 255, 8))          # 极淡光泽
-    d.rectangle([8, 8, W - 8, H - 8], outline=(255, 255, 255, 14), width=2)  # 边缘微反光
-    return img
-
 
 def make_frosted():
     img = new_canvas()
@@ -135,10 +128,11 @@ def make_frosted():
 
 
 def make_matte():
+    """亚光膜：柔和雾面质感（比原透明膜更明显的哑光）——均匀提亮 + 细颗粒噪点压反光。"""
     img = new_canvas()
     d = ImageDraw.Draw(img)
-    d.rectangle([0, 0, W, H], fill=(255, 255, 255, 26))
-    noise = Image.effect_noise((W, H), 26).convert("L").point(lambda v: int(v * 0.12))
+    d.rectangle([0, 0, W, H], fill=(255, 255, 255, 42))
+    noise = Image.effect_noise((W, H), 34).convert("L").point(lambda v: int(v * 0.2))
     noise = noise.filter(ImageFilter.GaussianBlur(2))
     img.alpha_composite(Image.merge("RGBA", [noise, noise, noise, noise]))
     return img
@@ -412,18 +406,6 @@ def make_sakura():
             py = cy + s * 1.05 * math.sin(ang)
             d.ellipse([px - s * 0.72, py - s * 0.72, px + s * 0.72, py + s * 0.72], fill=col)
         d.ellipse([cx - 2.2, cy - 2.2, cx + 2.2, cy + 2.2], fill=(250, 220, 150, min(255, a + 60)))
-    return add_glow(img, 1)
-
-
-def make_sparkle_dots():
-    img = new_canvas()
-    d = ImageDraw.Draw(img)
-    for _ in range(600):
-        x, y = random.randint(0, W), random.randint(0, H)
-        r = random.randint(1, 3)
-        a = random.randint(30, 90)
-        col = (255, 252, 235, a) if random.random() < 0.8 else (255, 255, 255, a)
-        d.ellipse([x - r, y - r, x + r, y + r], fill=col)
     return add_glow(img, 1)
 
 
@@ -831,46 +813,31 @@ def make_pinwheel():
 
 
 GENERATORS = [
-    ("透明膜", make_transparent),
+    ("亚光膜", make_matte),
     ("磨砂膜", make_frosted),
-    ("哑光膜", make_matte),
-    ("满天星闪光膜", make_starry_flash),
-    ("拉丝闪光膜", make_brushed),
-    ("星幻细闪膜", make_micro_shimmer),
-    ("蚕丝膜", make_silk),
-    ("钻石膜", make_diamond),
-    ("油画膜", make_oil_painting),
+    ("米字膜2", make_starry_flash),
+    ("菱形", make_diamond),
     ("十字膜", make_cross),
-    ("皮纹膜", make_leather),
-    ("猫眼膜", make_cat_eye),
     ("玻璃膜", make_glass),
     ("彩虹膜", make_rainbow),
     ("星空膜", make_starry_night),
-    ("烟花膜", make_firework),
+    ("米字膜1", make_firework),
     ("爱心膜", make_heart),
     ("小星星膜", make_small_stars),
     ("星星膜", make_stars),
     ("雪花膜", make_snowflake),
     ("樱花膜", make_sakura),
-    ("闪点膜", make_sparkle_dots),
     ("星光细闪膜", make_shimmer_stars),
     ("测试膜", make_shimmer_stars),
     ("流麻膜", make_flow_sand),
-    ("A11三角格膜", make_triangle_grid),
-    ("A22圆格膜", make_bigcircle_grid),
     ("A33六角格膜", make_hexagon_grid),
     ("A44碎玻璃膜", make_voronoi),
-    ("A55雪花格膜", make_snowflake_grid),
-    ("A66几何格膜", make_hexagram_grid),
     ("B11圆环膜", make_ring_grid),
     ("B22闪电膜", make_lightning),
     ("B33齿轮膜", make_gear_grid),
     ("纹路1", make_circuit),
-    ("电路板膜", make_circuit_board),
-    ("彩珠膜", make_beads),
-    ("句号膜", make_period),
-    ("蝴蝶膜", make_butterfly),
-    ("斜光柱膜", make_diagonal_beams),
+    ("点状膜1", make_beads),
+    ("点状膜2", make_period),
     ("风车膜", make_pinwheel),
 ]
 

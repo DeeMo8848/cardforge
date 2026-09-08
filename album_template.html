@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>📖 卡牌收集册 · cardforge</title>
+<style>
+  :root {
+    --bg:#14100c; --panel:#221b16; --line:#3d2f24;
+    --gold:#e3b95c; --gold2:#f3d48a; --text:#ece4d6; --muted:#a99b86;
+  }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body {
+    background: radial-gradient(1200px 600px at 50% -10%, #2a2018 0%, var(--bg) 60%);
+    color: var(--text); font-family:"Microsoft YaHei","PingFang SC",system-ui,sans-serif;
+    min-height:100vh;
+  }
+  header {
+    position: sticky; top:0; z-index:20;
+    background: rgba(20,16,12,.85); backdrop-filter: blur(8px);
+    border-bottom:1px solid var(--line);
+    padding:16px 24px; display:flex; align-items:center; gap:16px;
+  }
+  header h1 { font-size:20px; color:var(--gold2); letter-spacing:1px; }
+  header .count { color:var(--muted); font-size:13px; }
+  header .back {
+    margin-left:auto; color:var(--muted); text-decoration:none; font-size:13px;
+    border:1px solid var(--line); padding:7px 14px; border-radius:999px; transition:all .15s;
+  }
+  header .back:hover { color:var(--gold2); border-color:var(--gold); }
+  main { max-width:1240px; margin:0 auto; padding:28px 24px 60px; }
+
+  /* 侧边信息框 */
+  .info {
+    position: fixed; right:0; top:0; bottom:0; width:300px; z-index:30;
+    background: rgba(34,27,22,.93); border-left:1px solid var(--line);
+    padding:28px 22px; transform: translateX(105%);
+    transition: transform .28s ease; box-shadow: -12px 0 40px rgba(0,0,0,.45);
+    overflow-y:auto;
+  }
+  .info.show { transform: translateX(0); }
+  .info .thumb { width:100%; border-radius:12px; border:1px solid var(--gold); margin-bottom:16px; }
+  .info h2 { color:var(--gold2); font-size:18px; margin-bottom:6px; }
+  .info .badge {
+    display:inline-block; font-size:11px; color:#2b1d08;
+    background:linear-gradient(135deg,var(--gold2),var(--gold));
+    border-radius:999px; padding:2px 10px; margin-bottom:14px;
+  }
+  .info .desc { font-size:14px; line-height:1.9; color:var(--text); white-space:pre-wrap; }
+  .info .desc.empty { color:var(--muted); }
+  .info .meta { margin-top:18px; font-size:12px; color:var(--muted); line-height:2; word-break:break-all; }
+  .info .close {
+    position:absolute; top:14px; right:14px; background:none; border:1px solid var(--line);
+    color:var(--muted); border-radius:8px; padding:4px 10px; cursor:pointer; font-size:13px;
+  }
+  .info .close:hover { color:var(--gold2); border-color:var(--gold); }
+
+  /* 卡片网格 */
+  .grid {
+    display:grid; grid-template-columns:repeat(auto-fill, minmax(170px, 1fr));
+    gap:22px;
+  }
+  .card { perspective:900px; cursor:pointer; position:relative; }
+  .card .del {
+    position:absolute; top:8px; right:8px; z-index:5;
+    width:26px; height:26px; border-radius:50%;
+    background:rgba(20,12,8,.72); color:var(--muted);
+    border:1px solid var(--line); font-size:13px; line-height:1;
+    cursor:pointer; opacity:0; transition:opacity .18s, color .18s, border-color .18s;
+  }
+  .card:hover .del { opacity:1; }
+  .card .del:hover { color:#ff6b5e; border-color:#ff6b5e; background:rgba(40,16,12,.85); }
+  .card .inner {
+    transform-style: preserve-3d;
+    transition: transform .18s ease-out;
+    will-change: transform;
+  }
+  .card img {
+    width:100%; aspect-ratio:3/4; object-fit:cover;
+    border-radius:12px; border:1px solid var(--line);
+    display:block; box-shadow: 0 10px 30px rgba(0,0,0,.5);
+    transition: border-color .2s, box-shadow .2s;
+  }
+  .card:hover img { border-color:var(--gold); box-shadow: 0 16px 44px rgba(227,185,92,.22); }
+  .card .name {
+    margin-top:8px; text-align:center; font-size:13px; color:var(--muted);
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  }
+  .card:hover .name { color:var(--gold2); }
+  .empty { text-align:center; color:var(--muted); padding:80px 0; font-size:15px; }
+
+  /* 放大弹窗（完整 3D 交互） */
+  .modal {
+    position:fixed; inset:0; z-index:40; display:none;
+    background: rgba(8,6,4,.82); backdrop-filter: blur(6px);
+    align-items:center; justify-content:center; padding:30px;
+  }
+  .modal.show { display:flex; }
+  .modal .frame {
+    width:min(560px, 94vw); height:min(760px, 92vh);
+    background:#000; border-radius:16px; border:1px solid var(--gold);
+    overflow:hidden; box-shadow: 0 20px 80px rgba(0,0,0,.7); position:relative;
+  }
+  .modal iframe { width:100%; height:100%; border:0; }
+  .modal .hintbar {
+    position:absolute; left:0; right:0; bottom:0;
+    background: linear-gradient(transparent, rgba(8,6,4,.9));
+    color:var(--muted); font-size:12px; text-align:center; padding:30px 0 12px;
+    pointer-events:none;
+  }
+  .modal .close {
+    position:absolute; top:-14px; right:-14px; z-index:2;
+    width:36px; height:36px; border-radius:50%;
+    background:var(--gold); color:#2b1d08; border:none; font-size:16px; cursor:pointer;
+    box-shadow: 0 4px 16px rgba(0,0,0,.5);
+  }
+  .modal .modalbar {
+    position:absolute; left:0; right:0; bottom:0; z-index:3;
+    display:flex; gap:10px; justify-content:center; padding:12px;
+    background: linear-gradient(transparent, rgba(8,6,4,.92));
+  }
+  .modal .modalbar button {
+    padding:8px 18px; border-radius:999px; cursor:pointer; font-size:13px;
+    background: rgba(34,27,22,.9); color:var(--gold2); border:1px solid var(--line);
+    transition:all .15s;
+  }
+  .modal .modalbar button:hover { border-color:var(--gold); background:#32281c; }
+  .modal .modalbar button.on {
+    background:linear-gradient(135deg,var(--gold2),var(--gold)); color:#2b1d08; border-color:var(--gold);
+  }
+  .modal .hintbar { bottom:52px; }
+
+  /* 翻页 */
+  .pager {
+    display:flex; gap:8px; align-items:center; justify-content:center; margin-top:28px; flex-wrap:wrap;
+  }
+  .pager .pg-btn {
+    min-width:34px; padding:7px 12px; border-radius:9px; cursor:pointer; font-size:13px;
+    background:var(--panel); color:var(--muted); border:1px solid var(--line); transition:all .15s;
+  }
+  .pager .pg-btn:hover:not(:disabled) { color:var(--gold2); border-color:var(--gold); }
+  .pager .pg-btn.on { background:linear-gradient(135deg,var(--gold2),var(--gold)); color:#2b1d08; border-color:var(--gold); font-weight:700; }
+  .pager .pg-btn:disabled { opacity:.4; cursor:default; }
+</style>
+</head>
+<body>
+<header>
+  <h1>📖 卡牌收集册</h1>
+  <span class="count" id="count"></span>
+  <a class="back" href="/">← 返回工坊</a>
+</header>
+<main>
+  <div class="grid" id="grid"></div>
+  <div class="empty" id="empty" style="display:none">还没有成品卡牌，先去工坊制作一张吧～</div>
+  <div class="pager" id="pager" style="display:none"></div>
+</main>
+
+<aside class="info" id="info">
+  <button class="close" id="infoClose">✕</button>
+  <img class="thumb" id="infoImg" alt="">
+  <h2 id="infoName"></h2>
+  <span class="badge" id="infoBadge"></span>
+  <div class="desc" id="infoDesc"></div>
+  <div class="meta" id="infoMeta"></div>
+</aside>
+
+<div class="modal" id="modal">
+  <button class="close" id="modalClose">✕</button>
+  <div class="frame">
+    <iframe id="modalFrame" src="about:blank"></iframe>
+    <div class="modalbar">
+      <button id="modalFlip" disabled>🔄 翻面</button>
+      <button id="modalSpin" disabled>🌀 自动旋转</button>
+      <button id="modalSaveImg">🖼️ 保存为图片</button>
+      <button id="modalSaveHtml">🌐 保存为网页</button>
+    </div>
+    <div class="hintbar">🖱️ 拖拽旋转 · 滚轮缩放 · 双击翻面</div>
+  </div>
+</div>
+
+<script>
+const TYPE_BADGE = { none: '🚫 无文本型', transparent: '🪟 特殊文本型', boxed: '📜 文本型' };
+const grid = document.getElementById('grid');
+const empty = document.getElementById('empty');
+const info = document.getElementById('info');
+const PER_PAGE = 12;
+let allCards = [];
+let page = 0;
+let hoverTimer = null;
+let hideTimer = null;
+let currentCard = null;
+let offline = false;
+let spinning = false;
+
+async function load() {
+  let cards = null;
+  try {
+    const r = await fetch('/api/cards');
+    if (r.ok) {
+      const d = await r.json();
+      if (d.ok) cards = d.cards || [];
+    }
+  } catch (e) {
+    offline = true;
+  }
+  if (cards === null) {
+    // 离线模式：直接打开 album.html（file://）时无服务器，用内嵌数据 + 相对路径
+    cards = (window.__ALBUM_DATA__ || []).slice();
+    if (cards.length) offline = true;
+  }
+  cards = cards || [];
+  allCards = cards;
+  document.getElementById('count').textContent = '共 ' + cards.length + ' 张';
+  page = 0;
+  renderPage();
+  if (offline) {
+    const back = document.querySelector('.back');
+    if (back) back.style.display = 'none';
+  }
+}
+
+function renderPage() {
+  const total = allCards.length;
+  const pages = Math.max(1, Math.ceil(total / PER_PAGE));
+  if (page >= pages) page = pages - 1;
+  if (page < 0) page = 0;
+  const start = page * PER_PAGE;
+  const slice = allCards.slice(start, start + PER_PAGE);
+  grid.innerHTML = '';
+  empty.style.display = total ? 'none' : 'block';
+  slice.forEach(c => grid.appendChild(makeCard(c)));
+  renderPager(pages);
+}
+
+function renderPager(pages) {
+  const pager = document.getElementById('pager');
+  if (pages <= 1) { pager.style.display = 'none'; pager.innerHTML = ''; return; }
+  pager.style.display = 'flex';
+  pager.innerHTML = '';
+  const mk = (label, fn, disabled, cls) => {
+    const b = document.createElement('button');
+    b.textContent = label;
+    b.className = 'pg-btn' + (cls ? ' ' + cls : '');
+    b.disabled = !!disabled;
+    b.addEventListener('click', fn);
+    pager.appendChild(b);
+  };
+  mk('‹ 上一页', () => { page--; renderPage(); }, page <= 0);
+  for (let i = 0; i < pages; i++) {
+    mk(String(i + 1), () => { page = i; renderPage(); }, false, i === page ? 'on' : '');
+  }
+  mk('下一页 ›', () => { page++; renderPage(); }, page >= pages - 1);
+}
+
+function makeCard(c) {
+  const wrap = document.createElement('div');
+  wrap.className = 'card';
+  wrap.innerHTML = '<button class="del" title="删除卡牌" aria-label="删除">✕</button><div class="inner"><img src="' + c.card_png + '" alt="" loading="lazy"><div class="name">' + esc(c.name) + '</div></div>';
+  const inner = wrap.querySelector('.inner');
+  const del = wrap.querySelector('.del');
+  if (offline) del.style.display = 'none';
+
+  // 悬停微偏移（跟随鼠标的 3D 倾斜）
+  wrap.addEventListener('mousemove', e => {
+    const r = wrap.getBoundingClientRect();
+    const px = (e.clientX - r.left) / r.width - 0.5;
+    const py = (e.clientY - r.top) / r.height - 0.5;
+    inner.style.transform = 'rotateY(' + (px * 12).toFixed(2) + 'deg) rotateX(' + (-py * 10).toFixed(2) + 'deg) translateZ(6px)';
+  });
+  wrap.addEventListener('mouseleave', () => {
+    inner.style.transform = '';
+  });
+
+  // 侧边信息框：移入稍作延迟再显示，避免扫过时闪烁
+  wrap.addEventListener('mouseenter', () => {
+    clearTimeout(hideTimer);
+    clearTimeout(hoverTimer);
+    hoverTimer = setTimeout(() => showInfo(c), 220);
+  });
+  wrap.addEventListener('mouseleave', () => {
+    clearTimeout(hoverTimer);
+    hideTimer = setTimeout(() => info.classList.remove('show'), 400);
+  });
+
+  // 点击放大：完整 3D 交互
+  wrap.addEventListener('click', e => { if (e.target !== del) openModal(c); });
+
+  // 删除
+  del.addEventListener('click', e => {
+    e.stopPropagation();
+    deleteCard(c);
+  });
+  return wrap;
+}
+
+async function deleteCard(c) {
+  if (!confirm('确定要删除卡牌「' + c.name + '」吗？\n删除后无法恢复。')) return;
+  const r = await fetch('/api/card/delete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: c.id }),
+  });
+  const d = await r.json();
+  if (d.ok) {
+    info.classList.remove('show');
+    closeModal();
+    load();
+  } else {
+    alert('删除失败：' + (d.error || '未知错误'));
+  }
+}
+
+function showInfo(c) {
+  currentCard = c;
+  document.getElementById('infoImg').src = c.card_png;
+  document.getElementById('infoName').textContent = c.name;
+  document.getElementById('infoBadge').textContent = TYPE_BADGE[c.text_type] || c.text_type;
+  const desc = document.getElementById('infoDesc');
+  if (c.description) {
+    desc.textContent = c.description;
+    desc.classList.remove('empty');
+  } else {
+    desc.textContent = '（这张卡还没有描述文字）';
+    desc.classList.add('empty');
+  }
+  document.getElementById('infoMeta').innerHTML = '<b>卡片 ID</b>　' + esc(c.id);
+  info.classList.add('show');
+}
+
+function openModal(c) {
+  currentCard = c;
+  const frame = document.getElementById('modalFrame');
+  const flipBtn = document.getElementById('modalFlip');
+  const spinBtn = document.getElementById('modalSpin');
+  spinning = false;
+  spinBtn.classList.remove('on');
+  spinBtn.textContent = '🌀 自动旋转';
+  flipBtn.disabled = true;
+  spinBtn.disabled = true;
+  frame.onload = () => {
+    // 等待 card.html 加载完成后启用控制按钮
+    flipBtn.disabled = !(frame.contentWindow && frame.contentWindow.__cardAPI);
+    spinBtn.disabled = !(frame.contentWindow && frame.contentWindow.__cardAPI);
+  };
+  frame.src = c.card_html;
+  document.getElementById('modal').classList.add('show');
+}
+function closeModal() {
+  const frame = document.getElementById('modalFrame');
+  if (spinning && frame.contentWindow && frame.contentWindow.__cardAPI) {
+    frame.contentWindow.__cardAPI.setAutoRotate(false);
+  }
+  spinning = false;
+  document.getElementById('modal').classList.remove('show');
+  document.getElementById('modalFrame').src = 'about:blank';
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m]));
+}
+
+document.getElementById('infoClose').addEventListener('click', () => info.classList.remove('show'));
+// 导出：保存为图片 / 保存为自包含网页（单文件，图片已内嵌）
+function exportCard(type) {
+  if (!currentCard) return;
+  const a = document.createElement('a');
+  a.href = '/api/export?id=' + encodeURIComponent(currentCard.id) + '&type=' + type;
+  a.download = '';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+document.getElementById('modalSaveImg').addEventListener('click', () => exportCard('image'));
+document.getElementById('modalSaveHtml').addEventListener('click', () => exportCard('html'));
+document.getElementById('modalClose').addEventListener('click', closeModal);
+document.getElementById('modal').addEventListener('click', e => { if (e.target === e.currentTarget) closeModal(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape') { closeModal(); info.classList.remove('show'); } });
+
+// 翻面：快速切换正反面（翻面后自动归正视角）
+document.getElementById('modalFlip').addEventListener('click', () => {
+  const frame = document.getElementById('modalFrame');
+  if (frame.contentWindow && frame.contentWindow.__cardAPI) {
+    frame.contentWindow.__cardAPI.flipCard();
+  }
+});
+// 自动旋转：按下开启，再次按下关闭
+document.getElementById('modalSpin').addEventListener('click', () => {
+  const frame = document.getElementById('modalFrame');
+  const spinBtn = document.getElementById('modalSpin');
+  if (!frame.contentWindow || !frame.contentWindow.__cardAPI) return;
+  spinning = !spinning;
+  frame.contentWindow.__cardAPI.setAutoRotate(spinning);
+  spinBtn.classList.toggle('on', spinning);
+  spinBtn.textContent = spinning ? '🌀 自动旋转中…' : '🌀 自动旋转';
+});
+/*__ALBUM_DATA_START__*/
+window.__ALBUM_DATA__ = [];
+/*__ALBUM_DATA_END__*/
+load();
+</script>
+</body>
+</html>

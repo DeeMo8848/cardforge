@@ -153,13 +153,18 @@ def list_cards() -> list[dict]:
 def build_album_page() -> str:
     """收集册页面（独立 HTML，展示所有成品卡，悬停预览 + 侧边信息 + 点击放大）。
 
-    把卡牌数据内嵌进 album.html（相对路径），这样直接双击打开 album.html 也能离线查看；
-    同时写回磁盘，保证离线文件始终是最新数据。
+    模板从 album_template.html 读取（git 维护的纯净版，不含卡牌数据）；
+    渲染后把最新卡牌数据写回本地 album.html（被 git 忽略），这样直接双击
+    album.html 也能离线查看，且不会污染版本库。
     """
+    tpl = PROJECT_ROOT / "album_template.html"
     p = PROJECT_ROOT / "album.html"
-    if not p.exists():
+    if tpl.exists():
+        html = tpl.read_text(encoding="utf-8")
+    elif p.exists():
+        html = p.read_text(encoding="utf-8")
+    else:
         return "<!DOCTYPE html><html lang='zh-CN'><head><meta charset='utf-8'><title>收集册</title></head><body><p>album.html 缺失</p></body></html>"
-    html = p.read_text(encoding="utf-8")
     offline = []
     for c in list_cards():
         offline.append({

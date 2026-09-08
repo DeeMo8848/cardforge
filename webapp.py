@@ -27,7 +27,7 @@ import uuid
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote
+from urllib.parse import unquote, quote, parse_qs
 
 import cardforge
 from carddef import build_card_def, save_card_def
@@ -237,6 +237,42 @@ def _write_preview_html(html: str) -> dict:
     (d / "preview.html").write_text(html, encoding="utf-8")
     _cleanup_old_previews()
     return {"ok": True, "url": f"/preview/_preview/{token}/preview.html"}
+
+
+def _export_card(card_id: str, etype: str):
+    """导出成品卡：image → card.png；html → 自包含单文件（同目录图片 base64 内嵌）。
+
+    返回 (body, mime, filename)；卡片缺失或类型非法返回 None。
+    """
+    cid = _safe_name(card_id)
+    d = ASSETS / "output" / cid
+    if not cid or not d.is_dir():
+        return None
+    if etype == "image":
+        p = d / "card.png"
+        if not p.exists():
+            return None
+        return (p.read_bytes(), "image/png", f"{cid}.png")
+    if etype == "html":
+        p = d / "card.html"
+        if not p.exists():
+            return None
+        html = p.read_text(encoding="utf-8")
+        _mime = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "webp": "image/webp"}
+
+        def _embed(m: re.Match) -> str:
+            name = m.group(2)
+            fp = d / name
+            if not fp.is_file():
+                return m.group(0)
+            q = m.group(1)
+            b64 = base64.b64encode(fp.read_bytes()).decode("ascii")
+            mime = _mime.get(Path(name).suffix.lower().lstrip("."), "application/octet-stream")
+            return f"{q}data:{mime};base64,{b64}{q}"
+
+        html = re.sub(r"""(['"])([A-Za-z0-9_.-]+\.(?:png|jpg|jpeg|webp))\1""", _embed, html)
+        return (html.encode("utf-8"), "text/html; charset=utf-8", f"{cid}.html")
+    return None
 
 
 def build_page() -> str:
@@ -903,6 +939,28 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        if path == "/api/export":
+            qs = {k: unquote(v[0]) for k, v in parse_qs(self.path.split("?", 1)[1]).items()}
+            cid = qs.get("id", "")
+            etype = qs.get("type", "image")
+            if etype not in ("image", "html"):
+                etype = "image"
+            if not cid:
+                self._send_json({"ok": False, "error": "缺少卡片 id"}, 400)
+                return
+            r = _export_card(cid, etype)
+            if not r:
+                self._send_json({"ok": False, "error": "卡片不存在或缺少导出文件"}, 404)
+                return
+            body, mime, fname = r
+            self.send_response(200)
+            self.send_header("Content-Type", mime)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Content-Disposition", "attachment; filename*=UTF-8''" + quote(fname))
             self.end_headers()
             self.wfile.write(body)
             return
@@ -1927,6 +1985,8 @@ PAGE_HTML = r"""<!DOCTYPE html>
         <div class="savebar">
           <input type="text" id="asmName" placeholder="拼装名称（保存时必填）">
           <button class="btn small" id="asmSave" type="button">💾 保存为卡牌</button>
+          <button class="btn small ghost" id="asmExportImg" type="button">🖼️ 导出图片</button>
+          <button class="btn small ghost" id="asmExportHtml" type="button">🌐 导出网页</button>
           <button class="btn small ghost" id="asmReset" type="button">🧹 重置为空卡</button>
         </div>
         <div class="status" id="asmStatus"></div>
@@ -3248,6 +3308,21 @@ document.getElementById('asmSave').addEventListener('click', async () => {
     setStatus('asmStatus', '保存失败：' + e.message, true);
   }
 });
+
+// 拼装页导出：优先导出当前选中的成品卡；未选则用名称对应的成品卡（需已保存过）
+function exportAssembly(type) {
+  let id = asmCardSel.value;
+  if (!id) id = document.getElementById('asmName').value.trim();
+  if (!id) { setStatus('asmStatus', '请先保存为卡牌或选择一张成品卡再导出', true); return; }
+  const a = document.createElement('a');
+  a.href = '/api/export?id=' + encodeURIComponent(id) + '&type=' + type;
+  a.download = '';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+document.getElementById('asmExportImg').addEventListener('click', () => exportAssembly('image'));
+document.getElementById('asmExportHtml').addEventListener('click', () => exportAssembly('html'));
 
 scheduleAsmPreview(600);
 

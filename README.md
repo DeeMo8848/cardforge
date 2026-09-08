@@ -41,7 +41,7 @@ GitHub 仓库只包含本体程序（约几 MB），**虚拟环境和模型都�
 
 1. 克隆或解压项目后，直接运行 `webui.cmd` 或 `cardforge.cmd`（首次使用会自动执行 `setup.cmd`，创建 `.venv` 虚拟环境并安装依赖）
 2. 也可以手动执行 `setup.cmd` 单独完成环境初始化
-3. 首次抠图时，rembg 会自动把所选模型下载到 `models/` 目录（默认 `birefnet-massive`，约 970MB），之后完全离线使用
+3. 首次抠图时，rembg 会自动把所选模型下载到 `models/` 目录（默认 `birefnet-general`，约 970MB），之后完全离线使用
 
 > **模型复用**：多个副本/多台机器想共享已下载的模型时，设置环境变量 `CARDFORGE_MODELS_DIR` 指向模型所在目录即可，例如
 > `set CARDFORGE_MODELS_DIR=D:\ai\shared-models`（再运行 webui.cmd）。
@@ -52,7 +52,7 @@ GitHub 仓库只包含本体程序（约几 MB），**虚拟环境和模型都�
 |---|---|
 | `--style` | `transparent`（透明主体卡，默认）/ `full-bleed`（整幅卡面） |
 | `--name` / `--slug` | 卡片显示名 / 卡片 id |
-| `--model` | 本地抠图模型，默认 `birefnet-massive`（通用、体积小质量高） |
+| `--model` | 本地抠图模型，默认 `birefnet-general`（速度与质量平衡；质量优先可选 `birefnet-massive`） |
 | `--title` / `--desc` | 卡面标题 / 描述文字（可选） |
 | `--background` / `--face` / `--frame` / `--seal` | DIY 素材层（可选，见下） |
 | `--effect` | 3D 网页卡动画特效：`none`（默认）/ `love` 冒爱心 / `sparkle` 冒闪光 |
@@ -83,7 +83,7 @@ GitHub 仓库只包含本体程序（约几 MB），**虚拟环境和模型都�
 
 ## 抠图引擎
 
-- 默认本地引擎：`rembg + birefnet-massive`（通用显著性分割，人像/动物/物体通吃，离线免费；模型约 970MB）
+- 默认本地引擎：`rembg + birefnet-general`（通用显著性分割，人像/动物/物体通吃，速度与质量平衡；离线免费；模型约 970MB）
 - **动漫/插画素材推荐**：加 `--model isnet-anime`（动漫特化，发丝保留更好、边缘更细，模型仅约 176MB，体积小 5 倍）
 - 引擎抽象在 `engine.py`，未来可插拔火山引擎等 API 引擎（`create_engine()` 注册）
 - 模型存放在 `models/` 目录（默认项目内；缺失时首次抠图自动下载，之后离线可用）

@@ -19,7 +19,7 @@ MODELS_DIR = Path(
 os.environ.setdefault("U2NET_HOME", str(MODELS_DIR))
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
-DEFAULT_MODEL = "birefnet-massive"
+DEFAULT_MODEL = "birefnet-general"
 
 # 常用模型名 → 本地文件名（用于缺失提示，缺失时 rembg 自动下载）
 _MODEL_FILES = {
@@ -61,8 +61,8 @@ def _warn_if_model_missing(model: str) -> None:
 
 SUPPORTED_MODELS = {
     "none": "不使用抠图（整图直接作为卡面素材）",
-    "birefnet-massive": "多数据集通用分割，质量最高（默认，~970MB）",
-    "birefnet-general": "通用分割",
+    "birefnet-massive": "多数据集通用分割，质量最高（~970MB）",
+    "birefnet-general": "通用分割（默认，速度与质量平衡）",
     "birefnet-general-lite": "通用分割轻量版",
     "birefnet-portrait": "人像特化分割",
     "isnet-anime": "动漫插画特化，体积小质量好（适合二次元封面）",

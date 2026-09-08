@@ -143,6 +143,7 @@ def list_cards() -> list[dict]:
                 "seal_frame_strength_back": inherit.get("seal_frame_strength_back"),
                 "subject_over_frame": inherit.get("subject_over_frame"),
                 "subject_outline": inherit.get("subject_outline"),
+                "mask_clip": inherit.get("mask_clip"),
                 "back": inherit.get("back"),
                 "scale": _parse_scale((data.get("extra") or {}).get("card_scale", 1.0)),
                 "effects": effects,
@@ -434,6 +435,7 @@ def _inherit_card(card_id: str) -> dict:
     out["seal_frame_strength_back"] = d.get("seal_frame_strength_back", extra.get("seal_frame_strength_back"))
     out["subject_over_frame"] = bool(d.get("subject_over_frame", extra.get("subject_over_frame")))
     out["subject_outline"] = bool(d.get("subject_outline", extra.get("subject_outline")))
+    out["mask_clip"] = bool(d.get("mask_clip", extra.get("mask_clip", True)))
     return out
 
 
@@ -499,6 +501,8 @@ def _save_assembly(data: dict) -> dict:
     # 卡面素材自含完整画面：选它时旧主体前景一并清空，彻底替换卡面（不再叠旧卡面）；
     # 背景素材只换底图，保留成品卡透明主体
     subject_over_frame = bool(data.get("subject_over_frame"))
+    subject_outline = bool(data.get("subject_outline"))
+    mask_clip = bool(data.get("mask_clip", True))
     scale = _parse_scale(data.get("scale"))
     # 卡面素材可作为「前景主体层」使用：
     #   - 浮于边框之上：卡面同时作底图与前景层（同一图对齐，前景浮起后主体跃出边框）
@@ -629,6 +633,7 @@ def _save_assembly(data: dict) -> dict:
                                 seal_frame_name=seal_frame_used if seal_frame_rel else None,
                                 description=desc, text_type=text_type, text_pos=text_pos,
                                 subject_over_frame=subject_over_frame,
+                                mask_clip=mask_clip,
                                 frame_fit_subject=True,
                                 round_foreground=True,
                                 outline_rel=outline_rel,
@@ -662,6 +667,7 @@ def _save_assembly(data: dict) -> dict:
             "composed": False, "assembly": True,
             "subject_over_frame": subject_over_frame,
             "subject_outline": subject_outline,
+            "mask_clip": mask_clip,
             "card_scale": scale,
             "seal_strength_front": seal_front,
             "seal_strength_back": seal_back,
@@ -695,7 +701,8 @@ def _save_assembly(data: dict) -> dict:
                                 subject_over_frame=subject_over_frame,
                                 subject_outline=subject_outline, size=(CARD_W, CARD_H),
                                 content_scale=scale,
-                                face_scales=face_scales)
+                                face_scales=face_scales,
+                                mask_clip=mask_clip)
         composed.save(out / "card.png")
     except Exception:
         pass
@@ -733,6 +740,7 @@ def _make_text(data: dict) -> dict:
         _extra = card.get("extra") or {}
         subject_over_frame = bool(card.get("subject_over_frame", _extra.get("subject_over_frame")))
         subject_outline = bool(card.get("subject_outline", _extra.get("subject_outline")))
+        mask_clip = bool(card.get("mask_clip", _extra.get("mask_clip", True)))
         card_scale = _parse_scale(_extra.get("card_scale", 1.0))
         seal_name = card.get("seal_name") or _extra.get("seal_name") or None
         seal_frame_name = card.get("seal_frame_name") or _extra.get("seal_frame_name") or None
@@ -807,6 +815,7 @@ def _make_text(data: dict) -> dict:
                                 seal_frame_name=seal_frame_name if seal_frame_rel else None,
                                 description=desc, text_type=text_type, text_pos=pos,
                                 subject_over_frame=subject_over_frame,
+                                mask_clip=mask_clip,
                                 frame_fit_subject=True,
                                 outline_rel=outline_rel,
                                 seal_strength_front=seal_front,
@@ -834,7 +843,8 @@ def _make_text(data: dict) -> dict:
                                 subject_over_frame=subject_over_frame,
                                 subject_outline=subject_outline, size=(CARD_W, CARD_H),
                                 content_scale=card_scale,
-                                face_scales=face_scales)
+                                face_scales=face_scales,
+                                mask_clip=mask_clip)
         composed.convert("RGB").save(out / "card.png")
     except Exception:
         pass
@@ -1116,6 +1126,7 @@ class Handler(BaseHTTPRequestHandler):
                 compose=True,
                 subject_over_frame=bool(data.get("subject_over_frame")),
                 subject_outline=bool(data.get("subject_outline")),
+                mask_clip=bool(data.get("mask_clip", True)),
                 adaptive=bool(data.get("adaptive", True)),
                 adaptive_mode=int(data.get("adaptive_mode", 1)),
                 scale=_parse_scale(data.get("scale")),
@@ -1233,6 +1244,7 @@ class Handler(BaseHTTPRequestHandler):
                 text_type = "transparent"
             subject_over_frame = bool(data.get("subject_over_frame"))
             subject_outline = bool(data.get("subject_outline"))
+            mask_clip = bool(data.get("mask_clip", True))
             scale = _parse_scale(data.get("scale"))
             # 底图优先级：卡面素材 > 背景素材 > 成品卡（与保存逻辑一致）；
             # 卡面素材自含完整画面（前景清空，彻底替换）；背景素材只换底图（保留成品卡主体）
@@ -1358,6 +1370,7 @@ class Handler(BaseHTTPRequestHandler):
                     subject_outline=subject_outline, size=(CARD_W, CARD_H),
                     content_scale=scale,
                     face_scales=face_scales,
+                    mask_clip=mask_clip,
                 )
                 PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
                 pname = f"asm_{uuid.uuid4().hex[:8]}.png"
@@ -1371,6 +1384,7 @@ class Handler(BaseHTTPRequestHandler):
                                            description=desc, text_type=text_type,
                                            text_pos=data.get("text_pos"),
                                            subject_over_frame=subject_over_frame,
+                                           mask_clip=mask_clip,
                                            frame_fit_subject=True,
                                            round_foreground=True,
                                            outline_rel=outline_url,
@@ -1755,6 +1769,12 @@ PAGE_HTML = r"""<!DOCTYPE html>
           </label>
         </div>
         <div class="row">
+          <label class="checkrow">
+            <input type="checkbox" id="makeMaskClip" checked>
+            <span>✂️ 裁剪到边框内（取消后主体可延伸出边框，边框外留一圈图像）</span>
+          </label>
+        </div>
+        <div class="row">
           <label>背景层（DIY）</label>
           <select id="background"></select>
         </div>
@@ -1951,6 +1971,12 @@ PAGE_HTML = r"""<!DOCTYPE html>
           <label class="checkrow">
             <input type="checkbox" id="asmOutline">
             <span>🤍 主体描边（白色贴纸边，透明主体卡可选）</span>
+          </label>
+        </div>
+        <div class="row">
+          <label class="checkrow">
+            <input type="checkbox" id="asmMaskClip" checked>
+            <span>✂️ 裁剪到边框内（取消后主体可延伸出边框，边框外留一圈图像）</span>
           </label>
         </div>
         <div class="row">
@@ -2366,6 +2392,7 @@ goBtn.addEventListener('click', async () => {
         scale: parseFloat(document.getElementById('makeScale').value) || 1,
         subject_over_frame: document.getElementById('makeFloatFg').checked,
         subject_outline: document.getElementById('makeOutline').checked,
+        mask_clip: document.getElementById('makeMaskClip').checked,
         adaptive: document.getElementById('makeAdaptive').checked,
         adaptive_mode: parseInt(document.querySelector('#adaptiveOpts .radio.on').dataset.adaptiveMode, 10),
         effects: makePicker.get(),
@@ -3091,6 +3118,7 @@ asmCardSel.addEventListener('change', () => {
     if (typeof card.seal_frame_strength_back === 'number' && isFinite(card.seal_frame_strength_back)) document.getElementById('asmSealFrameBack').value = card.seal_frame_strength_back;
     document.getElementById('asmFloatFg').checked = !!card.subject_over_frame;
     document.getElementById('asmOutline').checked = !!card.subject_outline;
+    document.getElementById('asmMaskClip').checked = card.mask_clip !== false;
     const asmScaleEl = document.getElementById('asmScale');
     const sc = parseFloat(card.scale);
     if (isFinite(sc) && sc >= 0.5 && sc <= 1.5) asmScaleEl.value = sc;
@@ -3127,6 +3155,7 @@ asmSealSel.addEventListener('change', scheduleAsmPreview);
 asmSealFrameSel.addEventListener('change', () => { asmSealFrameTouched = true; scheduleAsmPreview(); });
 document.getElementById('asmFloatFg').addEventListener('change', scheduleAsmPreview);
 document.getElementById('asmOutline').addEventListener('change', scheduleAsmPreview);
+document.getElementById('asmMaskClip').addEventListener('change', scheduleAsmPreview);
 document.getElementById('asmSealFront').addEventListener('input', () => { scheduleAsmPreview(); persistSealStrengths(); });
 document.getElementById('asmSealBack').addEventListener('input', () => { scheduleAsmPreview(); persistSealStrengths(); });
 document.getElementById('asmSealFrameFront').addEventListener('input', () => { scheduleAsmPreview(); persistSealStrengths(); });
@@ -3234,6 +3263,7 @@ async function postAsmPreview() {
         effects: asmPicker.get(),
         subject_over_frame: document.getElementById('asmFloatFg').checked,
         subject_outline: document.getElementById('asmOutline').checked,
+        mask_clip: document.getElementById('asmMaskClip').checked,
         scale: parseFloat(document.getElementById('asmScale').value) || 1,
         seal_strength_front: getSealStrengths().front,
         seal_strength_back: getSealStrengths().back,
@@ -3285,6 +3315,7 @@ document.getElementById('asmSave').addEventListener('click', async () => {
         effects: asmPicker.get(),
         subject_over_frame: document.getElementById('asmFloatFg').checked,
         subject_outline: document.getElementById('asmOutline').checked,
+        mask_clip: document.getElementById('asmMaskClip').checked,
         scale: parseFloat(document.getElementById('asmScale').value) || 1,
         seal_strength_front: getSealStrengths().front,
         seal_strength_back: getSealStrengths().back,

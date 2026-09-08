@@ -336,6 +336,7 @@ def make_card(
     compose: bool = True,
     subject_over_frame: bool = False,
     subject_outline: bool = False,
+    mask_clip: bool = True,
     scale: float = 1.0,
     adaptive: bool = True,
     adaptive_mode: int = 1,
@@ -464,6 +465,7 @@ def make_card(
         text=text,
         extra={"card_size": card_size, "composed": compose, "animation": animation,
                "subject_over_frame": subject_over_frame, "subject_outline": subject_outline,
+               "mask_clip": mask_clip,
                "seal_name": Path(seal_path).name if seal_path else None,
                "seal_strength_front": 0.945, "seal_strength_back": 0.5775,
                "seal_frame_name": Path(seal_frame_path).name if seal_frame_path else None,
@@ -493,6 +495,7 @@ def make_card(
             text_area=text_pos,
             subject_over_frame=subject_over_frame,
             subject_outline=subject_outline,
+            mask_clip=mask_clip,
             size=size,
             front=str(out_dir / "front.png"),
             content_scale=scale,
@@ -551,7 +554,8 @@ def make_card(
                         outline_rel=outline_rel,
                         content_scale=scale,
                         face_scales=style == "full-bleed",
-                        interior_rel=interior_rel),
+                        interior_rel=interior_rel,
+                        mask_clip=mask_clip),
         encoding="utf-8",
     )
 
@@ -683,6 +687,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="透明主体浮于边框之上（PVZ 式立体感；默认边框盖住主体）")
     parser.add_argument("--outline", action="store_true",
                         help="透明主体加白色贴纸描边（类似贴纸边缘）")
+    parser.add_argument("--no-mask", dest="mask_clip", action="store_false",
+                        help="不裁剪到边框内（内边框效果：主体可延伸出边框外沿，边框外留一圈图像）")
     parser.add_argument("--adaptive", type=int, choices=[0, 1], default=1,
                         help="自适应开关：1=按上传图与卡面比例缩放裁剪；0=直接拉伸填满")
     parser.add_argument("--adaptive-mode", type=int, choices=[1, 2], default=1,
@@ -730,6 +736,7 @@ def main(argv: list[str] | None = None) -> int:
             compose=not args.no_compose,
             subject_over_frame=args.float_fg,
             subject_outline=args.outline,
+            mask_clip=args.mask_clip,
             adaptive=bool(args.adaptive),
             adaptive_mode=args.adaptive_mode,
             progress=lambda step, total, msg: print(f"[{step}/{total}] {msg}", file=sys.stderr),

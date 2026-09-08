@@ -347,7 +347,7 @@ CARD_HTML_TEMPLATE_FG_FLOAT = r"""  const foregroundGroup = new THREE.Group();
   foregroundGroup.add(shadowMesh);
   const fgMesh = new THREE.Mesh(
     new THREE.PlaneGeometry(CARD_WIDTH, CARD_HEIGHT),
-    new THREE.MeshBasicMaterial({ map: foregroundTexture, transparent: true, opacity: 0.88, alphaTest: 0.02, depthWrite: false, side: THREE.FrontSide, toneMapped: false })
+    new THREE.MeshBasicMaterial({ map: foregroundTexture, transparent: true, opacity: 1.0, alphaTest: 0.02, depthWrite: false, side: THREE.FrontSide, toneMapped: false })
   );
   fgMesh.position.set(0, 0, 0.014);
   fgMesh.renderOrder = 4.4;
@@ -436,6 +436,7 @@ __THREE_JS__
       uAspect: { value: CARD_WIDTH / CARD_HEIGHT },
       uSeal: { value: 1.0 },
       uContentScale: { value: 1.0 },
+      uSide: { value: 2.0 },
     },
     vertexShader: `
       varying vec2 vUv;
@@ -457,11 +458,13 @@ __THREE_JS__
       uniform sampler2D uFrontTexture;
       uniform sampler2D uBackTexture;
       uniform sampler2D uInteriorMap;
+      uniform float uMaskClip;
       uniform vec2 uPointer;
       uniform float uHover;
       uniform float uAspect;
       uniform float uSeal;
       uniform float uContentScale;
+      uniform float uSide;
       varying vec2 vUv;
       varying vec3 vWorldNormal;
       varying vec3 vWorldPosition;
@@ -495,14 +498,20 @@ __THREE_JS__
         vec2 uv = gl_FrontFacing ? vUv : vec2(1.0 - vUv.x, vUv.y);
         vec4 base;
         if (gl_FrontFacing) {
+          // uSide：2=双面（默认）0=仅卡面网格 1=仅卡背网格
+          // 仅卡背网格（uSide=1）的正面片段丢弃，让位给卡面网格；双面（2）与仅卡面（0）保留
+          if (uSide > 0.5 && uSide < 1.5) discard;
           base = texture2D(uFrontTexture, uv);
           // 边框内区域蒙版：正面内容仅绘制在边框外围以内（含中空）；卡背不受蒙版限制。
           // 卡面随 content_scale 缩放时（网格在 cardContent 组内），UV 需反算回卡片坐标，
           // 否则蒙版随卡面一起缩放导致边缘错位（采样点偏离真实卡片位置）
           // 缩放后网格 vUv 0..1 覆盖整卡几何，卡片坐标 = (vUv-0.5)*s + 0.5（s=uContentScale）
           vec2 cardUv = (vUv - 0.5) * max(uContentScale, 1e-4) + 0.5;
-          base.a *= texture2D(uInteriorMap, cardUv).a;
+          // mask_clip=false（内边框效果）时正面卡面不裁到边框内，可延伸出边框外沿一圈图像
+          base.a *= mix(1.0, texture2D(uInteriorMap, cardUv).a, uMaskClip);
         } else {
+          // 仅卡面网格的背面片段丢弃（uSide=0）
+          if (uSide < 0.5) discard;
           vec2 pointerLook = (uPointer - vec2(0.5)) * uHover;
           vec2 cameraLook = vec2(
             -dot(viewDirection, normalize(vWorldXAxis)),
@@ -613,6 +622,8 @@ __THREE_JS__
   interiorCtx.fillRect(0, 0, 450, 600);
   const interiorTexture = new THREE.CanvasTexture(interiorCanvas);
   cardMaterial.uniforms.uInteriorMap = { value: interiorTexture };
+  // 主 shader 正面卡面按边框内蒙版裁剪的开关（默认裁剪；mask_clip=False 时由 mask_js 置 0）
+  cardMaterial.uniforms.uMaskClip = { value: 1.0 };
 
   // ---- 蒙版有符号距离场画布（辉光沿蒙版边缘绘制，随蒙版重绘同步更新） ----
   // 编码：128=蒙版边缘；>128=外部距离（127 分度对应 0.15 卡高 UV，≈0.35px/分度）；<128=内部（不发光）
@@ -997,6 +1008,8 @@ __ENGINE_JS__
     foregroundGroup.position.z = damp(foregroundGroup.position.z, 0.024, 9.5, dt);
     foregroundGroup.rotation.x = hoverCurrent.y * 0.18;
     foregroundGroup.rotation.y = hoverCurrent.x * 0.18;
+    // 蒙版裁剪边界固定于卡片坐标系：随视差组位移反算 alphaMap 矩阵，主体永远不超出边框外沿
+    if (window.__syncFgMask) window.__syncFgMask();
 
     cardMaterial.uniforms.uHover.value = damp(cardMaterial.uniforms.uHover.value, hover.current, 11, dt);
     cardMaterial.uniforms.uPointer.value.copy(pointer);
@@ -2062,34 +2075,29 @@ def _fg_mask_js(content_scale: float = 1.0) -> str:
         "      interiorTexture.center.set(0, 0);\n"
         "      m.material.needsUpdate = true;\n"
         "    }\n"
-        "    function syncTransform(m) {\n"
-        "      var g = m.geometry.parameters;\n"
-        "      var w = g.width, h = g.height;\n"
-        "      var t = m.material.alphaMap;\n"
-        "      t.repeat.set((w * s) / CARD_WIDTH, (h * s) / CARD_HEIGHT);\n"
-        "      t.offset.set((m.position.x - w / 2) * s / CARD_WIDTH + 0.5,\n"
-        "                   (m.position.y - h / 2) * s / CARD_HEIGHT + 0.5);\n"
-        "      t.needsUpdate = true;\n"
+        "    // 蒙版纹理矩阵固定于卡片坐标系：offset 含前景组位移（视差），\n"
+        "    // 否则组移动时蒙版图案跟着主体走，裁剪边界不固定在卡片上，主体会滑出边框外沿\n"
+        "    function syncWorld() {\n"
+        "      var gx = foregroundGroup.position.x, gy = foregroundGroup.position.y;\n"
+        "      foregroundGroup.children.forEach(function (m) {\n"
+        "        if (!m.isMesh || !m.material || m.material.alphaMap !== interiorTexture) return;\n"
+        "        var g = m.geometry.parameters;\n"
+        "        var t = m.material.alphaMap;\n"
+        "        t.repeat.set((g.width * s) / CARD_WIDTH, (g.height * s) / CARD_HEIGHT);\n"
+        "        t.offset.set((gx + m.position.x - g.width / 2) * s / CARD_WIDTH + 0.5,\n"
+        "                     (gy + m.position.y - g.height / 2) * s / CARD_HEIGHT + 0.5);\n"
+        "      });\n"
         "    }\n"
-        "    function syncAll() {\n"
+        "    window.__syncFgMask = syncWorld;\n"
+        "    // 主体描边层在本段之后才创建：轮询直到所有网格挂上蒙版；变换由 __syncFgMask 每帧维护\n"
+        "    (function tick() {\n"
         "      var pending = false;\n"
         "      foregroundGroup.children.forEach(function (m) {\n"
         "        if (!m.isMesh || !m.material || !m.geometry || m.geometry.type !== 'PlaneGeometry') return;\n"
-        "        applyMask(m);\n"
-        "        var g = m.geometry.parameters, t = m.material.alphaMap;\n"
-        "        var rw = (g.width * s) / CARD_WIDTH, rh = (g.height * s) / CARD_HEIGHT;\n"
-        "        var ox = (m.position.x - g.width / 2) * s / CARD_WIDTH + 0.5;\n"
-        "        var oy = (m.position.y - g.height / 2) * s / CARD_HEIGHT + 0.5;\n"
-        "        if (Math.abs(t.repeat.x - rw) > 1e-4 || Math.abs(t.repeat.y - rh) > 1e-4 ||\n"
-        "            Math.abs(t.offset.x - ox) > 1e-4 || Math.abs(t.offset.y - oy) > 1e-4) {\n"
-        "          syncTransform(m);\n"
-        "          pending = true;\n"
-        "        }\n"
+        "        if (m.material.alphaMap !== interiorTexture) { applyMask(m); pending = true; }\n"
         "      });\n"
-        "      return pending;\n"
-        "    }\n"
-        "    // 主体描边层在本段之后才创建：轮询直到所有网格挂上蒙版且变换稳定\n"
-        "    (function tick() { if (syncAll()) setTimeout(tick, 30); })();\n"
+        "      if (pending) setTimeout(tick, 30);\n"
+        "    })();\n"
         "  })();\n"
     )
 
@@ -2339,15 +2347,21 @@ def _face_mesh_js(face_scales: bool) -> str:
 
     face_scales（卡面为卡面素材随缩放）时：主网格只渲染背面（卡背整卡不缩放），
     另建卡面网格随 cardContent 缩放——缩放只作用卡面，卡背保持整卡尺寸。
+
+    用 uniform uSide 区分网格角色（2=双面默认 / 1=仅卡背 / 0=仅卡面），
+    不用 BackSide 拆面——Three.js 渲染 BackSide 时会反转 frontFace 绕序，
+    导致背面片段的 gl_FrontFacing 误报为 true，翻面后错误走正面分支显示卡面。
     """
     if not face_scales:
         return ""
     return (
         "  (function () {\n"
-        "    cardMaterial.side = THREE.BackSide;\n"
+        "    cardMaterial.uniforms.uSide.value = 1.0;\n"
         "    var faceMat = cardMaterial.clone();\n"
         "    faceMat.side = THREE.FrontSide;\n"
-        "    faceMat.uniforms = cardMaterial.uniforms;\n"
+        "    faceMat.uniforms = {};\n"
+        "    for (var uk in cardMaterial.uniforms) faceMat.uniforms[uk] = cardMaterial.uniforms[uk];\n"
+        "    faceMat.uniforms.uSide = { value: 0.0 };\n"
         "    var faceMesh = new THREE.Mesh(new THREE.PlaneGeometry(CARD_WIDTH, CARD_HEIGHT), faceMat);\n"
         "    cardContent.add(faceMesh);\n"
         "    hitMeshes.push(faceMesh);\n"
@@ -2374,7 +2388,8 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
                     content_scale: float = 1.0,
                     face_scales: bool = False,
                     interior_rel: str | None = None,
-                    background_rel: str | None = None) -> str:
+                    background_rel: str | None = None,
+                    mask_clip: bool = True) -> str:
     """生成自包含 3D 卡网页 HTML。
 
     effects: 特效实例列表 [{"name":..., "def": {...}, "pos": {...}}]，def 为完整特效参数。
@@ -2393,6 +2408,7 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
     interior_rel: 边框内区域蒙版图（白=边框环+中空，黑=边框外围），正面整卡内容按此裁剪，
     边框实际绘制形态（整卡或按主体包围盒）在浏览器端动态对齐。
     background_rel: 独立背景层素材（卡面单独缩放时背景整卡铺满，不随缩放；缺省用深色底）。
+    mask_clip: False 时不应用边框内蒙版裁剪，主体可延伸出边框外沿（内边框效果，与 2D 一致）。
     """
     three_js = THREE_JS.read_text(encoding="utf-8")
     fg_js = (
@@ -2401,8 +2417,9 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
         if subject_over_frame else
         CARD_HTML_TEMPLATE_FG
     )
-    # 未浮于边框时：前景主体/描边/阴影按边框内区域蒙版裁剪（整卡内容不超出边框外围，与 2D 一致）
-    if frame_rel and not subject_over_frame:
+    # 未浮于边框时：前景主体/描边/阴影按边框内区域蒙版裁剪（整卡内容不超出边框外围，与 2D 一致）；
+    # mask_clip=False 时不裁剪（内边框效果：主体可延伸出边框外沿，边框外留一圈图像）
+    if frame_rel and not subject_over_frame and mask_clip:
         fg_js += _fg_mask_js(content_scale)
     # 层1 卡牌卡封：整卡尺寸、不随缩放（挂 flipGroup，z/order 介于主体与边框之间）；
     # 有边框时仅正面渲染（卡背统一用边框卡封），并按边框内区域蒙版裁剪
@@ -2424,6 +2441,10 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
         # 亚光膜（matte）几乎无箔光高光（更哑光），其余卡封默认箔光弱化一半
         seal_u = 0.12 if (effect and effect.get("mode") == "matte") else 0.5
         seal_layer += "  (function () { cardMaterial.uniforms.uSeal.value = " + str(seal_u) + "; })();\n"
+    # 主 shader 正面卡面按边框内蒙版裁剪的开关：mask_clip=False 时关闭裁剪（内边框效果）
+    mask_js = ("  (function () { if (cardMaterial.uniforms.uMaskClip) "
+               "cardMaterial.uniforms.uMaskClip.value = "
+               + ("1.0" if mask_clip else "0.0") + "; })();\n")
     # 层2 边框卡封：仅边框非透明区域显示（边框 PNG 的 alpha 作蒙版），整卡尺寸、高于边框；
     # 无边框时无蒙版源，不绘制层2（保持现状仅层1）；双面渲染，卡背卡封与边框卡封统一
     seal_frame_layer = ""
@@ -2479,7 +2500,7 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
         .replace("__FG_ROUND_JS__", FG_ROUND_JS if round_foreground else "")
         .replace("__OUTLINE_LAYER__", outline_layer)
         .replace("__FRAME_LAYER__", frame_layer)
-        .replace("__SEAL_LAYER__", seal_layer + seal_frame_layer + scale_js)
+        .replace("__SEAL_LAYER__", seal_layer + seal_frame_layer + scale_js + mask_js)
         .replace("__SEAL_TICK__", _SEAL_TICK_JS)
         .replace("__TEXT_LAYER__", _text_layer_js(description, text_type, text_pos))
         .replace("__ENGINE_JS__", EFFECT_ENGINE_JS)

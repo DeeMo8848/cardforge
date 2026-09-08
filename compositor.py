@@ -251,12 +251,14 @@ def compose_card(
     content_scale: float = 1.0,
     seal_frame: str | Path | None = None,
     face_scales: bool = False,
+    mask_clip: bool = True,
 ) -> Image.Image:
     """2D 卡牌合成：背景 → 卡面 → 主体 → 卡封1 → 边框内蒙版 → 边框 → 卡封2 → 文字。
 
     缩放（content_scale）只作用于卡面（卡面素材 front/face + 主体），
     背景与层1卡封保持整卡尺寸；有边框时整卡内容仅绘制在边框外围以内（含中空）。
     face_scales: True 表示 front 是卡面素材（随缩放），False 表示 front 是背景底图（整卡不缩放）。
+    mask_clip: False 时不应用边框内蒙版裁剪，主体可延伸出边框外沿（内边框效果，边框外留一圈图像）。
     """
     w, h = size
     sc = max(0.5, min(1.5, content_scale))
@@ -355,7 +357,8 @@ def compose_card(
         # 泛洪填充卡外区域，未被填到的区域（边框环 + 中空）为内容可绘制区
         fr_canvas = Image.new("RGBA", (w, h), (0, 0, 0, 0))
         fr_canvas.alpha_composite(fr_im, (fr_x, fr_y))
-        canvas = _apply_mask(canvas, frame_interior_mask(fr_canvas, w, h))
+        if mask_clip:
+            canvas = _apply_mask(canvas, frame_interior_mask(fr_canvas, w, h))
 
         canvas.alpha_composite(fr_im, (fr_x, fr_y))
         # 层2 卡封（边框卡封）：以边框实际绘制形态的 alpha 为蒙版，只在边框非透明区域显示

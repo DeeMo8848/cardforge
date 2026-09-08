@@ -58,6 +58,7 @@ def regen(card_json: Path) -> bool:
         seal_rel = "seal.png"
     subject_over_frame = bool(d.get("subject_over_frame", extra.get("subject_over_frame")))
     subject_outline = bool(d.get("subject_outline", extra.get("subject_outline")))
+    mask_clip = bool(d.get("mask_clip", extra.get("mask_clip", True)))
     seal_front = d.get("seal_strength_front", extra.get("seal_strength_front", 0.945))
     seal_back = d.get("seal_strength_back", extra.get("seal_strength_back", 0.5775))
     try:
@@ -100,6 +101,7 @@ def regen(card_json: Path) -> bool:
         seal_strength_back=seal_back,
         content_scale=content_scale,
         interior_rel=interior_rel,
+        mask_clip=mask_clip,
     )
     (out_dir / "card.html").write_text(html, encoding="utf-8")
 
@@ -122,6 +124,7 @@ def regen(card_json: Path) -> bool:
             text_area=text.get("pos"),
             subject_over_frame=bool(d.get("subject_over_frame", extra.get("subject_over_frame"))),
             subject_outline=bool(d.get("subject_outline", extra.get("subject_outline"))),
+            mask_clip=mask_clip,
             size=(CARD_W, CARD_H),
             front=str(out_dir / "front.png"),
         )

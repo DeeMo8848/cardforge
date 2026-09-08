@@ -638,6 +638,7 @@ __THREE_JS__
     const radius = 0.032;                                  // 圆角半径（卡高单位），与原版辉光一致
     if (!hasOutside) {
       // 无边框（蒙版全白铺满）：回退为卡体圆角矩形距离，与旧辉光一致（卡体中央、四周为正距离）
+      parallaxDist = -1; // 无边框不限制视差
       for (let y = 0; y < H; y++) {
         for (let x = 0; x < W; x++) {
           const i = y * W + x;
@@ -699,6 +700,33 @@ __THREE_JS__
       const v8 = Math.max(0, Math.min(255, Math.round(128 + s / 0.15 * 127)));
       od[i * 4] = od[i * 4 + 1] = od[i * 4 + 2] = v8;
       od[i * 4 + 3] = 255;
+    }
+    // 视差安全距离：从画布中心（卡体中心）8 邻域 BFS 到最近蒙版边缘，换算场景单位
+    const cx = 225, cy = 300;
+    if (src[(cy * W + cx) * 4 + 3] <= 8) {
+      parallaxDist = 0; // 中心不在边框内部：彻底关闭视差，避免穿帮
+    } else {
+      const seen = new Uint8Array(N);
+      const qx = new Int32Array(N), qy = new Int32Array(N);
+      let head = 0, tail = 0;
+      qx[tail] = cx; qy[tail] = cy; tail++;
+      seen[cy * W + cx] = 1;
+      let found = -1;
+      const DX8 = [1, 1, 0, -1, -1, -1, 0, 1];
+      const DY8 = [0, 1, 1, 1, 0, -1, -1, -1];
+      while (head < tail && found < 0) {
+        const x = qx[head], y = qy[head]; head++;
+        for (let k = 0; k < 8; k++) {
+          const nx = x + DX8[k], ny = y + DY8[k];
+          if (nx < 0 || nx >= W || ny < 0 || ny >= H) continue;
+          const ni = ny * W + nx;
+          if (seen[ni]) continue;
+          if (src[ni * 4 + 3] <= 8) { found = Math.hypot(nx - cx, ny - cy); break; }
+          seen[ni] = 1;
+          qx[tail] = nx; qy[tail] = ny; tail++;
+        }
+      }
+      parallaxDist = (found > 0 ? found : 0) * pxToChu * CARD_HEIGHT;
     }
     sdfCtx.putImageData(out, 0, 0);
     sdfTexture.needsUpdate = true;
@@ -849,6 +877,50 @@ __ENGINE_JS__
   const raycaster = new THREE.Raycaster();
   const ndc = new THREE.Vector2();
 
+  // ---- 视差安全边界（方案A：按蒙版距离场限制主体位移，窄边框时自动收窄，绝不穿帮） ----
+  // parallaxDist = 卡体中心到边框内沿距离（场景单位）；-1 表示无边框，不限制
+  var parallaxDist = -1;
+  var subjectBox = null; // { halfW, halfH, offX, offY } 主体可见包围盒（场景单位，Y 向上）
+  function computeSubjectBox() {
+    var img = foregroundTexture.image;
+    if (!img || !img.width) return null;
+    var sw = 200, sh = Math.max(1, Math.round(sw * img.height / img.width));
+    var cv = document.createElement('canvas');
+    cv.width = sw; cv.height = sh;
+    var ctx = cv.getContext('2d');
+    ctx.drawImage(img, 0, 0, sw, sh);
+    var d = ctx.getImageData(0, 0, sw, sh).data;
+    var x0 = sw, y0 = sh, x1 = -1, y1 = -1;
+    for (var y = 0; y < sh; y++) {
+      for (var x = 0; x < sw; x++) {
+        if (d[(y * sw + x) * 4 + 3] > 10) {
+          if (x < x0) x0 = x; if (x > x1) x1 = x;
+          if (y < y0) y0 = y; if (y > y1) y1 = y;
+        }
+      }
+    }
+    if (x1 < 0) return null;
+    var cxn = (x0 + x1 + 1) / 2 / sw, cyn = (y0 + y1 + 1) / 2 / sh;
+    return {
+      halfW: ((x1 - x0 + 1) / sw) * 0.5 * CARD_WIDTH,
+      halfH: ((y1 - y0 + 1) / sh) * 0.5 * CARD_HEIGHT,
+      offX: (cxn - 0.5) * CARD_WIDTH,
+      offY: (0.5 - cyn) * CARD_HEIGHT
+    };
+  }
+  // 限制后的目标位移：有边框时主体可见包围盒（含位移）不越过卡体外沿（卡体外沿=边框外沿），
+  // 否则主体边缘会从边框旁露出穿帮；边框越窄余量越小，位移自动收窄
+  function clampParallax(rawX, rawY) {
+    if (parallaxDist < 0) return { x: rawX, y: rawY };        // 无边框：保留原视差漂浮
+    if (parallaxDist === 0 || !subjectBox) return { x: 0, y: 0 }; // 中心在边框外或无主体：关闭视差
+    var b = subjectBox;
+    var hw = CARD_WIDTH / 2, hh = CARD_HEIGHT / 2;
+    return {
+      x: Math.min(Math.max(rawX, b.halfW - b.offX - hw), hw - b.offX - b.halfW),
+      y: Math.min(Math.max(rawY, b.halfH - b.offY - hh), hh - b.offY - b.halfH)
+    };
+  }
+
   function updateHover(px, py) {
     const rect = canvas.getBoundingClientRect();
     ndc.set(((px - rect.left) / rect.width) * 2 - 1, -((py - rect.top) / rect.height) * 2 + 1);
@@ -917,8 +989,11 @@ __ENGINE_JS__
     tiltGroup.rotation.x = hoverCurrent.y * 0.72;
     tiltGroup.rotation.y = hoverCurrent.x * 0.72;
 
-    foregroundGroup.position.x = damp(foregroundGroup.position.x, hoverCurrent.x * 0.2, 9.5, dt);
-    foregroundGroup.position.y = damp(foregroundGroup.position.y, -hoverCurrent.y * 0.14, 9.5, dt);
+    // 视差安全限制：主体可见包围盒（含位移）不越过边框内沿，窄边框自动收窄位移
+    if (!subjectBox) subjectBox = computeSubjectBox();
+    const par = clampParallax(hoverCurrent.x * 0.2, -hoverCurrent.y * 0.14);
+    foregroundGroup.position.x = damp(foregroundGroup.position.x, par.x, 9.5, dt);
+    foregroundGroup.position.y = damp(foregroundGroup.position.y, par.y, 9.5, dt);
     foregroundGroup.position.z = damp(foregroundGroup.position.z, 0.024, 9.5, dt);
     foregroundGroup.rotation.x = hoverCurrent.y * 0.18;
     foregroundGroup.rotation.y = hoverCurrent.x * 0.18;

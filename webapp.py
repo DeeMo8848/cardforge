@@ -1768,6 +1768,9 @@ PAGE_HTML = r"""<!DOCTYPE html>
           <div class="webcard" id="webcardBox" style="display:none">
             <a id="webcardLink" href="#" target="_blank">🃏 打开 3D 网页卡</a>
           </div>
+          <div class="webcard" id="asmOpenBox" style="display:none">
+            <button class="btn small ghost" id="asmOpenBtn" type="button">🧩 在拼装页打开</button>
+          </div>
           <div class="meta" id="meta"></div>
         </div>
       </div>
@@ -2330,6 +2333,8 @@ function showResult(d) {
   } else if (wb) {
     wb.style.display = 'none';
   }
+  const ab = document.getElementById('asmOpenBox');
+  if (ab) ab.style.display = 'block';
   const meta = document.getElementById('meta');
   meta.innerHTML =
     '<b>卡片 ID</b>　' + d.id + '<br>' +
@@ -2344,6 +2349,31 @@ function showResult(d) {
   document.getElementById('result').style.display = 'block';
   document.getElementById('result').scrollIntoView({ behavior: 'smooth' });
 }
+
+// 生成结果 → 拼装页：刷新卡片列表（新生成的卡进下拉），选中并触发加载配置
+function openInAssembly(id) {
+  setStatus('asmStatus', '⏳ 正在载入拼装页…');
+  fetch('/api/cards').then(r => r.json()).then(dc => {
+    if (!dc.ok) throw new Error(dc.error || '刷新卡片列表失败');
+    CARDS.length = 0;
+    CARDS.push(...(dc.cards || []));
+    const cur = asmCardSel.value;
+    fillSelect('asmCard', ['', ...CARDS.map(c => c.id)], ['—— 不使用 ——', ...CARDS.map(c => c.name + '（' + c.id + '）')]);
+    if (cur && [...asmCardSel.options].some(o => o.value === cur)) asmCardSel.value = cur;
+    if (id && [...asmCardSel.options].some(o => o.value === id)) {
+      asmCardSel.value = id;
+      asmCardSel.dispatchEvent(new Event('change'));
+      switchTab('assemble');
+      document.getElementById('page-assemble').scrollIntoView({ behavior: 'smooth' });
+    } else {
+      switchTab('assemble');
+      setStatus('asmStatus', '未在下拉中找到卡片 ' + id + '，请手动选择', true);
+    }
+  }).catch(e => setStatus('asmStatus', '跳转失败：' + e.message, true));
+}
+
+const asmOpenBtn = document.getElementById('asmOpenBtn');
+if (asmOpenBtn) asmOpenBtn.addEventListener('click', () => openInAssembly(lastCardId));
 
 // ================= 2 特效DIY =================
 const FX_FIELDS = [

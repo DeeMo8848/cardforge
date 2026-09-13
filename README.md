@@ -61,8 +61,8 @@ cardforge.cmd 封面.png --name "xxx" --model isnet-anime
 | `--name` | 取文件名 | 卡片名称（收集册/列表里显示的名字，**不印在卡面上**） |
 | `--slug` | 由名称生成 | 卡片 id（小写连字符） |
 | `--style` | `transparent` | `transparent`=透明主体卡（PVZ 风）；`full-bleed`=整幅图卡面（影之诗/游戏王风） |
-| `--engine` | `local` | 抠图引擎（当前支持 `local`=rembg+BiRefNet） |
-| `--model` | `birefnet-general` | 本地抠图模型（质量优先可选 `birefnet-massive`；动漫素材推荐 `isnet-anime`） |
+| `--engine` | `local` | 抠图引擎（`local`=rembg+BiRefNet；配置了抠图 API 时选 `api` 自动切换） |
+| `--model` | 自动 | 抠图模型。缺省时：`settings.json` 配置了抠图 API（`matting_api`）则用 `api`，否则用 `birefnet-general`；显式指定则用指定模型（`api`=阿里云分割抠图；质量优先 `birefnet-massive`；动漫素材推荐 `isnet-anime`） |
 
 ### 卡面文字（印在卡面上，可选）
 
@@ -139,6 +139,18 @@ GitHub 仓库只包含本体程序（约几 MB），**虚拟环境和模型都�
 
 > **模型复用**：多个副本/多台机器想共享已下载的模型时，设置环境变量 `CARDFORGE_MODELS_DIR` 指向模型所在目录即可，例如
 > `set CARDFORGE_MODELS_DIR=D:\ai\shared-models`（再运行 webui.cmd）。
+
+### 使用抠图 API（可选）
+
+低配机器不想跑本地大模型时，可接入阿里云视觉智能开放平台「分割抠图」（约 0.002 元/次）：
+在 `settings.json` 的 `matting_api` 填入 AccessKey 后，生成页下拉会自动出现「云端抠图 API」并作为默认；
+CLI 缺省也会自动走 API（显式 `--model` 仍然优先）。
+
+```json
+"matting_api": { "provider": "aliyun", "access_key_id": "你的AK", "access_key_secret": "你的SK" }
+```
+
+> `settings.json` 已在 .gitignore 中，AccessKey 不会进入仓库。API 会把图片传到云端处理，素材不外传时请用本地模型。
 
 ## 产物
 

@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import json
 import os
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -76,6 +77,18 @@ SUPPORTED_MODELS = {
 }
 
 
+def get_api_config() -> dict:
+    """读取 settings.json 中的抠图 API 配置；AccessKey 未填写时返回 {}（不使用 API）。"""
+    try:
+        s = json.loads((Path(__file__).resolve().parent / "settings.json").read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    cfg = s.get("matting_api") or {}
+    if isinstance(cfg, dict) and cfg.get("access_key_id") and cfg.get("access_key_secret"):
+        return cfg
+    return {}
+
+
 class MattingEngine(ABC):
     """抠图引擎抽象：输入 PIL Image，输出同尺寸 RGBA（透明背景）。"""
 
@@ -120,8 +133,77 @@ class RembgEngine(MattingEngine):
         return result
 
 
+class ApiMattingEngine(MattingEngine):
+    """云端引擎：阿里云视觉智能开放平台·分割抠图（SegmentCommonImage）。
+
+    本地图片以文件流形式传给官方 SDK（Advance 请求自动上传临时 OSS），
+    返回主体透明 PNG 后下载回本地。SDK 仅在真正调用时惰性加载。
+    """
+
+    name = "api"
+
+    def __init__(self, model: str = "api") -> None:
+        super().__init__(model)
+        self._client = None
+
+    def _get_client(self):
+        if self._client is None:
+            cfg = get_api_config()
+            if not cfg:
+                raise RuntimeError(
+                    "未配置抠图 API：请在 settings.json 的 matting_api 填写阿里云 AccessKey"
+                )
+            try:
+                from alibabacloud_imageseg20191230.client import Client
+                from alibabacloud_tea_openapi.models import Config
+            except ImportError as e:
+                raise RuntimeError(
+                    "缺少阿里云 SDK，请先安装："
+                    "pip install alibabacloud_imageseg20191230 alibabacloud_tea_openapi alibabacloud_tea_util"
+                ) from e
+            self._client = Client(Config(
+                access_key_id=cfg["access_key_id"],
+                access_key_secret=cfg["access_key_secret"],
+                endpoint="imageseg.cn-shanghai.aliyuncs.com",
+                region_id="cn-shanghai",
+            ))
+        return self._client
+
+    def remove_background(self, image: Image.Image) -> Image.Image:
+        import io
+        import urllib.request
+
+        client = self._get_client()
+        try:
+            from alibabacloud_imageseg20191230.models import SegmentCommonImageAdvanceRequest
+            from alibabacloud_tea_util.models import RuntimeOptions
+        except ImportError as e:
+            raise RuntimeError(
+                "缺少阿里云 SDK，请先安装："
+                "pip install alibabacloud_imageseg20191230 alibabacloud_tea_openapi alibabacloud_tea_util"
+            ) from e
+
+        buf = io.BytesIO()
+        image.convert("RGBA").save(buf, format="PNG")
+        request = SegmentCommonImageAdvanceRequest()
+        request.image_urlobject = io.BytesIO(buf.getvalue())
+        try:
+            response = client.segment_common_image_advance(request, RuntimeOptions())
+        except Exception as e:
+            raise RuntimeError(f"阿里云分割抠图调用失败: {e}") from e
+        result_url = response.body.data.image_url
+        with urllib.request.urlopen(result_url, timeout=60) as r:
+            raw = r.read()
+        result = Image.open(io.BytesIO(raw)).convert("RGBA")
+        if result.size != image.size:
+            result = result.resize(image.size, Image.LANCZOS)
+        return result
+
+
 def create_engine(engine_name: str = "local", model: str = DEFAULT_MODEL) -> MattingEngine:
-    """引擎工厂。engine_name: local/rembg（本地），后续可注册火山引擎等 API 引擎。"""
+    """引擎工厂。engine_name: local/rembg（本地）或 api（阿里云分割抠图）。"""
     if engine_name in ("local", "rembg", "auto"):
         return RembgEngine(model)
-    raise ValueError(f"未知抠图引擎: {engine_name}（当前支持: local）")
+    if engine_name == "api":
+        return ApiMattingEngine(model)
+    raise ValueError(f"未知抠图引擎: {engine_name}（当前支持: local、api）")

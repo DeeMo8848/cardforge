@@ -26,7 +26,13 @@ from PIL import Image
 
 from carddef import build_card_def, save_card_def
 from compositor import CARD_H, CARD_W, compose_card
-from engine import DEFAULT_MODEL, SUPPORTED_MODELS, MattingEngine, create_engine
+from engine import (
+    DEFAULT_MODEL,
+    SUPPORTED_MODELS,
+    MattingEngine,
+    create_engine,
+    get_api_config,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 EFFECTS_DIR = PROJECT_ROOT / "assets" / "effects"        # 自定义特效 JSON（名称.json → {"def": {...}}）
@@ -669,8 +675,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--style", choices=["transparent", "full-bleed"], default="transparent",
                         help="transparent=透明主体卡(PVZ风)；full-bleed=整幅图卡面(影之诗/游戏王风)")
     parser.add_argument("--engine", default="local", help="抠图引擎（当前支持 local=rembg+BiRefNet）")
-    parser.add_argument("--model", default=DEFAULT_MODEL, choices=list(SUPPORTED_MODELS),
-                        help="本地模型")
+    parser.add_argument("--model", default=None, choices=[*SUPPORTED_MODELS, "api"],
+                        help="抠图模型。缺省时：settings.json 配置了抠图 API 则用 api，否则用默认本地模型；"
+                             "显式指定则使用指定模型（api=阿里云分割抠图）")
     parser.add_argument("--title", default=None, help="卡面标题文字（可选）")
     parser.add_argument("--desc", default=None, help="卡面描述文字（可选）")
     parser.add_argument("--text-type", choices=["none", "transparent", "boxed"], default="none",
@@ -723,13 +730,16 @@ def main(argv: list[str] | None = None) -> int:
                     text_pos = None
             if not text_pos:
                 print("警告：--text-pos 格式应为 'x:y:w'（如 0.5:0.82:0.84），已忽略", file=sys.stderr)
+        # 模型优先级：显式 --model > settings.json 配置了抠图 API（默认用 API）> 默认本地模型
+        model = args.model or ("api" if get_api_config() else DEFAULT_MODEL)
+        engine_name = "api" if model == "api" else args.engine
         result = make_card(
             image_path,
             name=args.name,
             slug=args.slug,
             style=args.style,
-            engine_name=args.engine,
-            model=args.model,
+            engine_name=engine_name,
+            model=model,
             title=args.title,
             desc=args.desc,
             text_type=args.text_type,

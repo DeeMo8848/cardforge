@@ -32,7 +32,7 @@ from urllib.parse import unquote, quote, parse_qs
 import cardforge
 from carddef import build_card_def, save_card_def
 from compositor import CARD_H, CARD_W, compose_card, save_frame_interior_mask
-from engine import DEFAULT_MODEL, SUPPORTED_MODELS, create_engine, model_status
+from engine import DEFAULT_MODEL, SUPPORTED_MODELS, create_engine, get_api_config, model_status
 import webcard
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -61,7 +61,7 @@ def get_engine(model: str):
     """进程内按模型缓存引擎实例（会话复用，避免重复加载模型）。"""
     with _engines_lock:
         if model not in _engines:
-            _engines[model] = create_engine("local", model)
+            _engines[model] = create_engine("api" if model == "api" else "local", model)
         return _engines[model]
 
 
@@ -361,6 +361,10 @@ def build_page() -> str:
     frame_options = ["", *list_assets("frames")]
     seal_options = ["", *list_assets("seals")]
     model_options = [(k, v) for k, v in SUPPORTED_MODELS.items()]
+    default_model = DEFAULT_MODEL
+    if get_api_config():
+        model_options.append(("api", "云端抠图 API（阿里云分割抠图，settings.json 已配置）"))
+        default_model = "api"
     assets_json = json.dumps({
         "backgrounds": bg_options,
         "frames": frame_options,
@@ -380,7 +384,7 @@ def build_page() -> str:
         .replace("__MODELS_JSON__", models_json)
         .replace("__EFFECTS_JSON__", effects_json)
         .replace("__CARDS_JSON__", cards_json)
-        .replace("__DEFAULT_MODEL__", json.dumps(DEFAULT_MODEL))
+        .replace("__DEFAULT_MODEL__", json.dumps(default_model))
     )
 
 

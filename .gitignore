@@ -45,3 +45,7 @@ Thumbs.db
 
 # 浏览器自动化临时配置目录（browser profile）
 _edge_profile/
+
+# 开发计划/测试文档（仅本地，不上传 GitHub）
+*.md
+!README.md

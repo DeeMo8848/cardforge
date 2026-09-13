@@ -575,6 +575,9 @@ __THREE_JS__
   });
 
   // ---- 辉光 aura（沿蒙版边缘绘制：采样蒙版有符号距离场，不再用固定圆角矩形） ----
+  // 样式由 GLOW_EFFECTS 预设注入：uGlowTop/Bottom 颜色渐变、uGlowTight/uGlowSoft 距离、
+  // uGlowMode 形状模式（0渐变/1四角/2双色/3菲涅尔/4双环/5RGB循环/6霓虹/7发廊螺纹）、
+  // uGlowFresnel 视角权重（1=正对 0=侧视，由渲染循环每帧更新）、uTime 动画时间
   const auraMaterial = new THREE.ShaderMaterial({
     transparent: true,
     depthWrite: false,
@@ -582,7 +585,19 @@ __THREE_JS__
     side: THREE.DoubleSide,
     blending: THREE.AdditiveBlending,
     toneMapped: false,
-    uniforms: { uSdfMap: { value: null } },
+    uniforms: {
+      uSdfMap: { value: null },
+      uGlowTop: { value: new THREE.Vector3(0.98, 0.63, 0.18) },
+      uGlowBottom: { value: new THREE.Vector3(0.44, 0.08, 0.025) },
+      uGlowTight: { value: 0.014 },
+      uGlowSoft: { value: 0.045 },
+      uGlowMode: { value: 0 },
+      uGlowFacing: { value: 1.0 },
+      uGlowFresnel: { value: 0.0 },
+      uGlowSpeed: { value: 0.0 },
+      uTime: { value: 0.0 },
+      uGlowStrength: { value: 1.0 },
+    },
     vertexShader: `
       varying vec2 vUv;
       void main() {
@@ -592,6 +607,16 @@ __THREE_JS__
     `,
     fragmentShader: `
       uniform sampler2D uSdfMap;
+      uniform vec3 uGlowTop;
+      uniform vec3 uGlowBottom;
+      uniform float uGlowTight;
+      uniform float uGlowSoft;
+      uniform float uGlowMode;
+      uniform float uGlowFacing;
+      uniform float uGlowFresnel;
+      uniform float uGlowSpeed;
+      uniform float uTime;
+      uniform float uGlowStrength;
       varying vec2 vUv;
       // 蒙版有符号距离（卡高 UV 单位，正=蒙版外）：由 SDF 画布解码
       // 编码约定：128=蒙版边缘；>128=外部距离（127 分度对应 0.15 卡高）；<128=内部（不发光）
@@ -601,16 +626,67 @@ __THREE_JS__
         return (v * 255.0 - 128.0) / 127.0 * 0.15;
       }
       void main() {
-        float distance = maskDistance(vUv);
-        float outside = step(0.0, distance);
-        float tightGlow = 1.0 - smoothstep(0.0, 0.014, distance);
-        float softGlow = 1.0 - smoothstep(0.006, 0.06, distance);
-        vec3 glowColor = mix(vec3(0.44, 0.08, 0.025), vec3(0.98, 0.63, 0.18), vUv.y);
-        float alpha = outside * (tightGlow * 0.14 + softGlow * 0.045);
+        float dist = maskDistance(vUv);
+        float outside = step(0.0, dist);
+        // mode 4 双环：紧致高亮环 + 外围大范围淡光（两层 smoothstep 独立调节）
+        float tight, soft;
+        if (uGlowMode > 3.5 && uGlowMode < 4.5) {
+          tight = 1.0 - smoothstep(0.0, uGlowTight * 0.5, dist);
+          soft = 1.0 - smoothstep(0.004, uGlowSoft * 1.6, dist);
+        } else {
+          tight = 1.0 - smoothstep(0.0, uGlowTight, dist);
+          soft = 1.0 - smoothstep(0.006, uGlowSoft, dist);
+        }
+        // 基础色：纵向渐变
+        vec3 glowColor = mix(uGlowBottom, uGlowTop, vUv.y);
+        // mode 1 四角聚焦：四角更亮、边中点较弱（卡体四角在画布 uv 约 0.103/0.897）
+        if (uGlowMode > 0.5 && uGlowMode < 1.5) {
+          float corner = 0.0;
+          corner += pow(max(0.0, 1.0 - distance(vUv, vec2(0.103, 0.103)) * 3.2), 2.0);
+          corner += pow(max(0.0, 1.0 - distance(vUv, vec2(0.897, 0.103)) * 3.2), 2.0);
+          corner += pow(max(0.0, 1.0 - distance(vUv, vec2(0.103, 0.897)) * 3.2), 2.0);
+          corner += pow(max(0.0, 1.0 - distance(vUv, vec2(0.897, 0.897)) * 3.2), 2.0);
+          glowColor *= 0.35 + 1.65 * corner;
+        }
+        // mode 5 RGB循环变色：三通道正弦错相，平滑循环衔接（非脉冲）
+        if (uGlowMode > 4.5 && uGlowMode < 5.5) {
+          float t = uTime * uGlowSpeed;
+          glowColor = vec3(0.5 + 0.5 * sin(t), 0.5 + 0.5 * sin(t + 2.094), 0.5 + 0.5 * sin(t + 4.189));
+          glowColor = glowColor * 0.8 + 0.2;
+        }
+        // mode 6 霓虹灯：两种灯交替明暗（平滑正弦错相）+ 轻微灯管频闪
+        if (uGlowMode > 5.5 && uGlowMode < 6.5) {
+          float ph = uTime * uGlowSpeed * 6.2832;
+          float a = 0.5 + 0.5 * sin(ph);
+          float b = 0.5 + 0.5 * sin(ph + 3.1416);
+          float flicker = 0.92 + 0.08 * sin(uTime * 23.0) * sin(uTime * 17.0);
+          glowColor = (uGlowTop * (0.25 + 0.75 * a) + uGlowBottom * (0.25 + 0.75 * b)) * flicker * 1.5;
+        }
+        // mode 7 发廊螺纹：沿边框旋转的红白蓝三色彩条（角度驱动）
+        if (uGlowMode > 6.5 && uGlowMode < 7.5) {
+          float ang = atan(vUv.y - 0.5, vUv.x - 0.5);
+          float stripe = fract(ang / 6.2832 * 3.0 + uTime * uGlowSpeed);
+          vec3 c1 = vec3(1.0, 0.3, 0.45);
+          vec3 c2 = vec3(1.0, 1.0, 1.0);
+          vec3 c3 = vec3(0.35, 0.65, 1.0);
+          glowColor = stripe < 0.333 ? c1 : (stripe < 0.666 ? c2 : c3);
+        }
+        // 菲涅尔描边：倾斜（侧视）时边缘光增强，仅视角驱动、无频闪
+        float alphaBase = tight * 0.14 + soft * 0.045;
+        if (uGlowFresnel > 0.01) {
+          float tilt = 1.0 - uGlowFacing;
+          alphaBase *= 1.0 + uGlowFresnel * (0.5 + 1.7 * smoothstep(0.3, 0.85, tilt));
+        }
+        float alpha = outside * alphaBase * uGlowStrength;
         gl_FragColor = vec4(glowColor, alpha);
       }
     `,
   });
+  // 辉光朝向/时间每帧更新辅助向量
+  const _qGlow = new THREE.Quaternion();
+  const _vN = new THREE.Vector3();
+  const _vGlow = new THREE.Vector3();
+__GLOW_INIT__
 
   // ---- 边框内区域蒙版画布（白=边框环+中空，黑=边框外围）----
   // 正面整卡内容（卡面/主体/层1卡封）仅绘制在边框外围以内；默认全白（无边框时内容完整）
@@ -1014,6 +1090,7 @@ __ENGINE_JS__
     cardMaterial.uniforms.uHover.value = damp(cardMaterial.uniforms.uHover.value, hover.current, 11, dt);
     cardMaterial.uniforms.uPointer.value.copy(pointer);
 __SEAL_TICK__
+__GLOW_TICK__
 
     __fx.tick(dt);
     // 特效属于正面装饰：翻到背面（绕 Y 转过 90°）时隐藏，避免叠在卡背上
@@ -1299,6 +1376,61 @@ SEAL_EFFECTS = {
     "B33齿轮膜": {"mode": "sparkle", "pattern": "gear", "color": (255, 246, 226), "scale": 6.0, "strength": 0.72, "speed": 1.2, "rainbow": 0.6, "twinkle": 1.0, "twinkleShape": 1.0},
     "纹路1": {"mode": "sparkle", "pattern": "circuit", "color": (255, 244, 220), "scale": 8.0, "strength": 0.72, "speed": 1.2, "rainbow": 0.65, "twinkle": 1.0, "twinkleShape": 1.0},
 }
+
+# ---- 辉光特效预设（沿卡体/边框边缘发光） ----
+# mode: 0=纵向渐变（默认） / 1=四角聚焦 / 2=上下双色 / 3=菲涅尔描边（视角驱动） /
+#       4=双环辉光 / 5=RGB循环变色 / 6=霓虹灯交替 / 7=发廊螺纹旋转
+# mode>=5 的效果使用时间动画（uTime），为动画类辉光；其余仅静态或视角驱动（无频闪）
+GLOW_EFFECTS = {
+    "暖金描边": {"colorTop": (0.98, 0.63, 0.18), "colorBottom": (0.44, 0.08, 0.025),
+                "tight": 0.014, "soft": 0.045, "mode": 0, "fresnel": 0.0, "speed": 0.0},
+    "冰蓝冷光": {"colorTop": (0.45, 0.8, 1.0), "colorBottom": (0.05, 0.25, 0.55),
+                "tight": 0.008, "soft": 0.07, "mode": 0, "fresnel": 0.2, "speed": 0.0},
+    "紫罗兰夜光": {"colorTop": (0.78, 0.42, 1.0), "colorBottom": (0.28, 0.05, 0.52),
+                  "tight": 0.01, "soft": 0.06, "mode": 0, "fresnel": 0.15, "speed": 0.0},
+    "四角聚焦": {"colorTop": (0.98, 0.63, 0.18), "colorBottom": (0.44, 0.08, 0.025),
+                "tight": 0.012, "soft": 0.05, "mode": 1, "fresnel": 0.0, "speed": 0.0},
+    "上下双色": {"colorTop": (0.3, 0.78, 1.0), "colorBottom": (1.0, 0.55, 0.2),
+                "tight": 0.012, "soft": 0.05, "mode": 2, "fresnel": 0.0, "speed": 0.0},
+    "菲涅尔描边": {"colorTop": (0.9, 0.86, 0.65), "colorBottom": (0.5, 0.28, 0.14),
+                  "tight": 0.012, "soft": 0.05, "mode": 3, "fresnel": 1.0, "speed": 0.0},
+    "双环辉光": {"colorTop": (0.95, 0.72, 0.28), "colorBottom": (0.62, 0.16, 0.05),
+                "tight": 0.004, "soft": 0.09, "mode": 4, "fresnel": 0.0, "speed": 0.0},
+    "RGB变色灯光": {"colorTop": (1.0, 1.0, 1.0), "colorBottom": (1.0, 1.0, 1.0),
+                   "tight": 0.01, "soft": 0.06, "mode": 5, "fresnel": 0.0, "speed": 0.6},
+    "霓虹灯": {"colorTop": (1.0, 0.32, 0.38), "colorBottom": (0.35, 0.8, 1.0),
+              "tight": 0.008, "soft": 0.05, "mode": 6, "fresnel": 0.0, "speed": 1.1},
+    "发廊螺纹": {"colorTop": (1.0, 0.25, 0.5), "colorBottom": (0.25, 0.6, 1.0),
+                "tight": 0.014, "soft": 0.045, "mode": 7, "fresnel": 0.0, "speed": 0.9},
+    "樱花粉": {"colorTop": (1.0, 0.78, 0.88), "colorBottom": (0.72, 0.3, 0.5),
+               "tight": 0.012, "soft": 0.06, "mode": 0, "fresnel": 0.2, "speed": 0.0},
+}
+
+# 自定义辉光特效 JSON（名称.json → {"def": {...}}，与 GLOW_EFFECTS 预设同构）
+GLOW_CUSTOM_DIR = PROJECT_ROOT / "assets" / "effects-glow"
+
+
+def list_custom_glows() -> list[str]:
+    """返回已保存的自定义辉光特效名称。"""
+    if not GLOW_CUSTOM_DIR.exists():
+        return []
+    return sorted(p.stem for p in GLOW_CUSTOM_DIR.glob("*.json"))
+
+
+def resolve_glow_def(name: str):
+    """取辉光特效定义：内置预设优先，其次自定义 JSON。找不到返回 None。"""
+    if name in GLOW_EFFECTS:
+        return GLOW_EFFECTS[name]
+    f = GLOW_CUSTOM_DIR / f"{name}.json"
+    if f.exists():
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+            defn = data.get("def") if isinstance(data, dict) else None
+            if isinstance(defn, dict):
+                return defn
+        except (OSError, ValueError):
+            pass
+    return None
 
 _SEAL_PATTERN_JS = r"""
   function sealStarPath(c, cx, cy, R, r) {
@@ -2039,6 +2171,52 @@ _SEAL_TICK_JS = (
     "  // 膜光效完全由视角驱动（拖动旋转触发）：无时间动画、无指针光球，杜绝频闪\n"
 )
 
+# 辉光每帧更新：动画时间推进 + 卡面朝向（1=正对视角，供菲涅尔描边使用）
+_GLOW_TICK_JS = (
+    "  (function () {\n"
+    "    if (!auraMaterial.uniforms.uTime) return;\n"
+    "    auraMaterial.uniforms.uTime.value += dt;\n"
+    "    flipGroup.updateWorldMatrix(true, false);\n"
+    "    flipGroup.getWorldQuaternion(_qGlow);\n"
+    "    _vN.set(0, 0, 1).applyQuaternion(_qGlow);\n"
+    "    _vGlow.copy(camera.position).normalize();\n"
+    "    auraMaterial.uniforms.uGlowFacing.value = Math.abs(_vN.dot(_vGlow));\n"
+    "  })();\n"
+)
+
+
+def _glow_init_js(glow_name: str | None, glow_strength: float) -> str:
+    """按辉光预设注入参数（none=隐藏辉光；未知名回退默认预设）。"""
+    if glow_name == "none":
+        return "  (function () { auraMaterial.visible = false; })();\n"
+    glow = resolve_glow_def(glow_name) if glow_name else None
+    if glow is None:
+        glow = (resolve_glow_def(next(iter(GLOW_EFFECTS))) if GLOW_EFFECTS else {
+            "colorTop": (0.98, 0.63, 0.18), "colorBottom": (0.44, 0.08, 0.025),
+            "tight": 0.014, "soft": 0.045, "mode": 0, "fresnel": 0.0, "speed": 0.0})
+        glow_strength = 1.0
+    strength = min(2.0, max(0.0, glow_strength))
+    top = tuple(glow.get("colorTop") or (0.98, 0.63, 0.18))
+    bottom = tuple(glow.get("colorBottom") or (0.44, 0.08, 0.025))
+    mode = int(glow.get("mode") or 0)
+    fresnel = float(glow.get("fresnel") or 0.0)
+    speed = float(glow.get("speed") or 0.0)
+    tight = float(glow.get("tight") or 0.014)
+    soft = float(glow.get("soft") or 0.045)
+    return (
+        "  (function () {\n"
+        "    auraMaterial.uniforms.uGlowTop.value.set(" + ", ".join(repr(v) for v in top) + ");\n"
+        "    auraMaterial.uniforms.uGlowBottom.value.set(" + ", ".join(repr(v) for v in bottom) + ");\n"
+        "    auraMaterial.uniforms.uGlowTight.value = " + repr(tight) + ";\n"
+        "    auraMaterial.uniforms.uGlowSoft.value = " + repr(soft) + ";\n"
+        "    auraMaterial.uniforms.uGlowMode.value = " + repr(mode) + ";\n"
+        "    auraMaterial.uniforms.uGlowFresnel.value = " + repr(fresnel) + ";\n"
+        "    auraMaterial.uniforms.uGlowSpeed.value = " + repr(speed) + ";\n"
+        "    auraMaterial.uniforms.uGlowStrength.value = " + repr(strength) + ";\n"
+        "    auraMaterial.uniforms.uTime.value = 0.0;\n"
+        "  })();\n"
+    )
+
 
 def _text_adapt_limit(text_type: str, description: str | None, text_pos: dict | None) -> float | None:
     """文本型主体自适应缩放比例（文本区顶部 y1，默认 0.70）；非文本型返回 None。
@@ -2389,7 +2567,9 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
                     face_scales: bool = False,
                     interior_rel: str | None = None,
                     background_rel: str | None = None,
-                    mask_clip: bool = True) -> str:
+                    mask_clip: bool = True,
+                    glow_name: str | None = None,
+                    glow_strength: float = 1.0) -> str:
     """生成自包含 3D 卡网页 HTML。
 
     effects: 特效实例列表 [{"name":..., "def": {...}, "pos": {...}}]，def 为完整特效参数。
@@ -2409,6 +2589,8 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
     边框实际绘制形态（整卡或按主体包围盒）在浏览器端动态对齐。
     background_rel: 独立背景层素材（卡面单独缩放时背景整卡铺满，不随缩放；缺省用深色底）。
     mask_clip: False 时不应用边框内蒙版裁剪，主体可延伸出边框外沿（内边框效果，与 2D 一致）。
+    glow_name: 辉光特效名（GLOW_EFFECTS 键）；"none"=关闭辉光；None=默认暖金描边。
+    glow_strength: 辉光整体强度（0~2，默认 1.0；未知名预设时强制 1.0）。
     """
     three_js = THREE_JS.read_text(encoding="utf-8")
     fg_js = (
@@ -2502,6 +2684,8 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
         .replace("__FRAME_LAYER__", frame_layer)
         .replace("__SEAL_LAYER__", seal_layer + seal_frame_layer + scale_js + mask_js)
         .replace("__SEAL_TICK__", _SEAL_TICK_JS)
+        .replace("__GLOW_TICK__", _GLOW_TICK_JS)
+        .replace("__GLOW_INIT__", _glow_init_js(glow_name, glow_strength))
         .replace("__TEXT_LAYER__", _text_layer_js(description, text_type, text_pos))
         .replace("__ENGINE_JS__", EFFECT_ENGINE_JS)
         .replace("__EFFECTS__", _json(effects or []))

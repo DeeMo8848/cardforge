@@ -44,7 +44,10 @@ EFFECTS_DIR = ASSETS / "effects"              # 自定义特效 JSON
 EFFECT_IMG_DIR = ASSETS / "effects-images"    # 特效图像/精灵帧图
 SETTINGS_FILE = PROJECT_ROOT / "settings.json"  # 界面参数持久化（如卡封强度）
 
-_ASSET_TYPES = ("backgrounds", "faces", "frames", "frames-text", "seals", "backs", "effects-images")
+_ASSET_TYPES = ("backgrounds", "faces", "frames", "frames-text", "seals", "backs", "effects-images",
+                "effects", "frame-effects")
+# 特效/边框特效不是图片文件：内置定义在源码里、自定义在 JSON 里，不支持图片上传/重命名
+_EFFECT_ASSET_TYPES = ("effects", "frame-effects")
 _IMG_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".gif")
 
 for _d in (UPLOAD_DIR, TMP_DIR, PREVIEW_DIR, EFFECTS_DIR, EFFECT_IMG_DIR, ASSETS / "frames-text"):
@@ -93,6 +96,65 @@ def _remove_builtin_seal(stem: str) -> str | None:
         new = pat.sub("", txt)
         if new != txt:
             path.write_text(new, encoding="utf-8")
+    return removed
+
+
+def list_effect_assets(atype: str) -> list[dict]:
+    """特效/边框特效列表：内置（源码定义）+ 自定义（JSON 文件），标注是否内置。"""
+    if atype == "effects":
+        builtin = list(cardforge.BUILTIN_EFFECTS.keys())
+        custom = [p.stem for p in EFFECTS_DIR.glob("*.json") if p.stem not in builtin]
+    else:  # frame-effects
+        builtin = list(webcard.GLOW_EFFECTS.keys())
+        custom = [p.stem for p in webcard.GLOW_CUSTOM_DIR.glob("*.json") if p.stem not in builtin]
+    return ([{"name": n, "builtin": True} for n in sorted(builtin)]
+            + [{"name": n, "builtin": False} for n in sorted(custom)])
+
+
+def _remove_builtin_effect(stem: str) -> str | None:
+    """同步删除内置特效：BUILTIN_EFFECTS 定义（内存 + cardforge.py 源文件）。
+
+    返回被删除的内置特效名；若并非内置（无定义）返回 None。
+    """
+    if not stem:
+        return None
+    removed = None
+    if hasattr(cardforge, "BUILTIN_EFFECTS") and stem in cardforge.BUILTIN_EFFECTS:
+        del cardforge.BUILTIN_EFFECTS[stem]
+        removed = stem
+    try:
+        txt = (PROJECT_ROOT / "cardforge.py").read_text(encoding="utf-8")
+    except OSError:
+        return removed
+    # 内置特效定义是多行字典：从 `"name": {` 到独立成行的 `},`
+    pat = re.compile(r'^[ \t]*"{stem}": \{{.*?\n[ \t]*\}},\n'.format(stem=re.escape(stem)),
+                     re.M | re.S)
+    new = pat.sub("", txt)
+    if new != txt:
+        (PROJECT_ROOT / "cardforge.py").write_text(new, encoding="utf-8")
+    return removed
+
+
+def _remove_builtin_glow(stem: str) -> str | None:
+    """同步删除内置辉光：GLOW_EFFECTS 定义（内存 + webcard.py 源文件）。
+
+    返回被删除的内置辉光名；若并非内置（无定义）返回 None。
+    """
+    if not stem:
+        return None
+    removed = None
+    if hasattr(webcard, "GLOW_EFFECTS") and stem in webcard.GLOW_EFFECTS:
+        del webcard.GLOW_EFFECTS[stem]
+        removed = stem
+    try:
+        txt = (PROJECT_ROOT / "webcard.py").read_text(encoding="utf-8")
+    except OSError:
+        return removed
+    # 内置辉光定义是两行字典条目（首行含 "name": {，续行以 }, 收尾）
+    pat = re.compile(r'^[ \t]*"{stem}": \{{.*\n[ \t]*.*\}},\n'.format(stem=re.escape(stem)), re.M)
+    new = pat.sub("", txt)
+    if new != txt:
+        (PROJECT_ROOT / "webcard.py").write_text(new, encoding="utf-8")
     return removed
 
 
@@ -146,6 +208,9 @@ def list_cards() -> list[dict]:
                 "mask_clip": inherit.get("mask_clip"),
                 "back": inherit.get("back"),
                 "scale": _parse_scale((data.get("extra") or {}).get("card_scale", 1.0)),
+                "glow": data.get("glow_name") or (data.get("extra") or {}).get("glow_name"),
+                "glow_strength": data.get("glow_strength",
+                                        (data.get("extra") or {}).get("glow_strength", 1.0)),
                 "effects": effects,
             })
     return cards
@@ -207,6 +272,15 @@ def _parse_scale(v) -> float:
     except (TypeError, ValueError):
         return 1.0
     return min(1.5, max(0.5, s))
+
+
+def _parse_glow_strength(v, dflt: float = 1.0) -> float:
+    """解析辉光整体强度（0~2，默认 1）。"""
+    try:
+        s = float(v)
+    except (TypeError, ValueError):
+        return dflt
+    return min(2.0, max(0.0, s))
 
 
 def _abs_effect_images(effects: list[dict]) -> list[dict]:
@@ -295,6 +369,7 @@ def build_page() -> str:
         "faces": list_assets("faces"),
         "backs": list_assets("backs"),
         "effect_images": list_assets("effects-images"),
+        "glows": [*webcard.GLOW_EFFECTS.keys(), *webcard.list_custom_glows()],
     }, ensure_ascii=False)
     models_json = json.dumps(model_options, ensure_ascii=False)
     effects_json = json.dumps(list_effects(), ensure_ascii=False)
@@ -504,6 +579,8 @@ def _save_assembly(data: dict) -> dict:
     subject_outline = bool(data.get("subject_outline"))
     mask_clip = bool(data.get("mask_clip", True))
     scale = _parse_scale(data.get("scale"))
+    glow_name = (data.get("glow") or "none")
+    glow_strength = _parse_glow_strength(data.get("glow_strength"))
     # 卡面素材可作为「前景主体层」使用：
     #   - 浮于边框之上：卡面同时作底图与前景层（同一图对齐，前景浮起后主体跃出边框）
     #   - 文本型（boxed）：卡面只在余卡面范围（卡顶到文本区顶部）呈现，底图改用背景/深色
@@ -644,7 +721,9 @@ def _save_assembly(data: dict) -> dict:
                                 content_scale=scale,
                                 face_scales=face_scales,
                                 interior_rel=interior_rel,
-                                background_rel=bg_rel_url),
+                                background_rel=bg_rel_url,
+                                glow_name=glow_name,
+                                glow_strength=glow_strength),
         encoding="utf-8",
     )
 
@@ -680,6 +759,8 @@ def _save_assembly(data: dict) -> dict:
             "back_name": back_file,
             "face_name": face_used if face_used else None,
             "background_name": custom_bg if custom_bg else None,
+            "glow_name": glow_name,
+            "glow_strength": glow_strength,
             "effects": [{"name": e["name"], "pos": e["pos"]} for e in effect_instances],
         },
     )
@@ -732,6 +813,8 @@ def _make_text(data: dict) -> dict:
     seal_name = None
     seal_frame_name = None
     card_scale = 1.0
+    glow_name = None
+    glow_strength = 1.0
     cf = PROJECT_ROOT / "cards" / f"{card_id}.json"
     try:
         card = json.loads(cf.read_text(encoding="utf-8"))
@@ -742,6 +825,9 @@ def _make_text(data: dict) -> dict:
         subject_outline = bool(card.get("subject_outline", _extra.get("subject_outline")))
         mask_clip = bool(card.get("mask_clip", _extra.get("mask_clip", True)))
         card_scale = _parse_scale(_extra.get("card_scale", 1.0))
+        glow_name = card.get("glow_name") or _extra.get("glow_name")
+        glow_strength = _parse_glow_strength(
+            card.get("glow_strength", _extra.get("glow_strength", 1.0)))
         seal_name = card.get("seal_name") or _extra.get("seal_name") or None
         seal_frame_name = card.get("seal_frame_name") or _extra.get("seal_frame_name") or None
         seal_front, seal_back = _seal_strengths({
@@ -825,7 +911,9 @@ def _make_text(data: dict) -> dict:
                                 content_scale=card_scale,
                                 face_scales=face_scales,
                                 interior_rel=interior_rel,
-                                background_rel=bg_rel_url),
+                                background_rel=bg_rel_url,
+                                glow_name=glow_name,
+                                glow_strength=glow_strength),
         encoding="utf-8",
     )
     try:
@@ -1024,7 +1112,8 @@ class Handler(BaseHTTPRequestHandler):
             if atype not in _ASSET_TYPES:
                 self._send_json({"ok": False, "error": "未知素材类型"}, 400)
                 return
-            self._send_json({"ok": True, "type": atype, "files": list_assets(atype)})
+            files = list_effect_assets(atype) if atype in _EFFECT_ASSET_TYPES else list_assets(atype)
+            self._send_json({"ok": True, "type": atype, "files": files})
             return
 
         self._send_json({"ok": False, "error": "not found"}, 404)
@@ -1130,6 +1219,8 @@ class Handler(BaseHTTPRequestHandler):
                 adaptive=bool(data.get("adaptive", True)),
                 adaptive_mode=int(data.get("adaptive_mode", 1)),
                 scale=_parse_scale(data.get("scale")),
+                glow_name=(data.get("glow") or "none"),
+                glow_strength=_parse_glow_strength(data.get("glow_strength")),
                 progress=progress,
             )
             build_album_page()  # 刷新离线收集册
@@ -1395,7 +1486,9 @@ class Handler(BaseHTTPRequestHandler):
                                            content_scale=scale,
                                            face_scales=face_scales,
                                            interior_rel=interior_url,
-                                           background_rel=bg_url)
+                                           background_rel=bg_url,
+                                           glow_name=(data.get("glow") or "none"),
+                                           glow_strength=_parse_glow_strength(data.get("glow_strength")))
         return _write_preview_html(html)
 
     def _tmp_upload(self, data: dict) -> dict:
@@ -1413,6 +1506,8 @@ class Handler(BaseHTTPRequestHandler):
         atype = data.get("type", "")
         if atype not in _ASSET_TYPES:
             raise ValueError("未知素材类型")
+        if atype in _EFFECT_ASSET_TYPES:
+            raise ValueError("特效/边框特效请用「特效DIY」或代码定义，不支持图片上传")
         b64 = data.get("b64", "")
         if not b64:
             raise ValueError("未收到图片数据")
@@ -1431,6 +1526,19 @@ class Handler(BaseHTTPRequestHandler):
         name = _safe_name(data.get("name", ""))
         if atype not in _ASSET_TYPES or not name:
             raise ValueError("参数错误")
+        if atype in _EFFECT_ASSET_TYPES:
+            # 特效/边框特效：内置（同步删源码定义）+ 自定义（删 JSON），两者都尝试
+            removed_builtin = (_remove_builtin_effect(name) if atype == "effects"
+                               else _remove_builtin_glow(name))
+            f = (EFFECTS_DIR / f"{name}.json" if atype == "effects"
+                 else webcard.GLOW_CUSTOM_DIR / f"{name}.json")
+            deleted_file = False
+            if f.exists():
+                f.unlink()
+                deleted_file = True
+            if not removed_builtin and not deleted_file:
+                raise ValueError(f"「{name}」不存在")
+            return {"ok": True, "name": name, "removed_builtin": removed_builtin}
         target = ASSETS / atype / name
         if not target.exists():
             raise ValueError(f"「{name}」不存在")
@@ -1444,6 +1552,8 @@ class Handler(BaseHTTPRequestHandler):
         new = _safe_name(data.get("new", ""))
         if atype not in _ASSET_TYPES or not old or not new:
             raise ValueError("参数错误")
+        if atype in _EFFECT_ASSET_TYPES:
+            raise ValueError("特效/边框特效不支持重命名")
         if not new.lower().endswith(_IMG_EXTS):
             new = new + Path(old).suffix
         src = ASSETS / atype / old
@@ -1687,6 +1797,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
     display: flex; flex-direction: column; gap: 8px;
   }
   .asset-tile img { width: 100%; height: 128px; object-fit: cover; border-radius: 8px; border: 1px solid var(--line); background: repeating-conic-gradient(#26221d 0% 25%, #1d1915 0% 50%) 0 0/16px 16px; }
+  .asset-tile .asset-emoji { width: 100%; height: 128px; display: flex; align-items: center; justify-content: center; font-size: 44px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel2); }
   .asset-tile .aname { font-size: 12px; color: var(--muted); word-break: break-all; text-align: center; }
   .asset-tile .arow { display: flex; gap: 6px; }
   .asset-tile .arow .btn.small { flex: 1; font-size: 12px; padding: 6px 8px; }
@@ -1801,6 +1912,14 @@ PAGE_HTML = r"""<!DOCTYPE html>
         <div class="row">
           <label>边框卡封（仅边框区域显示，需配合边框使用）</label>
           <select id="sealFrame"></select>
+        </div>
+        <div class="row">
+          <label>辉光效果（沿卡体/边框边缘发光）</label>
+          <select id="makeGlow"></select>
+        </div>
+        <div class="row">
+          <label>辉光强度（0~2，默认 1）</label>
+          <input type="number" id="makeGlowStrength" min="0" max="2" step="0.05" value="1">
         </div>
         <div class="row">
           <label>卡面标题（可选）</label>
@@ -1958,6 +2077,14 @@ PAGE_HTML = r"""<!DOCTYPE html>
           </div>
         </div>
         <div class="row">
+          <label>辉光效果（沿卡体/边框边缘发光）</label>
+          <select id="asmGlow"></select>
+        </div>
+        <div class="row">
+          <label>辉光强度（0~2，默认 1）</label>
+          <input type="number" id="asmGlowStrength" min="0" max="2" step="0.05" value="1">
+        </div>
+        <div class="row">
           <label>缩放（卡面渲染比例，0.5~1.5，默认 1 不缩放）</label>
           <input type="number" id="asmScale" min="0.5" max="1.5" step="0.05" value="1">
         </div>
@@ -2043,6 +2170,8 @@ PAGE_HTML = r"""<!DOCTYPE html>
         <div class="typechip" data-type="seals">🌟 卡封</div>
         <div class="typechip" data-type="backs">🔙 卡背</div>
         <div class="typechip" data-type="effects-images">✨ 特效图</div>
+        <div class="typechip" data-type="effects">🎆 特效</div>
+        <div class="typechip" data-type="frame-effects">💡 边框特效</div>
         <span class="grow" style="flex:1"></span>
         <button class="btn small" id="assetUploadBtn" type="button">⬆️ 上传素材</button>
         <input type="file" id="assetFile" accept="image/*" hidden>
@@ -2274,6 +2403,9 @@ fillSelect('model', MODELS.map(m => m[0]), MODELS.map(m => m[0] + ' — ' + m[1]
 document.getElementById('model').value = __DEFAULT_MODEL__;
 fillSelect('seal', ['', ...ASSETS.seals], ['不使用卡封', ...ASSETS.seals]);
 fillSelect('sealFrame', ['', 'same', ...ASSETS.seals], ['不使用边框卡封', '与卡封一致', ...ASSETS.seals]);
+// 辉光：默认选中第一个内置预设（旧卡未填时也是默认暖金描边，保持一致）
+fillSelect('makeGlow', ['', ...ASSETS.glows], ['—— 不使用 ——', ...ASSETS.glows]);
+(function () { const g = document.getElementById('makeGlow'); const def = ASSETS.glows.find(x => x) || ''; if (!g.value && def) g.value = def; })();
 // 边框卡封需配合边框：未选边框时禁用；选边框时默认"与卡封一致"（手动选过则不覆盖）
 const sealFrameSel = document.getElementById('sealFrame');
 let sealFrameTouched = false;
@@ -2395,6 +2527,8 @@ goBtn.addEventListener('click', async () => {
         mask_clip: document.getElementById('makeMaskClip').checked,
         adaptive: document.getElementById('makeAdaptive').checked,
         adaptive_mode: parseInt(document.querySelector('#adaptiveOpts .radio.on').dataset.adaptiveMode, 10),
+        glow: document.getElementById('makeGlow').value,
+        glow_strength: parseFloat(document.getElementById('makeGlowStrength').value) || 1,
         effects: makePicker.get(),
         title: document.getElementById('title').value.trim() || null,
         text_type: getTextType(),
@@ -2997,6 +3131,9 @@ fillSelect('asmBack', ASSETS.backs);
 fillSelect('asmSeal', ['', ...ASSETS.seals], ['—— 不使用 ——', ...ASSETS.seals]);
 // 边框卡封："与卡封一致"=与卡牌卡封同素材（默认）；"不使用边框卡封"=空
 fillSelect('asmSealFrame', ['', 'same', ...ASSETS.seals], ['—— 不使用边框卡封 ——', '与卡封一致', ...ASSETS.seals]);
+// 辉光：默认选中第一个内置预设（旧卡未填时也是默认暖金描边，保持一致）
+fillSelect('asmGlow', ['', ...ASSETS.glows], ['—— 不使用 ——', ...ASSETS.glows]);
+(function () { const g = document.getElementById('asmGlow'); const def = ASSETS.glows.find(x => x) || ''; if (!g.value && def) g.value = def; })();
 
 // 卡牌类型：文本型（boxed）只展示带文本框边框（frames-text/）
 const asmCardSel = document.getElementById('asmCard');
@@ -3116,6 +3253,14 @@ asmCardSel.addEventListener('change', () => {
     if (typeof card.seal_strength_back === 'number' && isFinite(card.seal_strength_back)) document.getElementById('asmSealBack').value = card.seal_strength_back;
     if (typeof card.seal_frame_strength_front === 'number' && isFinite(card.seal_frame_strength_front)) document.getElementById('asmSealFrameFront').value = card.seal_frame_strength_front;
     if (typeof card.seal_frame_strength_back === 'number' && isFinite(card.seal_frame_strength_back)) document.getElementById('asmSealFrameBack').value = card.seal_frame_strength_back;
+    // 辉光：旧卡未记录 → 默认辉光；记录 "none" → 不使用
+    const glowSel = document.getElementById('asmGlow');
+    const defGlow = ASSETS.glows.find(x => x) || '';
+    if (card.glow === 'none') glowSel.value = '';
+    else if (card.glow && [...glowSel.options].some(o => o.value === card.glow)) glowSel.value = card.glow;
+    else glowSel.value = defGlow;
+    const gs = parseFloat(card.glow_strength);
+    document.getElementById('asmGlowStrength').value = (isFinite(gs) && gs >= 0 && gs <= 2) ? gs : 1;
     document.getElementById('asmFloatFg').checked = !!card.subject_over_frame;
     document.getElementById('asmOutline').checked = !!card.subject_outline;
     document.getElementById('asmMaskClip').checked = card.mask_clip !== false;
@@ -3153,6 +3298,8 @@ asmBgSel.addEventListener('change', scheduleAsmPreview);
 document.getElementById('asmBack').addEventListener('change', scheduleAsmPreview);
 asmSealSel.addEventListener('change', scheduleAsmPreview);
 asmSealFrameSel.addEventListener('change', () => { asmSealFrameTouched = true; scheduleAsmPreview(); });
+document.getElementById('asmGlow').addEventListener('change', scheduleAsmPreview);
+document.getElementById('asmGlowStrength').addEventListener('input', scheduleAsmPreview);
 document.getElementById('asmFloatFg').addEventListener('change', scheduleAsmPreview);
 document.getElementById('asmOutline').addEventListener('change', scheduleAsmPreview);
 document.getElementById('asmMaskClip').addEventListener('change', scheduleAsmPreview);
@@ -3197,6 +3344,8 @@ document.getElementById('asmReset').addEventListener('click', () => {
     document.getElementById(id).value = v;
   });
   asmPicker.clear();
+  document.getElementById('asmGlow').value = ASSETS.glows.find(x => x) || '';
+  document.getElementById('asmGlowStrength').value = 1;
   document.getElementById('asmName').value = '';
   syncAsmMutex();
   setStatus('asmStatus', '已重置为空卡，可自由搭建');
@@ -3269,6 +3418,8 @@ async function postAsmPreview() {
         seal_strength_back: getSealStrengths().back,
         seal_frame_strength_front: getSealFrameStrengths().front,
         seal_frame_strength_back: getSealFrameStrengths().back,
+        glow: document.getElementById('asmGlow').value,
+        glow_strength: parseFloat(document.getElementById('asmGlowStrength').value) || 1,
         desc: document.getElementById('asmDesc').value.trim() || null,
         text_type: asmTextTypeSel.value,
         text_pos: (function () {
@@ -3321,6 +3472,8 @@ document.getElementById('asmSave').addEventListener('click', async () => {
         seal_strength_back: getSealStrengths().back,
         seal_frame_strength_front: getSealFrameStrengths().front,
         seal_frame_strength_back: getSealFrameStrengths().back,
+        glow: document.getElementById('asmGlow').value,
+        glow_strength: parseFloat(document.getElementById('asmGlowStrength').value) || 1,
       }),
     });
     const d = await r.json();
@@ -3363,8 +3516,14 @@ document.getElementById('asmExportHtml').addEventListener('click', () => exportA
 scheduleAsmPreview(600);
 
 // ================= 4 素材管理 =================
-const ASSET_TYPES = ['backgrounds', 'faces', 'frames', 'frames-text', 'seals', 'backs', 'effects-images'];
+const ASSET_TYPES = ['backgrounds', 'faces', 'frames', 'frames-text', 'seals', 'backs', 'effects-images', 'effects', 'frame-effects'];
+const NON_IMAGE_TYPES = ['effects', 'frame-effects'];
 let currentAssetType = 'backgrounds';
+
+function syncAssetUploadBtn() {
+  const btn = document.getElementById('assetUploadBtn');
+  btn.style.display = NON_IMAGE_TYPES.includes(currentAssetType) ? 'none' : '';
+}
 
 function renderAssetTypes() {
   document.querySelectorAll('.typechip').forEach(c => {
@@ -3381,6 +3540,40 @@ async function loadAssets() {
   grid.innerHTML = '';
   if (!d.files.length) {
     grid.innerHTML = '<div class="asset-empty">这个分类还没有素材，点右上角「上传素材」添加</div>';
+    return;
+  }
+  // 特效/边框特效：无缩略图，用图标块展示；仅支持删除（内置同步删源码定义）
+  if (NON_IMAGE_TYPES.includes(currentAssetType)) {
+    const label = currentAssetType === 'effects' ? '特效' : '边框特效';
+    const emoji = currentAssetType === 'effects' ? '🎆' : '💡';
+    d.files.forEach(it => {
+      const tile = document.createElement('div');
+      tile.className = 'asset-tile';
+      tile.innerHTML =
+        '<div class="asset-emoji">' + emoji + '</div>' +
+        '<div class="aname">' + it.name + (it.builtin ? '（内置）' : '') + '</div>' +
+        '<div class="arow"><button class="btn small danger" data-act="del">🗑️</button></div>';
+      tile.querySelector('[data-act=del]').addEventListener('click', async () => {
+        const msg = it.builtin
+          ? '删除' + label + '「' + it.name + '」？\n内置' + label + '将同步删除其源码定义（删除后需重新生成/重新上传才能恢复）。'
+          : '删除' + label + '「' + it.name + '」？';
+        if (!confirm(msg)) return;
+        try {
+          const r = await fetch('/api/assets/delete', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ type: currentAssetType, name: it.name }),
+          });
+          const res = await r.json();
+          if (!res.ok) throw new Error(res.error);
+          if (res.removed_builtin) setStatus('assetStatus', '✅ 已删除：' + res.name + '（内置定义已同步移除）');
+          else setStatus('assetStatus', '✅ 已删除：' + res.name);
+          await loadAssets();
+        } catch (e) {
+          setStatus('assetStatus', '删除失败：' + e.message, true);
+        }
+      });
+      grid.appendChild(tile);
+    });
     return;
   }
   d.files.forEach(name => {
@@ -3430,7 +3623,7 @@ async function loadAssets() {
   });
 }
 document.querySelectorAll('.typechip').forEach(c => {
-  c.addEventListener('click', () => { currentAssetType = c.dataset.type; renderAssetTypes(); loadAssets(); });
+  c.addEventListener('click', () => { currentAssetType = c.dataset.type; renderAssetTypes(); syncAssetUploadBtn(); loadAssets(); });
 });
 
 const assetFileInput = document.getElementById('assetFile');
@@ -3464,6 +3657,7 @@ assetFileInput.addEventListener('change', async () => {
   reader.readAsDataURL(f);
 });
 
+syncAssetUploadBtn();
 loadAssets();
 </script>
 </body>

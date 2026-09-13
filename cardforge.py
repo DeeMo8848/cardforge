@@ -338,6 +338,8 @@ def make_card(
     subject_outline: bool = False,
     mask_clip: bool = True,
     scale: float = 1.0,
+    glow_name: str | None = None,
+    glow_strength: float = 1.0,
     adaptive: bool = True,
     adaptive_mode: int = 1,
     progress=None,
@@ -471,7 +473,9 @@ def make_card(
                "seal_frame_name": Path(seal_frame_path).name if seal_frame_path else None,
                "seal_frame_strength_front": 0.8, "seal_frame_strength_back": 0.5,
                "seal_frame_same": seal_frame_same,
-               "card_scale": scale},
+               "card_scale": scale,
+               "glow_name": glow_name,
+               "glow_strength": glow_strength},
     )
     save_card_def(card, PROJECT_ROOT / "cards" / f"{card_id}.json")
     step += 1
@@ -555,7 +559,9 @@ def make_card(
                         content_scale=scale,
                         face_scales=style == "full-bleed",
                         interior_rel=interior_rel,
-                        mask_clip=mask_clip),
+                        mask_clip=mask_clip,
+                        glow_name=glow_name,
+                        glow_strength=glow_strength),
         encoding="utf-8",
     )
 
@@ -678,6 +684,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--seal-frame", default=None,
                         help="DIY 边框卡封（assets/seals/ 下）；传 same 表示与卡牌卡封同素材")
     parser.add_argument("--scale", type=float, default=1.0, help="卡面缩放（0.5~1.5，默认 1 不缩放）")
+    parser.add_argument("--glow", default=None,
+                        help="辉光特效名（如 暖金描边/RGB变色灯光/霓虹灯/樱花粉；none=关闭；缺省=默认暖金描边）")
+    parser.add_argument("--glow-strength", type=float, default=1.0,
+                        help="辉光整体强度（0~2，默认 1.0）")
     parser.add_argument("--effect", default="none",
                         help="动画特效（3D 网页卡触发），可用逗号分隔多个 '名称@位置'，如 love@top,sparkle@右下 或 love@0.3:0.7")
     parser.add_argument("--back", default=None, help="卡背图片（默认 assets/backs/three-kingdoms-back.png）")
@@ -730,6 +740,8 @@ def main(argv: list[str] | None = None) -> int:
             seal=args.seal,
             seal_frame=args.seal_frame,
             scale=args.scale,
+            glow_name=args.glow,
+            glow_strength=args.glow_strength,
             effects=effect_specs,
             back=args.back,
             card_size=args.card_size,

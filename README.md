@@ -44,15 +44,26 @@ cardforge.cmd 封面.png --name xxx --json
 cardforge.cmd 封面.png --name "xxx" --model isnet-anime
 ```
 
-## 命令行参数参考（卡牌生成）
+## 命令行参数参考
 
 > 完整命令：`cardforge.cmd <卡面图片路径> [可选参数...]`
+> 也可只导出已有卡牌：`cardforge.cmd --export <卡id> [--export-type image|html] [--out 路径]`
 
 ### 必选参数
 
 | 参数 | 说明 |
 |---|---|
-| `image`（位置参数） | **卡面**输入图像路径。卡面是唯一必选项 |
+| `image`（位置参数） | **卡面**输入图像路径（`--export` 导出模式可省略） |
+
+### 导出已有卡牌（不生成新卡）
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `--export` | 无 | 导出已有卡牌（卡 id 即 `assets/output/` 下的目录名，可在收集册列表或列表接口看到） |
+| `--export-type` | `image` | 导出类型：`image`=2D 合成图（`card.png`）；`html`=自包含单文件（同目录图片 base64 内嵌，可离线双击打开） |
+| `--out` | 当前目录 | 导出文件保存路径（默认 `<卡id>.png` / `<卡id>.html`） |
+
+> 示例：`cardforge.cmd --export hasunosora-duo --export-type html --out 收藏/莲之空.html`
 
 ### 卡牌信息
 
@@ -99,8 +110,7 @@ cardforge.cmd 封面.png --name "xxx" --model isnet-anime
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
-| `--adaptive` | `1` | 自适应开关：`1`=按上传图与卡面比例缩放裁剪；`0`=直接拉伸填满 |
-| `--adaptive-mode` | `1` | 自适应方式：`1`=整幅判定（恒铺满，推荐）；`2`=透明主体判定（不足留白） |
+| `--adaptive` | `1` | 自适应：`1`=方式1（整幅判定，按上传图与卡面比例缩放裁剪，恒铺满，推荐）；`2`=方式2（横图适配，不足留白，主体完整不裁切）；`0`=不使用自适应（直接拉伸填满） |
 | `--scale` | `1.0` | 卡面缩放（0.5~1.5，默认 1 不缩放） |
 
 ### 输出
@@ -170,7 +180,7 @@ CLI 缺省也会自动走 API（显式 `--model` 仍然优先）。
 | `assets/faces/` | 卡面底图（full-bleed 时即整幅卡面） | `sample-1.png` 夜空星点 |
 | `assets/frames/` | 卡牌边框（透明 PNG） | `sample-1.png` 金色圆角框 |
 | `assets/seals/` | 卡封（半透明覆层，如镭射箔光） | `sample-1.png` 斜向光泽 |
-| `assets/backs/` | 卡背（默认沿用三国卡背，后续可 DIY） | `three-kingdoms-back.png` |
+| `assets/backs/` | 卡背（默认沿用三国卡背，后续可 DIY） | `sample-1.png` |
 
 > 区分：**卡封** = 静态覆层（镭射这类，叠在卡面最上层）；**特效** = 3D 网页卡里的动态动画（冒爱心、冒闪光，周期随机触发），由 `--effect` 或界面下拉选择。
 

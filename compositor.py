@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PIL import Image, ImageChops, ImageDraw, ImageFont
+from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 CARD_W, CARD_H = 900, 1200  # 2:3，与 3D 卡应用比例一致
@@ -212,6 +212,35 @@ def frame_interior_mask(frame: Image.Image, w: int = CARD_W, h: int = CARD_H) ->
     return Image.fromarray((mask.astype(np.uint8)) * 255, "L")
 
 
+def frame_inner_edge_mask(frame_canvas: Image.Image, w: int = CARD_W, h: int = CARD_H) -> Image.Image:
+    """主体内沿蒙版：白=边框环内沿以内的中空区域，黑=边框环与边框外围。
+
+    中空 = 边框内区域蒙版(interior) ∩ 非边框不透明区——浮于边框之上的主体按此裁剪后
+    不压住边框装饰、不超出边框外沿（与 3D 浏览器端合成的 edgeTex 一致）。
+    """
+    import numpy as np
+
+    interior = frame_interior_mask(frame_canvas, w, h)
+    a = np.asarray(frame_canvas.convert("RGBA").resize((w, h), Image.LANCZOS))[..., 3]
+    edge = np.where((np.asarray(interior) > 128) & (a <= 8), 255, 0).astype(np.uint8)
+    return Image.fromarray(edge, "L")
+
+
+def _frame_hollow_bbox(fr_canvas: Image.Image, w: int = CARD_W, h: int = CARD_H) -> tuple[int, int, int, int] | None:
+    """边框内沿（中空区域）bbox：interior 白区 ∩ 边框透明区，返回 (x0,y0,x1,y1) 像素坐标。
+
+    非浮起+边框+卡面素材时，卡面 contain 到该窗口内整图完整可见（与 3D setFaceBox 一致）。
+    """
+    import numpy as np
+
+    interior = np.asarray(frame_interior_mask(fr_canvas, w, h))
+    a = np.asarray(fr_canvas.convert("RGBA"))[..., 3]
+    ys, xs = np.where((interior > 128) & (a <= 8))
+    if len(xs) == 0:
+        return None
+    return (int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1)
+
+
 def save_frame_interior_mask(frame: Image.Image, out_path, w: int = CARD_W, h: int = CARD_H) -> Path:
     """边框内区域蒙版 → RGBA PNG（RGB 全白 + alpha=蒙版），供 3D 卡 shader 统一采样 .a。
 
@@ -225,6 +254,28 @@ def save_frame_interior_mask(frame: Image.Image, out_path, w: int = CARD_W, h: i
     out_path.parent.mkdir(parents=True, exist_ok=True)
     rgba.save(out_path)
     return out_path
+
+
+def frame_glow_boost(frame_path) -> float:
+    """异形边框的辉光强度补偿系数（默认 1.0 不补偿）。
+
+    辉光沿边框内区域蒙版（interior）边界向外发射；边框外轮廓内缩越严重
+    （interior 填充率越低），辉光带被卡体遮住的比例越大，观感越弱。
+    以填充率为代理：填充率 >=0.85（正常薄边框/整卡边框）不补偿，
+    0.70 及以下补偿到约 ×2.2（用户实测：异形边框 0.73 填充率的
+    2 强度辉光 ≈ 正常卡牌 1 强度，需约 ×2）。
+    """
+    try:
+        frame = Image.open(frame_path).convert("RGBA")
+    except Exception:
+        return 1.0
+    import numpy as np
+
+    mask = frame_interior_mask(frame, CARD_W, CARD_H)
+    fill = float((np.asarray(mask) > 8).mean())
+    if fill >= 0.85:
+        return 1.0
+    return min(2.5, 1.0 + (0.85 - fill) / 0.15 * 1.2)
 
 
 def _apply_mask(canvas: Image.Image, mask: Image.Image) -> Image.Image:
@@ -252,6 +303,11 @@ def compose_card(
     seal_frame: str | Path | None = None,
     face_scales: bool = False,
     mask_clip: bool = True,
+    subject_full_bleed: bool = False,
+    follow_bg: bool = False,
+    follow_bg_src: str | Path | None = None,
+    subject_offset_x: float = 0.0,
+    subject_offset_y: float = 0.0,
 ) -> Image.Image:
     """2D 卡牌合成：背景 → 卡面 → 主体 → 卡封1 → 边框内蒙版 → 边框 → 卡封2 → 文字。
 
@@ -259,9 +315,20 @@ def compose_card(
     背景与层1卡封保持整卡尺寸；有边框时整卡内容仅绘制在边框外围以内（含中空）。
     face_scales: True 表示 front 是卡面素材（随缩放），False 表示 front 是背景底图（整卡不缩放）。
     mask_clip: False 时不应用边框内蒙版裁剪，主体可延伸出边框外沿（内边框效果，边框外留一圈图像）。
+    subject_full_bleed: 整幅+抠图卡，整幅卡面仍绘制抠出主体（对齐原位置），
+    使「主体悬浮」「描边」在整幅卡上生效（与 3D 卡视差一致）。
+    follow_bg: 整幅+抠图+文本型：背景与主体同变换（contain 到卡图区），主体精确遮盖
+    背景原主体（视差对齐）；整卡垫模糊放大背景底，避免背景随主体缩小后留白空洞。
+    follow_bg_src: 预适配的背景跟随图（与前景主体同尺寸同几何，任意源图比例下
+    主体都能像素级遮盖背景原主体）；缺省回退为 front 垂直居中裁切（仅竖长源精确）。
+    subject_offset_x/y: 主体图像偏移（卡宽/卡高比例，如 ±0.25），仅偏移图像位置，
+    蒙版/渲染范围不跟随偏移（与 3D 视差一致）；正 x 向右、正 y 向上。
     """
     w, h = size
     sc = max(0.5, min(1.5, content_scale))
+    # 主体图像偏移像素（3D y 向上为正，PIL y 向下取反）；渲染范围/蒙版不跟随
+    off_px = round(subject_offset_x * w)
+    off_py = round(-subject_offset_y * h)
     fr = _load_optional(frame)
     fx = _load_optional(seal)
     fx2 = _load_optional(seal_frame)
@@ -282,10 +349,41 @@ def compose_card(
 
     canvas = Image.new("RGBA", (w, h), (14, 11, 9, 255))
 
+    # 边框实际绘制形态（整卡 / 按主体包围盒 fit）提前确定：卡面层 contain 需要中空 bbox，
+    # 蒙版/边框绘制也复用同一份 fr_canvas，保证三者严格对齐
+    fr_canvas = None
+    fr_x = fr_y = 0
+    face_box = None
+    if fr is not None:
+        if subject_over_frame and foreground is not None and style != "full-bleed":
+            frd = (_cover(fr, w, h), (0, 0))
+        elif style != "full-bleed" and foreground is not None and text_type != "boxed" and not text_adapt:
+            bbox_uv = _subject_bbox_uv_img(foreground)
+            if bbox_uv:
+                _fi, _fx, _fy = _frame_fit(fr, bbox_uv, w, h)
+                frd = (_fi, (_fx, _fy))
+            else:
+                frd = (_cover(fr, w, h), (0, 0))
+        else:
+            frd = (_cover(fr, w, h), (0, 0))
+        fr_im, (fr_x, fr_y) = frd
+        fr_canvas = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        fr_canvas.alpha_composite(fr_im, (fr_x, fr_y))
+        # 非浮起+边框+卡面素材：卡面 contain 到边框内沿（中空区域），整图完整可见不超框
+        # （整幅卡面除外：整幅卡即完整卡面设计，边框直接覆盖，不收缩）
+        if face_scales and not subject_over_frame and style != "full-bleed":
+            face_box = _frame_hollow_bbox(fr_canvas, w, h)
+
     # —— 背景层：整卡尺寸，不随缩放 ——
     if style == "full-bleed":
         base = _load_optional(front) or _load_optional(face) or foreground
-        if base is not None and sc == 1.0:
+        if follow_bg and base is not None:
+            # 整幅+抠图+文本型：整卡垫模糊放大背景底（背景随主体 contain 缩小后
+            # 文本区/左右留白处露出，用虚化背景填充，视觉柔和不空洞）
+            blurred = _cover(base, w, h).filter(ImageFilter.GaussianBlur(max(10, round(h * 0.03))))
+            blurred = blurred.resize((round(w * 1.12), round(h * 1.12)), Image.LANCZOS)
+            canvas = _cover(blurred, w, h)
+        elif base is not None and sc == 1.0:
             canvas = _cover(base, w, h)
     else:
         if not face_scales:
@@ -300,12 +398,29 @@ def compose_card(
     # —— 卡面层：随缩放（居中）——
     if style == "full-bleed":
         base = _load_optional(front) or _load_optional(face) or foreground
-        if base is not None:
+        # 整幅+文本型跟随：卡面层由下方「跟随背景」承担（与主体同变换），不再叠整幅清晰图
+        if base is not None and not follow_bg:
             canvas.alpha_composite(_cover(base, cw, ch), (cx0, cy0))
     else:
         base = _load_optional(front) if face_scales else _load_optional(face)
         if base is not None:
-            canvas.alpha_composite(_cover(base, cw, ch), (cx0, cy0))
+            if face_box:
+                # 卡面 contain 到边框内沿（中空区域）：等比缩放居中、整图完整可见；
+                # 随后随 content_scale 围绕窗口中心缩放，超出窗口部分裁掉（与 3D inBox discard 一致）
+                bw_, bh_ = face_box[2] - face_box[0], face_box[3] - face_box[1]
+                f2, fx_, fy_ = _contain(base, bw_, bh_)
+                if sc != 1.0:
+                    f2w2, f2h2 = max(1, round(f2.width * sc)), max(1, round(f2.height * sc))
+                    f2 = f2.resize((f2w2, f2h2), Image.LANCZOS)
+                    if f2w2 > bw_ or f2h2 > bh_:
+                        f2 = f2.crop((max(0, (f2w2 - bw_) // 2), max(0, (f2h2 - bh_) // 2),
+                                      min(f2w2, (f2w2 + bw_) // 2), min(f2h2, (f2h2 + bh_) // 2)))
+                        fx_, fy_ = max(0, (bw_ - f2w2) // 2), max(0, (bh_ - f2h2) // 2)
+                    else:
+                        fx_, fy_ = (bw_ - f2w2) // 2, (bh_ - f2h2) // 2
+                canvas.alpha_composite(f2, (face_box[0] + fx_, face_box[1] + fy_))
+            else:
+                canvas.alpha_composite(_cover(base, cw, ch), (cx0, cy0))
 
     # 静态箔光：叠加在整卡画布之上（与 3D 主卡 shader 一致，光效不随卡面缩放）
     canvas = _apply_static_foil(canvas)
@@ -313,9 +428,29 @@ def compose_card(
     # —— 主体：默认画进卡面缩放区（边框之下）；浮于边框之上时单独画到整卡边框上层 ——
     subject_im = outline_im = None
     outline_pos = (0, 0)
-    if foreground is not None and (style != "full-bleed" or text_adapt):
+    if foreground is not None and (style != "full-bleed" or text_adapt or subject_full_bleed):
         if text_adapt:
             subj, sx, sy = _contain(foreground, cw, adapt_h_px)
+            if follow_bg:
+                # 整幅+抠图+文本型：背景跟随主体——优先用预适配图（与主体同尺寸同几何，
+                # 任意源图比例下像素级对齐）；缺省回退为 base 垂直居中裁切（仅竖长源精确）
+                bg_src = None
+                if follow_bg_src is not None:
+                    try:
+                        bg_src = Image.open(follow_bg_src).convert("RGBA")
+                    except Exception:
+                        bg_src = None
+                if bg_src is None:
+                    bw, bh = base.size
+                    fw, fh = foreground.size
+                    if fw == bw and fh <= bh:
+                        y0 = (bh - fh) // 2
+                        bg_src = base.crop((0, y0, bw, y0 + fh))
+                    else:
+                        bg_src = base
+                bg2, bx, by = _contain(bg_src, cw, adapt_h_px)
+                # 背景跟随图与主体同偏移，保持像素级对齐
+                canvas.alpha_composite(bg2, (cx0 + bx + off_px, cy0 + by + off_py))
         else:
             subj = _stretch(foreground, cw, ch)
             sx, sy = 0, 0
@@ -331,34 +466,26 @@ def compose_card(
             subject_im = (subj, (sx, sy))
         else:
             if outline_im is not None:
-                canvas.alpha_composite(outline_im, (cx0 + outline_pos[0], cy0 + outline_pos[1]))
-            canvas.alpha_composite(subj, (cx0 + sx, cy0 + sy))
+                canvas.alpha_composite(outline_im, (cx0 + outline_pos[0] + off_px, cy0 + outline_pos[1] + off_py))
+            canvas.alpha_composite(subj, (cx0 + sx + off_px, cy0 + sy + off_py))
 
     # 层1 卡封（卡牌卡封）：有边框时低于边框（随后随内容一起被边框内蒙版裁剪）
     if fx is not None and fr is not None:
         canvas.alpha_composite(_stretch(fx, w, h))
 
     # —— 边框内蒙版：整卡内容仅绘制在边框外围以内（含中空）——
+    # fr_canvas/fr_im 已在卡面层之前按相同逻辑计算（卡面 contain 需要中空 bbox），直接复用
     if fr is not None:
-        # 先确定边框实际绘制形态（整卡 / 按主体包围盒 fit），蒙版与边框严格对齐
-        if subject_over_frame and foreground is not None and style != "full-bleed":
-            frd = (_cover(fr, w, h), (0, 0))
-        elif style != "full-bleed" and foreground is not None and text_type != "boxed" and not text_adapt:
-            bbox_uv = _subject_bbox_uv_img(foreground)
-            if bbox_uv:
-                _fi, _fx, _fy = _frame_fit(fr, bbox_uv, w, h)
-                frd = (_fi, (_fx, _fy))
-            else:
-                frd = (_cover(fr, w, h), (0, 0))
-        else:
-            frd = (_cover(fr, w, h), (0, 0))
-        fr_im, (fr_x, fr_y) = frd
-        # 以边框实际绘制形态（位置/尺寸）生成内区域蒙版：边框不透明像素为墙，
-        # 泛洪填充卡外区域，未被填到的区域（边框环 + 中空）为内容可绘制区
-        fr_canvas = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-        fr_canvas.alpha_composite(fr_im, (fr_x, fr_y))
         if mask_clip:
             canvas = _apply_mask(canvas, frame_interior_mask(fr_canvas, w, h))
+        # 浮于边框之上的主体单独按「边框内沿蒙版」（中空区域）裁剪，画在边框上层时
+        # 不压住边框装饰、不超出边框外沿；取消「裁剪到边框内」时主体可破框
+        # 蒙版窗口按偏移后的粘贴位置（卡片坐标）取——仅偏移图像位置，渲染范围不跟随
+        if mask_clip and subject_im is not None:
+            edge = frame_inner_edge_mask(fr_canvas, w, h)
+            px, py = cx0 + subject_im[1][0] + off_px, cy0 + subject_im[1][1] + off_py
+            sw_, sh_ = subject_im[0].size
+            subject_im = (_apply_mask(subject_im[0], edge.crop((px, py, px + sw_, py + sh_))), subject_im[1])
 
         canvas.alpha_composite(fr_im, (fr_x, fr_y))
         # 层2 卡封（边框卡封）：以边框实际绘制形态的 alpha 为蒙版，只在边框非透明区域显示
@@ -372,10 +499,11 @@ def compose_card(
             canvas.alpha_composite(sealed, (fr_x, fr_y))
 
     # 主体（浮于边框之上：画在边框上层，不参与边框内裁剪）
+    # 主体图像按偏移移动；蒙版裁剪窗口保持固定（渲染范围不跟随偏移，与 3D 一致）
     if subject_im is not None:
         if outline_im is not None:
-            canvas.alpha_composite(outline_im, (cx0 + outline_pos[0], cy0 + outline_pos[1]))
-        canvas.alpha_composite(subject_im[0], (cx0 + subject_im[1][0], cy0 + subject_im[1][1]))
+            canvas.alpha_composite(outline_im, (cx0 + outline_pos[0] + off_px, cy0 + outline_pos[1] + off_py))
+        canvas.alpha_composite(subject_im[0], (cx0 + subject_im[1][0] + off_px, cy0 + subject_im[1][1] + off_py))
 
     # 无边框时层1 卡封整卡（现状，不缩放）
     if fx is not None and fr is None:

@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-DEFAULT_BACK = "assets/backs/three-kingdoms-back.png"
+DEFAULT_BACK = "assets/backs/sample-1.png"
 
 
 def build_card_def(

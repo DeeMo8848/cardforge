@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import re
 import shutil
@@ -25,7 +26,7 @@ from pathlib import Path
 from PIL import Image
 
 from carddef import build_card_def, save_card_def
-from compositor import CARD_H, CARD_W, compose_card
+from compositor import CARD_H, CARD_W, compose_card, frame_glow_boost
 from engine import (
     DEFAULT_MODEL,
     SUPPORTED_MODELS,
@@ -317,6 +318,49 @@ def _load_layer(path: str | None, kind: str | None = None) -> str | None:
     return str(p) if p.exists() else None
 
 
+def export_card(card_id: str, etype: str = "image", out_path: str | Path | None = None) -> Path:
+    """导出已有卡牌：image → 2D 合成图 card.png；html → 自包含单文件（同目录图片 base64 内嵌）。
+
+    卡 id 即 assets/output/ 下的目录名；out_path 缺省输出到当前目录 <卡id>.png/.html。
+    返回导出文件路径；卡牌缺失/类型非法抛 ValueError。
+    """
+    cid = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "", (card_id or "").strip())
+    d = PROJECT_ROOT / "assets" / "output" / cid
+    if not cid or not d.is_dir():
+        raise ValueError(f"找不到卡牌「{card_id}」（assets/output/ 下无此目录）")
+    if etype == "image":
+        p = d / "card.png"
+        if not p.exists():
+            raise ValueError(f"卡牌「{cid}」缺少 2D 合成图 card.png")
+        out = Path(out_path) if out_path else (Path.cwd() / f"{cid}.png")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(p.read_bytes())
+        return out
+    if etype == "html":
+        p = d / "card.html"
+        if not p.exists():
+            raise ValueError(f"卡牌「{cid}」缺少 3D 网页卡 card.html")
+        html = p.read_text(encoding="utf-8")
+        _mime = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "webp": "image/webp"}
+
+        def _embed(m: re.Match) -> str:
+            name = m.group(2)
+            fp = d / name
+            if not fp.is_file():
+                return m.group(0)
+            q = m.group(1)
+            b64 = base64.b64encode(fp.read_bytes()).decode("ascii")
+            mime = _mime.get(Path(name).suffix.lower().lstrip("."), "application/octet-stream")
+            return f"{q}data:{mime};base64,{b64}{q}"
+
+        html = re.sub(r"""(['"])([A-Za-z0-9_.-]+\.(?:png|jpg|jpeg|webp))\1""", _embed, html)
+        out = Path(out_path) if out_path else (Path.cwd() / f"{cid}.html")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(html, encoding="utf-8")
+        return out
+    raise ValueError(f"不支持的导出类型：{etype}")
+
+
 def make_card(
     image_path,
     *,
@@ -417,23 +461,45 @@ def make_card(
             pass
     adapt_h = max(1, round(CARD_H * adapt_limit))
 
+    source_orig = source.convert("RGBA")
     source = _fit_card(source, CARD_W, CARD_H, adaptive=True, mode=1)
+    # 整幅卡面：主体适配必须与底图（恒 cover 整幅）完全一致，才能保证抠出主体
+    # 恰好遮盖在底图原主体位置上（视差效果）；方式2（contain）或关闭自适应会
+    # 让主体变换与底图不一致，导致错位
+    if style == "full-bleed":
+        adaptive, adaptive_mode = True, 1
     foreground = _fit_card(
         foreground, CARD_W, adapt_h if text_adapt else CARD_H,
         adaptive=adaptive, mode=adaptive_mode,
     )
+    # 整幅卡面+未使用抠图：裁剪后的整图即底图，无独立主体层。
+    # 前景保存为透明空图，3D 主体层（含影子）不显示，避免两层相同图像叠加错位
+    if style == "full-bleed" and model == "none":
+        foreground = Image.new("RGBA", foreground.size, (0, 0, 0, 0))
 
     # 2. 保存资产
     log("保存卡牌资产…")
     src_copy = out_dir / "source.png"
     src_copy.write_bytes(image_path.read_bytes())
-    bg_path = _load_layer(background, "background")
+    # 整幅+抠图：忽略背景素材（原图做底），主体悬浮/描边仍生效
+    full_bleed_subject = style == "full-bleed" and model != "none"
+    # 整幅+抠图+文本型：背景跟随主体（front 垂直居中裁切区与主体同变换，主体精确遮盖背景
+    # 原主体），文本区留白垫虚化背景底；2D 合成与 3D 卡网页同步启用
+    follow_bg = style == "full-bleed" and full_bleed_subject and text_adapt
+    # 整幅+抠图+文本型：生成与主体同几何的背景跟随图（从原始源图按主体相同的 cover 适配，
+    # 任意源图比例下主体都能像素级遮盖背景原主体；文本框让位后背景随主体同步缩放/位移）
+    bg_follow_rel = None
+    if follow_bg:
+        _fit_card(source_orig, CARD_W, foreground.height, adaptive=True, mode=1).save(
+            out_dir / "bg_follow.png")
+        bg_follow_rel = "bg_follow.png"
+    bg_path = None if full_bleed_subject else _load_layer(background, "background")
     front_img = build_front(source, foreground, style, bg_path)
     front_img.save(out_dir / "front.png")
     foreground.save(out_dir / "foreground.png")
-    # 主体白色描边（贴纸边）：仅透明主体卡启用时生成
+    # 主体白色描边（贴纸边）：透明主体卡与整幅+抠图卡启用时生成
     outline_rel = None
-    if subject_outline and style == "transparent":
+    if subject_outline and (style == "transparent" or full_bleed_subject):
         from compositor import make_outline
 
         ol = make_outline(foreground)
@@ -459,7 +525,7 @@ def make_card(
         "seal_frame": seal_frame_path,
     }
     text = {"title": title, "description": desc, "type": text_type, "pos": text_pos}
-    back = _load_layer(back, "back") or "assets/backs/three-kingdoms-back.png"
+    back = _load_layer(back, "back") or "assets/backs/sample-1.png"
     card = build_card_def(
         card_id=card_id,
         name=name,
@@ -492,7 +558,7 @@ def make_card(
         log("合成预览卡图…")
         size = parse_size(card_size)
         composed = compose_card(
-            foreground if (style == "transparent" or text_adapt) else None,
+            foreground if (style == "transparent" or text_adapt or full_bleed_subject) else None,
             style=style,
             background=_load_layer(background, "background"),
             face=_load_layer(face, "face") or (str(image_path) if style == "full-bleed" else None),
@@ -510,6 +576,9 @@ def make_card(
             front=str(out_dir / "front.png"),
             content_scale=scale,
             face_scales=style == "full-bleed",
+            subject_full_bleed=full_bleed_subject,
+            follow_bg=follow_bg,
+            follow_bg_src=str(out_dir / "bg_follow.png") if bg_follow_rel else None,
         )
         composed_path = out_dir / "card.png"
         composed.save(composed_path)
@@ -517,7 +586,7 @@ def make_card(
 
     # 5. 3D 卡网页（自包含单 HTML，双击即开）
     log("生成 3D 卡网页…")
-    back_src = _load_layer(back, "back") or (PROJECT_ROOT / "assets" / "backs" / "three-kingdoms-back.png")
+    back_src = _load_layer(back, "back") or (PROJECT_ROOT / "assets" / "backs" / "sample-1.png")
     back_copy = out_dir / "back.png"
     Image.open(back_src).convert("RGB").save(back_copy)
     from webcard import build_card_html
@@ -567,7 +636,10 @@ def make_card(
                         interior_rel=interior_rel,
                         mask_clip=mask_clip,
                         glow_name=glow_name,
-                        glow_strength=glow_strength),
+                        glow_strength=glow_strength,
+                        glow_boost=frame_glow_boost(frame_path) if frame_path else 1.0,
+                        follow_bg=follow_bg,
+                        bg_follow_rel=bg_follow_rel),
         encoding="utf-8",
     )
 
@@ -669,15 +741,21 @@ def main(argv: list[str] | None = None) -> int:
         description="本地卡牌制作工具：输入一张图，抠图并产出卡牌资产（可被其他工具调用）。",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("image", help="输入图像路径")
+    parser.add_argument("image", nargs="?", default=None, help="输入图像路径（--export 导出模式可省略）")
+    parser.add_argument("--export", default=None, metavar="CARD_ID",
+                        help="导出已有卡牌（不生成新卡）；卡 id 即 assets/output/ 下的目录名")
+    parser.add_argument("--export-type", choices=["image", "html"], default="image",
+                        help="导出类型：image=2D 合成图（card.png）；html=自包含单文件（图片 base64 内嵌，可离线双击打开）")
+    parser.add_argument("--out", default=None, metavar="PATH",
+                        help="导出文件保存路径（默认当前目录下 <卡id>.png/.html）")
     parser.add_argument("--name", default=None, help="卡片显示名（默认取文件名）")
     parser.add_argument("--slug", default=None, help="卡片 id（小写连字符，默认由名称生成）")
     parser.add_argument("--style", choices=["transparent", "full-bleed"], default="transparent",
                         help="transparent=透明主体卡(PVZ风)；full-bleed=整幅图卡面(影之诗/游戏王风)")
     parser.add_argument("--engine", default="local", help="抠图引擎（当前支持 local=rembg+BiRefNet）")
-    parser.add_argument("--model", default=None, choices=[*SUPPORTED_MODELS, "api"],
+    parser.add_argument("--model", default=None, choices=[*SUPPORTED_MODELS, "api", "none"],
                         help="抠图模型。缺省时：settings.json 配置了抠图 API 则用 api，否则用默认本地模型；"
-                             "显式指定则使用指定模型（api=阿里云分割抠图）")
+                             "显式指定则使用指定模型（api=阿里云分割抠图；none=跳过抠图，整图直接作为卡面）")
     parser.add_argument("--title", default=None, help="卡面标题文字（可选）")
     parser.add_argument("--desc", default=None, help="卡面描述文字（可选）")
     parser.add_argument("--text-type", choices=["none", "transparent", "boxed"], default="none",
@@ -697,7 +775,7 @@ def main(argv: list[str] | None = None) -> int:
                         help="辉光整体强度（0~2，默认 1.0）")
     parser.add_argument("--effect", default="none",
                         help="动画特效（3D 网页卡触发），可用逗号分隔多个 '名称@位置'，如 love@top,sparkle@右下 或 love@0.3:0.7")
-    parser.add_argument("--back", default=None, help="卡背图片（默认 assets/backs/three-kingdoms-back.png）")
+    parser.add_argument("--back", default=None, help="卡背图片（默认 assets/backs/sample-1.png）")
     parser.add_argument("--card-size", default=f"{CARD_W}x{CARD_H}", help="2D 合成卡图尺寸，如 900x1200")
     parser.add_argument("--no-compose", action="store_true", help="不生成 2D 合成预览卡图")
     parser.add_argument("--float-fg", action="store_true",
@@ -706,12 +784,24 @@ def main(argv: list[str] | None = None) -> int:
                         help="透明主体加白色贴纸描边（类似贴纸边缘）")
     parser.add_argument("--no-mask", dest="mask_clip", action="store_false",
                         help="不裁剪到边框内（内边框效果：主体可延伸出边框外沿，边框外留一圈图像）")
-    parser.add_argument("--adaptive", type=int, choices=[0, 1], default=1,
-                        help="自适应开关：1=按上传图与卡面比例缩放裁剪；0=直接拉伸填满")
-    parser.add_argument("--adaptive-mode", type=int, choices=[1, 2], default=1,
-                        help="自适应方式：1=整幅判定（恒铺满，推荐）；2=透明主体判定（不足留白）")
+    parser.add_argument("--adaptive", type=int, choices=[0, 1, 2], default=1,
+                        help="自适应：1=方式1（整幅判定，按上传图与卡面比例缩放裁剪，恒铺满，推荐）；"
+                             "2=方式2（横图适配，不足留白，主体完整不裁切）；0=不使用自适应（直接拉伸填满）")
     parser.add_argument("--json", action="store_true", help="以 JSON 输出结果（供其他工具解析）")
     args = parser.parse_args(argv)
+
+    # 导出模式：直接导出已有卡牌，无需输入图像
+    if args.export:
+        try:
+            out = export_card(args.export, args.export_type, args.out)
+        except ValueError as e:
+            print(f"错误：{e}", file=sys.stderr)
+            return 1
+        print(f"已导出 {args.export_type}：{out}")
+        return 0
+
+    if not args.image:
+        parser.error("需要输入图像路径，或使用 --export 导出已有卡牌")
 
     image_path = Path(args.image)
     if not image_path.exists():
@@ -719,7 +809,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     try:
-        effect_specs = [s.strip() for s in args.effect.split(",") if s.strip()]
+        effect_specs = [s.strip() for s in args.effect.split(",") if s.strip() and s.strip().lower() != "none"]
         text_pos = None
         if args.text_pos:
             parts = [p.strip() for p in args.text_pos.split(":")]
@@ -759,8 +849,8 @@ def main(argv: list[str] | None = None) -> int:
             subject_over_frame=args.float_fg,
             subject_outline=args.outline,
             mask_clip=args.mask_clip,
-            adaptive=bool(args.adaptive),
-            adaptive_mode=args.adaptive_mode,
+            adaptive=args.adaptive != 0,
+            adaptive_mode=args.adaptive or 1,
             progress=lambda step, total, msg: print(f"[{step}/{total}] {msg}", file=sys.stderr),
         )
     except ValueError as e:

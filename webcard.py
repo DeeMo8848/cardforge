@@ -416,10 +416,17 @@ __THREE_JS__
   const frontTexture = loader.load('__FRONT__');
   var foregroundTexture = loader.load('__FOREGROUND__');
   const backTexture = loader.load('__BACK__');
-  for (const t of [frontTexture, foregroundTexture, backTexture]) {
-    t.colorSpace = THREE.SRGBColorSpace;
+  __BG_FOLLOW_LOAD__
+  // 纹理色彩空间：cardMaterial 等 ShaderMaterial 的输出不会做 sRGB 编码（r152 起仅内置材质自动
+  // linearToOutputTexel），若纹理再被 GPU 解码为线性，画面会整体变暗、暗部压黑、暖色加重。
+  // 因此 ShaderMaterial 采样的 front/back 保持 sRGB 直通（NoColorSpace）；
+  // foreground 由内置 MeshBasicMaterial（前景/阴影）采样，保留 sRGB 解码+编码。
+  for (const t of [frontTexture, backTexture]) {
+    t.colorSpace = THREE.NoColorSpace;
     t.anisotropy = 8;
   }
+  foregroundTexture.colorSpace = THREE.SRGBColorSpace;
+  foregroundTexture.anisotropy = 8;
   __FG_ROUND_JS__
 
   // ---- 主卡面 shader（复刻：镭射箔光 + 背面景深平移 + 圆角） ----
@@ -437,6 +444,9 @@ __THREE_JS__
       uSeal: { value: 1.0 },
       uContentScale: { value: 1.0 },
       uSide: { value: 2.0 },
+      uFaceContain: { value: 0.0 },
+      uFaceBox: { value: new THREE.Vector4(0, 0, 1, 1) },
+      uFaceAspect: { value: 1.0 },
     },
     vertexShader: `
       varying vec2 vUv;
@@ -465,6 +475,9 @@ __THREE_JS__
       uniform float uSeal;
       uniform float uContentScale;
       uniform float uSide;
+      uniform float uFaceContain;
+      uniform vec4 uFaceBox;
+      uniform float uFaceAspect;
       varying vec2 vUv;
       varying vec3 vWorldNormal;
       varying vec3 vWorldPosition;
@@ -501,7 +514,24 @@ __THREE_JS__
           // uSide：2=双面（默认）0=仅卡面网格 1=仅卡背网格
           // 仅卡背网格（uSide=1）的正面片段丢弃，让位给卡面网格；双面（2）与仅卡面（0）保留
           if (uSide > 0.5 && uSide < 1.5) discard;
-          base = texture2D(uFrontTexture, uv);
+          vec2 faceUv = uv;
+          // 非浮起+边框+卡面素材：卡面 contain 到边框内沿（中空区域）以内，完整可见不超框；
+          // 保持宽高比居中放入窗口，content_scale 围绕窗口中心缩放（与 2D compositor 一致）
+          if (uFaceContain > 0.5) {
+            // 卡面网格随 content_scale 缩放时，UV 反算回卡片坐标（与下方蒙版采样一致）
+            vec2 cardUv2 = (uv - 0.5) * max(uContentScale, 1e-4) + 0.5;
+            vec2 boxLo = uFaceBox.xy;
+            vec2 boxSize = max(uFaceBox.zw - uFaceBox.xy, 1e-6);
+            vec2 inBox = (cardUv2 - boxLo) / boxSize;
+            if (inBox.x < 0.0 || inBox.x > 1.0 || inBox.y < 0.0 || inBox.y > 1.0) discard;
+            float boxAspect = boxSize.x * uAspect / boxSize.y;
+            float faceAspect = max(uFaceAspect, 1e-6);
+            vec2 sc = vec2(min(1.0, faceAspect / boxAspect), min(1.0, boxAspect / faceAspect));
+            vec2 zc = sc * max(uContentScale, 1e-4);
+            faceUv = (inBox - 0.5) / zc + 0.5;
+            if (faceUv.x < 0.0 || faceUv.x > 1.0 || faceUv.y < 0.0 || faceUv.y > 1.0) discard;
+          }
+          base = texture2D(uFrontTexture, faceUv);
           // 边框内区域蒙版：正面内容仅绘制在边框外围以内（含中空）；卡背不受蒙版限制。
           // 卡面随 content_scale 缩放时（网格在 cardContent 组内），UV 需反算回卡片坐标，
           // 否则蒙版随卡面一起缩放导致边缘错位（采样点偏离真实卡片位置）
@@ -531,9 +561,10 @@ __THREE_JS__
           vec2 translation = look * (0.005 + 0.011 * depth);
           vec2 backUv = clamp(uv + translation * sceneMask, 0.001, 0.999);
           base = texture2D(uBackTexture, backUv);
-          // 卡背同样按边框内区域蒙版裁剪（与正面一致：翻面后轮廓跟随边框形状）
+          // 卡背同样按边框内区域蒙版裁剪（与正面一致：翻面后轮廓跟随边框形状）；
+          // mask_clip=False（内边框效果）时卡背不裁到边框内，可延伸出边框外沿（与正面同步）
           // 蒙版按物理坐标 vUv 采样（不随视差平移、不镜像）——镜像会导致蒙版左右颠倒，露出黑底
-          base.a *= texture2D(uInteriorMap, vUv).a;
+          base.a *= mix(1.0, texture2D(uInteriorMap, vUv).a, uMaskClip);
         }
         if (!gl_FrontFacing) {
           // 复刻原版 xiaoqishuo 背面：卡背图 + 暖色边缘光（默认无箔光，卡封另加效果）
@@ -1076,9 +1107,11 @@ __ENGINE_JS__
     tiltGroup.rotation.x = hoverCurrent.y * 0.72;
     tiltGroup.rotation.y = hoverCurrent.x * 0.72;
 
-    // 视差安全限制：主体可见包围盒（含位移）不越过边框内沿，窄边框自动收窄位移
+    // 视差安全限制：主体可见包围盒（含位移）不越过边框内沿，窄边框自动收窄位移；
+    // 主体偏移（用户手动调位）叠加进视差目标——仅偏移图像位置，蒙版随 syncWorld 钉在卡片坐标
     if (!subjectBox) subjectBox = computeSubjectBox();
-    const par = clampParallax(hoverCurrent.x * 0.2, -hoverCurrent.y * 0.14);
+    const par = clampParallax(hoverCurrent.x * 0.2 + __SUBJ_OFFSET_X__ * CARD_WIDTH,
+                              -hoverCurrent.y * 0.14 + __SUBJ_OFFSET_Y__ * CARD_HEIGHT);
     foregroundGroup.position.x = damp(foregroundGroup.position.x, par.x, 9.5, dt);
     foregroundGroup.position.y = damp(foregroundGroup.position.y, par.y, 9.5, dt);
     foregroundGroup.position.z = damp(foregroundGroup.position.z, 0.024, 9.5, dt);
@@ -1250,8 +1283,56 @@ def _outline_layer_js(rel: str | None, z: float, order: float) -> str:
     )
 
 
+# 卡面 contain 到边框内沿（中空区域）：非浮起+边框+卡面素材时，主 shader 按 uFaceBox
+# 把卡面等比缩放居中放进中空窗口，整图完整可见不超框（2D compositor 同步实现）。
+# 中空 = 边框内区域蒙版（白=边框环+中空）∩ 边框图透明区（镂空），两者叠加后取白区 bbox。
+_FACE_CONTAIN_JS = r"""
+    var frameImg = null;
+    (function pollFrame() {
+      if (t.image && t.image.width) frameImg = t.image;
+      else setTimeout(pollFrame, 30);
+    })();
+    function setFaceBox(f) {
+      if (!interiorMaskImg || !frameImg || !frameImg.width) { setTimeout(function () { setFaceBox(f); }, 30); return; }
+      var cv = document.createElement('canvas');
+      cv.width = 450; cv.height = 600;
+      var ctx = cv.getContext('2d');
+      var rx = (f.cx - f.fw / 2) * 450, ry = (f.cy - f.fh / 2) * 600, rw = f.fw * 450, rh = f.fh * 600;
+      ctx.clearRect(0, 0, 450, 600);
+      ctx.drawImage(interiorMaskImg, rx, ry, rw, rh);
+      var di = ctx.getImageData(0, 0, 450, 600).data;
+      ctx.clearRect(0, 0, 450, 600);
+      ctx.drawImage(frameImg, rx, ry, rw, rh);
+      var df = ctx.getImageData(0, 0, 450, 600).data;
+      var x0 = 450, y0 = 600, x1 = -1, y1 = -1;
+      for (var y = 0; y < 600; y++) {
+        for (var x = 0; x < 450; x++) {
+          var i = (y * 450 + x) * 4;
+          if (di[i + 3] > 128 && df[i + 3] <= 8) {
+            if (x < x0) x0 = x;
+            if (x > x1) x1 = x;
+            if (y < y0) y0 = y;
+            if (y > y1) y1 = y;
+          }
+        }
+      }
+      if (x1 < 0) return;
+      // canvas y 自上而下，纹理 UV y 自下而上（CanvasTexture 默认 flipY）：翻转 y 后再写入
+      cardMaterial.uniforms.uFaceBox.value.set(x0 / 450, 1.0 - (y1 + 1) / 600, (x1 + 1) / 450, 1.0 - y0 / 600);
+      var fi = frontTexture.image;
+      cardMaterial.uniforms.uFaceAspect.value = (fi && fi.width) ? (fi.width / fi.height) : 1.0;
+      cardMaterial.uniforms.uFaceContain.value = 1.0;
+    }
+    function setFaceBoxRetry(f) {
+      if (cardMaterial) setFaceBox(f);
+      else setTimeout(function () { setFaceBoxRetry(f); }, 30);
+    }
+"""
+
+
 def _frame_layer_js(rel: str | None, z: float, order: int, fit_subject: bool = False,
-                    adapt_limit: float | None = None, interior_rel: str | None = None) -> str:
+                    adapt_limit: float | None = None, interior_rel: str | None = None,
+                    contain: bool = False) -> str:
     """边框叠加层 JS。fit_subject 时按前景主体包围盒缩放边框（否则整卡），仅正面渲染。
 
     主体包围盒在浏览器端从前景纹理 alpha 计算（无需服务端 numpy），
@@ -1259,6 +1340,8 @@ def _frame_layer_js(rel: str | None, z: float, order: int, fit_subject: bool = F
     adapt_limit: 文本型主体自适应缩放比例（<1 时边框随主体同步缩小上移）。
     interior_rel: 边框内区域蒙版图（白=边框环+中空，黑=边框外围），按边框实际绘制
     形态缩放到全卡画布，作为整卡内容的裁剪蒙版（卡面/主体/层1卡封不超出边框外围）。
+    contain: 非浮起+边框+卡面素材时，按「边框内沿（中空区域）」bbox 计算卡面窗口
+    （uFaceBox/uFaceAspect），主 shader 把卡面 contain 进窗口内完整可见不超框。
     """
     if not rel:
         return ""
@@ -1273,13 +1356,15 @@ def _frame_layer_js(rel: str | None, z: float, order: int, fit_subject: bool = F
             "    var lastFit = null;\n"
             "    var interiorMaskImg = null;\n"
             + ("    loader.load(" + json.dumps(interior_rel) + ", function (it) { interiorMaskImg = it.image; if (lastFit) drawInterior(lastFit); });\n" if interior_rel else "")
+            + ("\n" + _FACE_CONTAIN_JS if contain else "")
             + "    function drawInterior(f) {\n"
             "      if (!interiorMaskImg || !interiorMaskImg.width) return;\n"
             "      interiorCtx.clearRect(0, 0, 450, 600);\n"
             "      interiorCtx.drawImage(interiorMaskImg, (f.cx - f.fw / 2) * 450, (f.cy - f.fh / 2) * 600, f.fw * 450, f.fh * 600);\n"
             "      interiorTexture.needsUpdate = true;\n"
             "      updateInteriorSdf();\n"
-            "    }\n"
+            + ("      setFaceBoxRetry(f);\n" if contain else "")
+            + "    }\n"
             "    function addFrame(fw, fh, cx, cy) {\n"
             "      var m = new THREE.Mesh(\n"
             "        new THREE.PlaneGeometry(fw * CARD_WIDTH, fh * CARD_HEIGHT),\n"
@@ -1394,8 +1479,6 @@ GLOW_EFFECTS = {
                 "tight": 0.012, "soft": 0.05, "mode": 2, "fresnel": 0.0, "speed": 0.0},
     "菲涅尔描边": {"colorTop": (0.9, 0.86, 0.65), "colorBottom": (0.5, 0.28, 0.14),
                   "tight": 0.012, "soft": 0.05, "mode": 3, "fresnel": 1.0, "speed": 0.0},
-    "双环辉光": {"colorTop": (0.95, 0.72, 0.28), "colorBottom": (0.62, 0.16, 0.05),
-                "tight": 0.004, "soft": 0.09, "mode": 4, "fresnel": 0.0, "speed": 0.0},
     "RGB变色灯光": {"colorTop": (1.0, 1.0, 1.0), "colorBottom": (1.0, 1.0, 1.0),
                    "tight": 0.01, "soft": 0.06, "mode": 5, "fresnel": 0.0, "speed": 0.6},
     "霓虹灯": {"colorTop": (1.0, 0.32, 0.38), "colorBottom": (0.35, 0.8, 1.0),
@@ -1592,13 +1675,15 @@ _SEAL_PATTERN_JS = r"""
 def _seal_layer_js(effect: dict, front_strength: float = 0.945, back_strength: float = 0.5775,
                    parent: str = "flipGroup", z: float = 0.02, order: float = 5.2,
                    mask_rel: str | None = None, front_only: bool = False,
-                   mask_canvas: str | None = None) -> str:
+                   mask_canvas: str | None = None, mask_clip: bool = True) -> str:
     """冷裱膜动态光效层 JS：独立 ShaderMaterial，光线随悬停聚焦、随视角与时间流动。
 
     front_only: True 时仅正面渲染（有边框时层1卡封不再出现在卡背，卡背统一用边框卡封）。
     mask_rel: 静态蒙版图路径（如边框 PNG 的 alpha 作层2 卡封裁剪）。
     mask_canvas: 共享动态蒙版画布纹理的 JS 变量名（如 interiorTexture，层1 卡封按
     边框内区域裁剪，随边框实际绘制形态由 drawInterior 更新），与 mask_rel 二选一。
+    mask_clip: 层1 卡封（mask_canvas 为边框内蒙版）是否随「裁剪到边框内」开关裁剪；
+    层2 边框卡封（mask_rel 为边框 alpha）恒裁剪在边框上，不受此参数影响。
     """
     mode = effect.get("mode", "none")
     if mode == "none":
@@ -1626,7 +1711,7 @@ def _seal_layer_js(effect: dict, front_strength: float = 0.945, back_strength: f
             "    var sealPatternTex = new THREE.CanvasTexture(sealPatternCanvas);\n"
             "    sealPatternTex.magFilter = THREE.LinearFilter;\n"
             "    sealPatternTex.minFilter = THREE.LinearMipmapLinearFilter;\n"
-            "    sealPatternTex.colorSpace = THREE.SRGBColorSpace;\n"
+            "    sealPatternTex.colorSpace = THREE.NoColorSpace;\n"
         )
         uniform_decl = "    uPattern: { value: sealPatternTex },\n"
         if irregular:
@@ -1822,15 +1907,16 @@ def _seal_layer_js(effect: dict, front_strength: float = 0.945, back_strength: f
             "    gl_FragColor = vec4(effColor * glow * uStrength, 1.0);\n"
         )
 
-    # 层2 边框蒙版：frag 追加 alpha 裁剪（须在 prefix 拼接前定义，否则不生效）
+    # 卡封蒙版：frag 追加 alpha 裁剪（须在 prefix 拼接前定义，否则不生效）
     # 正面按当前蒙版源裁剪（层2=边框纹理 alpha，层1=边框内区域蒙版）；
-    # 卡背同样按边框内区域蒙版限制（与卡背主画面一致，不再整卡容器铺满）；蒙版统一按物理坐标 vUv 采样（不镜像）
+    # 卡背同样按边框内区域蒙版限制（与卡背主画面一致，不再整卡容器铺满）；蒙版统一按物理坐标 vUv 采样（不镜像）。
+    # uMaskClip 控制「边框内蒙版」类裁剪（层1 卡封跟随开关；层2 边框卡封恒为 1.0，边框 alpha 蒙版始终生效）
     mask_frag = ""
     if mask_rel or mask_canvas:
         mask_frag = ("  if (gl_FrontFacing) {\n"
-                     "    gl_FragColor.a *= texture2D(uFrameMap, vUv).a;\n"
+                     "    gl_FragColor.a *= mix(1.0, texture2D(uFrameMap, vUv).a, uMaskClip);\n"
                      "  } else {\n"
-                     "    gl_FragColor.a *= texture2D(uInteriorMap, vUv).a;\n"
+                     "    gl_FragColor.a *= mix(1.0, texture2D(uInteriorMap, vUv).a, uMaskClip);\n"
                      "  }\n")
 
     vertex = (
@@ -1965,7 +2051,8 @@ def _seal_layer_js(effect: dict, front_strength: float = 0.945, back_strength: f
     if mask_rel or mask_canvas:
         # 卡背蒙版：边框内区域蒙版（与卡背主画面一致），整卡脚本内定义的 interiorTexture
         uniform_decl += "    uInteriorMap: { value: interiorTexture },\n"
-        prefix = prefix.replace("void main() {", "uniform sampler2D uInteriorMap;\nvoid main() {", 1)
+        uniform_decl += "    uMaskClip: { value: " + ("1.0" if mask_clip else "0.0") + " },\n"
+        prefix = prefix.replace("void main() {", "uniform sampler2D uInteriorMap;\nuniform float uMaskClip;\nvoid main() {", 1)
 
     return (
         _SEAL_PATTERN_JS
@@ -2006,7 +2093,7 @@ def _seal_layer_js(effect: dict, front_strength: float = 0.945, back_strength: f
 def _custom_seal_layer_js(rel: str | None, front_strength: float = 0.945, back_strength: float = 0.5775,
                           parent: str = "flipGroup", z: float = 0.02, order: float = 5.2,
                           mask_rel: str | None = None, front_only: bool = False,
-                          mask_canvas: str | None = None) -> str:
+                          mask_canvas: str | None = None, mask_clip: bool = True) -> str:
     """自定义 PNG 卡封动态光效层：整张贴图 + 随视角扫动的箔光带 + 彩虹色相迁移，正反双面显示。
 
     与内置膜（_seal_layer_js）相同的视角光效架构（sheen 基面 / edge 边缘菲涅尔 /
@@ -2017,6 +2104,8 @@ def _custom_seal_layer_js(rel: str | None, front_strength: float = 0.945, back_s
 
     front_only: True 时仅正面渲染（有边框时层1卡封不再出现在卡背，卡背统一用边框卡封）。
     mask_canvas: 共享动态蒙版画布纹理的 JS 变量名（层1 卡封按边框内区域裁剪），与 mask_rel 二选一。
+    mask_clip: 层1 卡封（mask_canvas 为边框内蒙版）是否随「裁剪到边框内」开关裁剪；
+    层2 边框卡封（mask_rel 为边框 alpha）恒裁剪在边框上，不受此参数影响。
     """
     if not rel:
         return ""
@@ -2032,15 +2121,16 @@ def _custom_seal_layer_js(rel: str | None, front_strength: float = 0.945, back_s
         "    float a = pat * (gl_FrontFacing ? uFrontStrength : uBackStrength);\n"
         "    gl_FragColor = vec4(rgb, a);\n"
     )
-    # 层2 边框蒙版：frag 追加 alpha 裁剪（须在 prefix 拼接前定义，否则不生效）
+    # 卡封蒙版：frag 追加 alpha 裁剪（须在 prefix 拼接前定义，否则不生效）
     # 正面按当前蒙版源裁剪（层2=边框纹理 alpha，层1=边框内区域蒙版）；
-    # 卡背同样按边框内区域蒙版限制（与卡背主画面一致，不再整卡容器铺满）；蒙版统一按物理坐标 vUv 采样（不镜像）
+    # 卡背同样按边框内区域蒙版限制（与卡背主画面一致，不再整卡容器铺满）；蒙版统一按物理坐标 vUv 采样（不镜像）。
+    # uMaskClip 控制「边框内蒙版」类裁剪（层1 卡封跟随开关；层2 边框卡封恒为 1.0，边框 alpha 蒙版始终生效）
     mask_frag = ""
     if mask_rel or mask_canvas:
         mask_frag = ("  if (gl_FrontFacing) {\n"
-                     "    gl_FragColor.a *= texture2D(uFrameMap, vUv).a;\n"
+                     "    gl_FragColor.a *= mix(1.0, texture2D(uFrameMap, vUv).a, uMaskClip);\n"
                      "  } else {\n"
-                     "    gl_FragColor.a *= texture2D(uInteriorMap, vUv).a;\n"
+                     "    gl_FragColor.a *= mix(1.0, texture2D(uInteriorMap, vUv).a, uMaskClip);\n"
                      "  }\n")
     vertex = (
         "varying vec2 vUv;\n"
@@ -2130,12 +2220,12 @@ def _custom_seal_layer_js(rel: str | None, front_strength: float = 0.945, back_s
         prefix = prefix.replace("void main() {", "uniform sampler2D uFrameMap;\nvoid main() {", 1)
     if mask_rel or mask_canvas:
         # 卡背蒙版：边框内区域蒙版（与卡背主画面一致），整卡脚本内定义的 interiorTexture
-        prefix = prefix.replace("void main() {", "uniform sampler2D uInteriorMap;\nvoid main() {", 1)
+        prefix = prefix.replace("void main() {", "uniform sampler2D uInteriorMap;\nuniform float uMaskClip;\nvoid main() {", 1)
 
     return (
         "  (function () {\n"
         "    var t = loader.load(" + json.dumps(rel) + ");\n"
-        "    t.colorSpace = THREE.SRGBColorSpace;\n"
+        "    t.colorSpace = THREE.NoColorSpace;\n"
         "    t.anisotropy = 8;\n"
         + mask_js
         + "    var sealMat = new THREE.ShaderMaterial({\n"
@@ -2154,6 +2244,7 @@ def _custom_seal_layer_js(rel: str | None, front_strength: float = 0.945, back_s
         "        uMap: { value: t },\n"
         + ("        uFrameMap: { value: sealFrameTex },\n" if (mask_rel or mask_canvas) else "")
         + ("        uInteriorMap: { value: interiorTexture },\n" if (mask_rel or mask_canvas) else "")
+        + ("        uMaskClip: { value: " + ("1.0" if mask_clip else "0.0") + " },\n" if (mask_rel or mask_canvas) else "")
         + "      },\n"
         "      vertexShader: " + json.dumps(vertex) + ",\n"
         "      fragmentShader: " + json.dumps(prefix) + ",\n"
@@ -2185,8 +2276,11 @@ _GLOW_TICK_JS = (
 )
 
 
-def _glow_init_js(glow_name: str | None, glow_strength: float) -> str:
-    """按辉光预设注入参数（none=隐藏辉光；未知名回退默认预设）。"""
+def _glow_init_js(glow_name: str | None, glow_strength: float, glow_boost: float = 1.0) -> str:
+    """按辉光预设注入参数（none=隐藏辉光；未知名回退默认预设）。
+
+    glow_boost: 异形边框强度补偿（>1 时允许有效强度超过 2.0 上限）。
+    """
     if glow_name == "none":
         return "  (function () { auraMaterial.visible = false; })();\n"
     glow = resolve_glow_def(glow_name) if glow_name else None
@@ -2195,7 +2289,7 @@ def _glow_init_js(glow_name: str | None, glow_strength: float) -> str:
             "colorTop": (0.98, 0.63, 0.18), "colorBottom": (0.44, 0.08, 0.025),
             "tight": 0.014, "soft": 0.045, "mode": 0, "fresnel": 0.0, "speed": 0.0})
         glow_strength = 1.0
-    strength = min(2.0, max(0.0, glow_strength))
+    strength = min(2.0, max(0.0, glow_strength)) * max(0.0, glow_boost)
     top = tuple(glow.get("colorTop") or (0.98, 0.63, 0.18))
     bottom = tuple(glow.get("colorBottom") or (0.44, 0.08, 0.025))
     mode = int(glow.get("mode") or 0)
@@ -2235,31 +2329,37 @@ def _text_adapt_limit(text_type: str, description: str | None, text_pos: dict | 
     return limit
 
 
-def _fg_mask_js(content_scale: float = 1.0) -> str:
-    """边框内蒙版裁剪主体 JS：未浮于边框时，前景主体/描边/阴影不超出边框外围（与 2D 一致）。
+def _fg_mask_js(content_scale: float = 1.0, mask_tex: str = "interiorTexture") -> str:
+    """边框内蒙版裁剪主体 JS：前景主体/描边/阴影不超出边框外围（与 2D 一致）。
 
-    把 interiorTexture 挂为主体材质 alphaMap（乘算 alpha），并用纹理 offset/repeat
+    把蒙版纹理挂为主体材质 alphaMap（乘算 alpha），并用纹理 offset/repeat
     把网格局部 UV 换算到卡片坐标：cardUv = (局部位置 / CARD_W) * s + 0.5。
     主体组随 cardContent 缩放（s=content_scale），文本型几何还会被 _fg_adapt_js
     运行时缩放/移位，这里轮询到稳定后同步变换（同 _fg_adapt_js 的节奏）。
+    mask_tex: 蒙版纹理变量名，生成的 JS 直接引用该变量（运行时求值，避免值拷贝
+    导致浮起时 edgeTex 生成前被固定为 null）——未浮于边框时用 interiorTexture
+    （边框环+中空），浮于边框之上时用 _fg_edge_mask_js 合成的 edgeTex（仅中空）。
     """
     return (
         "  (function () {\n"
         "    var s = " + str(content_scale) + ";\n"
         "    function applyMask(m) {\n"
         "      if (!m.isMesh || !m.material || !m.geometry || m.geometry.type !== 'PlaneGeometry') return;\n"
-        "      if (m.material.alphaMap === interiorTexture) return;\n"
-        "      m.material.alphaMap = interiorTexture;\n"
-        "      interiorTexture.center.set(0, 0);\n"
+        "      if (!" + mask_tex + ") return;\n"
+        "      if (m.material.alphaMap === " + mask_tex + ") return;\n"
+        "      m.material.alphaMap = " + mask_tex + ";\n"
+        "      " + mask_tex + ".center.set(0, 0);\n"
         "      m.material.needsUpdate = true;\n"
         "    }\n"
         "    // 蒙版纹理矩阵固定于卡片坐标系：offset 含前景组位移（视差），\n"
         "    // 否则组移动时蒙版图案跟着主体走，裁剪边界不固定在卡片上，主体会滑出边框外沿\n"
         "    function syncWorld() {\n"
+        "      if (!" + mask_tex + ") return;\n"
         "      var gx = foregroundGroup.position.x, gy = foregroundGroup.position.y;\n"
         "      foregroundGroup.children.forEach(function (m) {\n"
-        "        if (!m.isMesh || !m.material || m.material.alphaMap !== interiorTexture) return;\n"
+        "        if (!m.isMesh || !m.material || m.material.alphaMap !== " + mask_tex + ") return;\n"
         "        var g = m.geometry.parameters;\n"
+        "        if (!g || !g.width) return;\n"
         "        var t = m.material.alphaMap;\n"
         "        t.repeat.set((g.width * s) / CARD_WIDTH, (g.height * s) / CARD_HEIGHT);\n"
         "        t.offset.set((gx + m.position.x - g.width / 2) * s / CARD_WIDTH + 0.5,\n"
@@ -2272,7 +2372,7 @@ def _fg_mask_js(content_scale: float = 1.0) -> str:
         "      var pending = false;\n"
         "      foregroundGroup.children.forEach(function (m) {\n"
         "        if (!m.isMesh || !m.material || !m.geometry || m.geometry.type !== 'PlaneGeometry') return;\n"
-        "        if (m.material.alphaMap !== interiorTexture) { applyMask(m); pending = true; }\n"
+        "        if (!m.material.alphaMap || m.material.alphaMap !== " + mask_tex + ") { applyMask(m); pending = true; }\n"
         "      });\n"
         "      if (pending) setTimeout(tick, 30);\n"
         "    })();\n"
@@ -2280,24 +2380,156 @@ def _fg_mask_js(content_scale: float = 1.0) -> str:
     )
 
 
-def _fg_adapt_js(adapt_limit: float | None, content_scale: float = 1.0) -> str:
+def _fg_edge_mask_js(content_scale: float = 1.0, frame_rel: str | None = None,
+                     interior_rel: str | None = None) -> str:
+    """浮于边框之上时主体的「边框内沿蒙版」JS：主体裁到边框内沿（中空区域），
+    不压住边框装饰、不超出边框外沿（与 2D frame_inner_edge_mask 一致）。
+
+    浏览器端从边框图与 interior 蒙版合成中空蒙版（interior ∩ 非边框）：
+    浮起时边框恒为整卡（fit_subject 仅未浮起启用），interior 图也按整卡拉伸生成，
+    两者拉伸对齐；合成一次后由 _fg_mask_js 挂到前景组网格并每帧同步矩阵。
+    """
+    mask_js = _fg_mask_js(content_scale, mask_tex="edgeTex")
+    return (
+        "  (function () {\n"
+        "    var edgeTex = null;\n"
+        "    var frameImg = null, interiorImg = null;\n"
+        "    function build() {\n"
+        "      if (edgeTex || !frameImg || !interiorImg) return;\n"
+        "      var cv = document.createElement('canvas');\n"
+        "      cv.width = 450; cv.height = 600;\n"
+        "      var ctx = cv.getContext('2d');\n"
+        "      var cvA = document.createElement('canvas'); cvA.width = 450; cvA.height = 600;\n"
+        "      var cta = cvA.getContext('2d');\n"
+        "      cta.drawImage(interiorImg, 0, 0, 450, 600);\n"
+        "      var dA = cta.getImageData(0, 0, 450, 600).data;\n"
+        "      var cvB = document.createElement('canvas'); cvB.width = 450; cvB.height = 600;\n"
+        "      var ctb = cvB.getContext('2d');\n"
+        "      ctb.drawImage(frameImg, 0, 0, 450, 600);\n"
+        "      var dB = ctb.getImageData(0, 0, 450, 600).data;\n"
+        "      var out = ctx.createImageData(450, 600);\n"
+        "      var od = out.data;\n"
+        "      for (var i = 0; i < od.length; i += 4) {\n"
+        "        var keep = (dA[i + 3] > 128 && dB[i + 3] <= 8) ? 255 : 0;\n"
+        "        od[i] = od[i + 1] = od[i + 2] = 255; od[i + 3] = keep;\n"
+        "      }\n"
+        "      ctx.putImageData(out, 0, 0);\n"
+        "      edgeTex = new THREE.CanvasTexture(cv);\n"
+        "      edgeTex.colorSpace = THREE.NoColorSpace;\n"
+        "    }\n"
+        "    loader.load(" + json.dumps(frame_rel) + ", function (t) { frameImg = t.image; build(); });\n"
+        "    loader.load(" + json.dumps(interior_rel) + ", function (t) { interiorImg = t.image; build(); });\n"
+        + mask_js
+        + "  })();\n"
+    )
+
+
+def _fg_adapt_js(adapt_limit: float | None, content_scale: float = 1.0, follow_bg: bool = False,
+                 bg_follow_rel: str | None = None) -> str:
     """文本型前景适配 JS：前景平面按源图比例等比缩放（contain），完整显示、不裁剪、不变形，
     居中于卡图区（卡顶到文本区顶部 y1），主体中心 = 余卡面范围中心（文本区下移时主体随之上移）。
 
     与 2D 合成（compositor._contain）保持一致。
     content_scale: 卡面缩放系数，同步用于 alphaMap 蒙版换算（主体随卡面缩放后蒙版不错位）。
+    follow_bg: 整幅+抠图+文本型：背景跟随主体——额外创建「背景跟随网格」（bg_follow.png，
+    与主体同尺寸同几何，任意源图比例下像素级对齐）与「虚化整卡底」（填充文本区留白），
+    与 2D 合成（compositor.follow_bg）一致。
     """
     if adapt_limit is None:
         return ""
+    # 背景跟随网格：显示预适配背景图（与主体同几何/同位置，主体精确遮盖背景原主体），
+    # 圆角+边框内蒙版按卡片坐标裁剪
+    bg_follow_js = (
+        "    var bgFollow = null;\n"
+        "    function ensureBgFollow() {\n"
+        "      if (bgFollow) return true;\n"
+        "      var bgfMat = new THREE.ShaderMaterial({\n"
+        "        transparent: true, depthWrite: false, side: THREE.FrontSide, toneMapped: false,\n"
+        "        uniforms: {\n"
+        "          uBgTexture: { value: bgFollowTexture },\n"
+        "          uAspect: { value: CARD_WIDTH / CARD_HEIGHT },\n"
+        "          uMeshX: { value: 0 }, uMeshW: { value: 1 },\n"
+        "          uMeshY: { value: 0 }, uMeshH: { value: 1 },\n"
+        "          uInteriorMap: { value: interiorTexture },\n"
+        "        },\n"
+        "        vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }',\n"
+        "        fragmentShader: [\n"
+        "          'uniform sampler2D uBgTexture; uniform float uAspect; uniform float uMeshX; uniform float uMeshW; uniform float uMeshY; uniform float uMeshH; uniform sampler2D uInteriorMap; varying vec2 vUv;',\n"
+        "          'float bgRounded(vec2 uv, float radius){ vec2 s = vec2((uv.x-0.5)*uAspect, uv.y-0.5); vec2 hs = vec2(0.5*uAspect, 0.5); vec2 e = abs(s) - (hs - vec2(radius)); return length(max(e,0.0)) + min(max(e.x,e.y),0.0) - radius; }',\n"
+        "          'void main(){ vec2 cardUv = vec2(vUv.x * uMeshW + uMeshX, vUv.y * uMeshH + uMeshY); if (bgRounded(cardUv, 0.032) > 0.0) discard; vec4 c = texture2D(uBgTexture, vUv); c.a *= texture2D(uInteriorMap, cardUv).a; gl_FragColor = c; }'\n"
+        "        ].join('\\n'),\n"
+        "      });\n"
+        "      bgFollow = new THREE.Mesh(new THREE.PlaneGeometry(CARD_WIDTH, adaptH), bgfMat);\n"
+        "      bgFollow.position.z = 0.003;\n"
+        "      bgFollow.renderOrder = 1.5;\n"
+        "      cardContent.add(bgFollow);\n"
+        "      window.__BG_FOLLOW__ = bgFollow;\n"
+        "      return true;\n"
+        "    }\n"
+        "    // 虚化整卡底：填充背景跟随区域之外的留白（文本区），与 2D follow_bg 的模糊底一致\n"
+        "    var blurBase = null;\n"
+        "    function ensureBlurBase() {\n"
+        "      if (blurBase) return true;\n"
+        "      var img = frontTexture.image;\n"
+        "      if (!img || !img.width || !img.height) return false;\n"
+        "      var cw2 = 300, ch2 = 400;\n"
+        "      var cv = document.createElement('canvas');\n"
+        "      cv.width = cw2; cv.height = ch2;\n"
+        "      var ctx = cv.getContext('2d');\n"
+        "      var bs = Math.max(cw2 / img.width, ch2 / img.height);\n"
+        "      var dw = img.width * bs, dh = img.height * bs;\n"
+        "      ctx.filter = 'blur(16px)';\n"
+        "      ctx.drawImage(img, (cw2 - dw) / 2, (ch2 - dh) / 2, dw, dh);\n"
+        "      var bt = new THREE.CanvasTexture(cv);\n"
+        "      bt.colorSpace = THREE.NoColorSpace;\n"
+        "      var bMat = new THREE.ShaderMaterial({\n"
+        "        transparent: true, depthWrite: false, side: THREE.FrontSide, toneMapped: false,\n"
+        "        uniforms: {\n"
+        "          uBgTexture: { value: bt },\n"
+        "          uAspect: { value: CARD_WIDTH / CARD_HEIGHT },\n"
+        "          uInteriorMap: { value: interiorTexture },\n"
+        "        },\n"
+        "        vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }',\n"
+        "        fragmentShader: [\n"
+        "          'uniform sampler2D uBgTexture; uniform float uAspect; uniform sampler2D uInteriorMap; varying vec2 vUv;',\n"
+        "          'float bgRounded(vec2 uv, float radius){ vec2 s = vec2((uv.x-0.5)*uAspect, uv.y-0.5); vec2 hs = vec2(0.5*uAspect, 0.5); vec2 e = abs(s) - (hs - vec2(radius)); return length(max(e,0.0)) + min(max(e.x,e.y),0.0) - radius; }',\n"
+        "          'void main(){ if (bgRounded(vUv, 0.032) > 0.0) discard; vec4 c = texture2D(uBgTexture, vUv); c.a *= texture2D(uInteriorMap, vUv).a; gl_FragColor = c; }'\n"
+        "        ].join('\\n'),\n"
+        "      });\n"
+        "      var bMesh = new THREE.Mesh(new THREE.PlaneGeometry(CARD_WIDTH, CARD_HEIGHT), bMat);\n"
+        "      bMesh.position.z = 0.002;\n"
+        "      bMesh.renderOrder = 0.5;\n"
+        "      flipGroup.add(bMesh);\n"
+        "      blurBase = bMesh;\n"
+        "      return true;\n"
+        "    }\n"
+        "    function syncBg(f) {\n"
+        "      bgFollow.geometry = new THREE.PlaneGeometry(f.w, f.h);\n"
+        "      bgFollow.position.set(f.cx + (window.__SUBJ_OFFSET_X_VAL__ || 0) * CARD_WIDTH, f.cy + (window.__SUBJ_OFFSET_Y_VAL__ || 0) * CARD_HEIGHT, 0.003);\n"
+        "      var u = bgFollow.material.uniforms;\n"
+        "      u.uMeshX.value = (f.cx - f.w / 2) * s / CARD_WIDTH + 0.5;\n"
+        "      u.uMeshW.value = f.w * s / CARD_WIDTH;\n"
+        "      u.uMeshY.value = (f.cy - f.h / 2) * s / CARD_HEIGHT + 0.5;\n"
+        "      u.uMeshH.value = f.h * s / CARD_HEIGHT;\n"
+        "    }\n"
+    ) if follow_bg else ""
+    adapt_extra = (
+        "      if (bgFollow) {\n"
+        "        if (fit) { syncBg(fit); } else { pending = true; }\n"
+        "      }\n"
+        "      if (!ensureBlurBase()) pending = true;\n"
+    ) if follow_bg else ""
+    ensure_init = "      if (!ensureBgFollow()) pending = true;\n" if follow_bg else ""
     return (
         "  (function () {\n"
         "    var limit = " + json.dumps(adapt_limit) + ";\n"
         "    var s = " + str(content_scale) + ";\n"
         "    var adaptH = CARD_HEIGHT * limit;\n"
+        + bg_follow_js +
         "    function fitMesh(m) {\n"
         "      var tex = m.material && m.material.map;\n"
         "      var img = tex && tex.image;\n"
-        "      if (!img || !img.width || !img.height) return false;\n"
+        "      if (!img || !img.width || !img.height) return null;\n"
         "      var scale = Math.min(CARD_WIDTH / img.width, adaptH / img.height);\n"
         "      var w = img.width * scale, h = img.height * scale;\n"
         "      // px/py 是卡图区（卡顶到 y1，y 向下）内主体的左上角坐标，转成 three.js 中心坐标（y 向上）\n"
@@ -2305,30 +2537,39 @@ def _fg_adapt_js(adapt_limit: float | None, content_scale: float = 1.0) -> str:
         "      var py = (adaptH - h) / 2;\n"
         "      var cx = px + w / 2 - CARD_WIDTH / 2;\n"
         "      var cy = CARD_HEIGHT / 2 - (py + h / 2);\n"
-        "      if (Math.abs(m.geometry.parameters.width - w) > 1e-4 ||\n"
-        "          Math.abs(m.geometry.parameters.height - h) > 1e-4) {\n"
-        "        m.geometry = new THREE.PlaneGeometry(w, h);\n"
+        "      return { w: w, h: h, cx: cx, cy: cy };\n"
+        "    }\n"
+        "    function applyFit(m, f) {\n"
+        "      var tex = m.material && m.material.map;\n"
+        "      if (Math.abs(m.geometry.parameters.width - f.w) > 1e-4 ||\n"
+        "          Math.abs(m.geometry.parameters.height - f.h) > 1e-4) {\n"
+        "        m.geometry = new THREE.PlaneGeometry(f.w, f.h);\n"
         "      }\n"
-        "      m.position.x = cx;\n"
-        "      m.position.y = cy + (m.renderOrder <= 2 ? -0.034 : 0);\n"
+        "      m.position.x = f.cx;\n"
+        "      m.position.y = f.cy + (m.renderOrder <= 2 ? -0.034 : 0);\n"
         "      tex.offset.set(0, 0);\n"
         "      tex.repeat.set(1, 1);\n"
         "      // 边框内蒙版：随几何/位置同步换算（主体缩放后仍精确裁剪在边框外围以内）\n"
         "      var am = m.material.alphaMap;\n"
         "      if (am) {\n"
         "        am.center.set(0, 0);\n"
-        "        am.repeat.set((w * s) / CARD_WIDTH, (h * s) / CARD_HEIGHT);\n"
-        "        am.offset.set((cx - w / 2) * s / CARD_WIDTH + 0.5, (cy - h / 2) * s / CARD_HEIGHT + 0.5);\n"
+        "        am.repeat.set((f.w * s) / CARD_WIDTH, (f.h * s) / CARD_HEIGHT);\n"
+        "        am.offset.set((f.cx - f.w / 2) * s / CARD_WIDTH + 0.5, (f.cy - f.h / 2) * s / CARD_HEIGHT + 0.5);\n"
         "        am.needsUpdate = true;\n"
         "      }\n"
-        "      return true;\n"
         "    }\n"
         "    function adapt() {\n"
         "      var pending = false;\n"
+        "      var fit = null;\n"
         "      foregroundGroup.children.forEach(function (m) {\n"
         "        if (!m.isMesh || !m.geometry || m.geometry.type !== 'PlaneGeometry') return;\n"
-        "        if (!fitMesh(m)) pending = true;\n"
+        "        var f = fitMesh(m);\n"
+        "        if (!f) { pending = true; return; }\n"
+        "        if (!fit) fit = f;\n"
+        "        applyFit(m, f);\n"
         "      });\n"
+        + ensure_init +
+        adapt_extra +
         "      if (pending) setTimeout(adapt, 30);\n"
         "    }\n"
         "    adapt();\n"
@@ -2543,7 +2784,25 @@ def _face_mesh_js(face_scales: bool) -> str:
         "    var faceMesh = new THREE.Mesh(new THREE.PlaneGeometry(CARD_WIDTH, CARD_HEIGHT), faceMat);\n"
         "    cardContent.add(faceMesh);\n"
         "    hitMeshes.push(faceMesh);\n"
-        "    window.__FACE_MAT__ = faceMat;\n"
+    "    window.__FACE_MAT__ = faceMat;\n"
+    "  })();\n"
+)
+
+
+def _subject_offset_js(off_x: float, off_y: float) -> str:
+    """主体偏移 JS：设置全局偏移量（卡宽/卡高比例），供视差目标与 bgFollow 同步使用。
+
+    仅偏移主体图像位置（foregroundGroup 经视差目标带偏移，蒙版随 syncWorld 钉在卡片坐标），
+    渲染范围（蒙版裁剪边界）不跟随偏移；整幅+抠图+文本型的背景跟随网格同步偏移保持对齐。
+    """
+    if not off_x and not off_y:
+        return ""
+    return (
+        "  (function () {\n"
+        "    window.__SUBJ_OFFSET_X_VAL__ = " + str(off_x) + ";\n"
+        "    window.__SUBJ_OFFSET_Y_VAL__ = " + str(off_y) + ";\n"
+        "    var b = window.__BG_FOLLOW__;\n"
+        "    if (b) { b.position.x += " + str(off_x) + " * CARD_WIDTH; b.position.y += " + str(off_y) + " * CARD_HEIGHT; }\n"
         "  })();\n"
     )
 
@@ -2556,6 +2815,8 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
                     description: str | None = None, text_type: str = "none",
                     text_pos: dict | None = None,
                     subject_over_frame: bool = False,
+                    subject_offset_x: float = 0.0,
+                    subject_offset_y: float = 0.0,
                     round_foreground: bool = False,
                     frame_fit_subject: bool = False,
                     outline_rel: str | None = None,
@@ -2569,7 +2830,10 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
                     background_rel: str | None = None,
                     mask_clip: bool = True,
                     glow_name: str | None = None,
-                    glow_strength: float = 1.0) -> str:
+                    glow_strength: float = 1.0,
+                    glow_boost: float = 1.0,
+                    follow_bg: bool = False,
+                    bg_follow_rel: str | None = None) -> str:
     """生成自包含 3D 卡网页 HTML。
 
     effects: 特效实例列表 [{"name":..., "def": {...}, "pos": {...}}]，def 为完整特效参数。
@@ -2578,6 +2842,8 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
     seal_frame_rel/seal_frame_name: 层2 边框卡封（仅边框非透明区域显示，边框作蒙版）。
     description/text_type/text_pos: 卡面描述文字（text_type: none/transparent/boxed）。
     subject_over_frame: 透明主体浮于边框之上（PVZ 式立体感）；默认边框盖住主体。
+    subject_offset_x/y: 主体图像偏移（卡宽/卡高比例，如 ±0.25），仅偏移图像位置，
+    渲染范围（蒙版裁剪边界）不跟随偏移。
     round_foreground: 整幅卡面时对前景主体做圆角遮罩（与卡面圆角一致）。
     frame_fit_subject: 未开启浮于边框时，边框按前景主体包围盒缩放（否则整卡）。
     outline_rel: 主体白色描边图（贴纸边，叠加在主体层之下、随前景视差移动）。
@@ -2591,6 +2857,11 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
     mask_clip: False 时不应用边框内蒙版裁剪，主体可延伸出边框外沿（内边框效果，与 2D 一致）。
     glow_name: 辉光特效名（GLOW_EFFECTS 键）；"none"=关闭辉光；None=默认暖金描边。
     glow_strength: 辉光整体强度（0~2，默认 1.0；未知名预设时强制 1.0）。
+    glow_boost: 异形边框辉光强度补偿系数（由 frame_glow_boost 计算，默认 1.0）。
+    follow_bg: 整幅+抠图+文本型：背景跟随主体（bg_follow.png 与主体同几何），
+    主体精确遮盖背景原主体；另垫虚化整卡底填充文本区留白（与 2D follow_bg 一致）。
+    bg_follow_rel: 预适配的背景跟随图相对路径（与前景主体同尺寸同几何，任意源图比例下
+    主体都能像素级遮盖背景原主体）。
     """
     three_js = THREE_JS.read_text(encoding="utf-8")
     fg_js = (
@@ -2599,10 +2870,17 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
         if subject_over_frame else
         CARD_HTML_TEMPLATE_FG
     )
-    # 未浮于边框时：前景主体/描边/阴影按边框内区域蒙版裁剪（整卡内容不超出边框外围，与 2D 一致）；
+    # 前景主体/描边/阴影按边框内蒙版裁剪（整卡内容不超出边框外围，与 2D 一致）：
+    #   未浮于边框时用 interior 蒙版（主体可延伸到边框环下、被边框盖住）；
+    #   浮于边框之上时用边框内沿蒙版（主体裁到边框内沿，不压边框装饰、不超出边框外沿）。
     # mask_clip=False 时不裁剪（内边框效果：主体可延伸出边框外沿，边框外留一圈图像）
-    if frame_rel and not subject_over_frame and mask_clip:
-        fg_js += _fg_mask_js(content_scale)
+    if frame_rel and mask_clip:
+        if subject_over_frame:
+            if interior_rel:
+                fg_js += _fg_edge_mask_js(content_scale, frame_rel, interior_rel)
+            # interior_rel 缺失时不裁剪（避免主体被空蒙版整卡消隐，保持原浮起行为）
+        else:
+            fg_js += _fg_mask_js(content_scale)
     # 层1 卡牌卡封：整卡尺寸、不随缩放（挂 flipGroup，z/order 介于主体与边框之间）；
     # 有边框时仅正面渲染（卡背统一用边框卡封），并按边框内区域蒙版裁剪
     seal_layer = ""
@@ -2614,11 +2892,13 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
         if effect:
             seal_layer = _seal_layer_js(effect, seal_strength_front, seal_strength_back,
                                         parent="flipGroup", z=0.008, order=3.5,
-                                        front_only=bool(frame_rel), mask_canvas=seal1_mask)
+                                        front_only=bool(frame_rel), mask_canvas=seal1_mask,
+                                        mask_clip=mask_clip)
     if not seal_layer:
         seal_layer = _custom_seal_layer_js(seal_rel, seal_strength_front, seal_strength_back,
                                            parent="flipGroup", z=0.008, order=3.5,
-                                           front_only=bool(frame_rel), mask_canvas=seal1_mask)
+                                           front_only=bool(frame_rel), mask_canvas=seal1_mask,
+                                           mask_clip=mask_clip)
     if seal_layer:
         # 亚光膜（matte）几乎无箔光高光（更哑光），其余卡封默认箔光弱化一半
         seal_u = 0.12 if (effect and effect.get("mode") == "matte") else 0.5
@@ -2661,12 +2941,19 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
         frame_fit_subject and not subject_over_frame and text_type != "boxed" and adapt_limit is None,
         None,
         interior_rel,
+        bool(frame_rel and not subject_over_frame and face_scales and frame_fit_subject),
     )
     # 主体描边层：渲染在主体之上（盖住主体边缘锯齿），浮起时随前景组抬升到边框之上
     outline_layer = _outline_layer_js(
         outline_rel, 0.0145 if subject_over_frame else 0.0065,
         4.45 if subject_over_frame else 3.1,
     )
+    bg_follow_load = (
+        "var bgFollowTexture = loader.load(" + json.dumps(bg_follow_rel) + ");\n"
+        "  bgFollowTexture.colorSpace = THREE.NoColorSpace;\n"
+        "  bgFollowTexture.anisotropy = 8;\n"
+    ) if bg_follow_rel else ""
+    offset_js = _subject_offset_js(subject_offset_x, subject_offset_y)
     return (
         CARD_HTML_TEMPLATE
         .replace("__THREE_JS__", three_js)
@@ -2674,21 +2961,24 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
         .replace("__FRONT__", front_rel)
         .replace("__FOREGROUND__", foreground_rel)
         .replace("__BACK__", back_rel)
+        .replace("__BG_FOLLOW_LOAD__", bg_follow_load)
         .replace("__MESH_PARENT__", "flipGroup")
         .replace("__FACE_MESH_JS__", _face_mesh_js(face_scales))
         .replace("__BG_LAYER__", _bg_layer_js(background_rel, face_scales))
         .replace("__FG_BLOCK__", fg_js)
-        .replace("__FG_ADAPT_JS__", _fg_adapt_js(adapt_limit, content_scale))
+        .replace("__FG_ADAPT_JS__", _fg_adapt_js(adapt_limit, content_scale, follow_bg, bg_follow_rel))
         .replace("__FG_ROUND_JS__", FG_ROUND_JS if round_foreground else "")
         .replace("__OUTLINE_LAYER__", outline_layer)
         .replace("__FRAME_LAYER__", frame_layer)
-        .replace("__SEAL_LAYER__", seal_layer + seal_frame_layer + scale_js + mask_js)
+        .replace("__SEAL_LAYER__", seal_layer + seal_frame_layer + scale_js + mask_js + offset_js)
         .replace("__SEAL_TICK__", _SEAL_TICK_JS)
         .replace("__GLOW_TICK__", _GLOW_TICK_JS)
-        .replace("__GLOW_INIT__", _glow_init_js(glow_name, glow_strength))
+        .replace("__GLOW_INIT__", _glow_init_js(glow_name, glow_strength, glow_boost))
         .replace("__TEXT_LAYER__", _text_layer_js(description, text_type, text_pos))
         .replace("__ENGINE_JS__", EFFECT_ENGINE_JS)
         .replace("__EFFECTS__", _json(effects or []))
+        .replace("__SUBJ_OFFSET_X__", str(subject_offset_x))
+        .replace("__SUBJ_OFFSET_Y__", str(subject_offset_y))
     )
 
 

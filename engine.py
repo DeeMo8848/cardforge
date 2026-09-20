@@ -20,7 +20,7 @@ MODELS_DIR = Path(
 os.environ.setdefault("U2NET_HOME", str(MODELS_DIR))
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
-DEFAULT_MODEL = "birefnet-general"
+DEFAULT_MODEL = "birefnet-general-lite"
 
 # 常用模型名 → 本地文件名（用于缺失提示，缺失时 rembg 自动下载）
 _MODEL_FILES = {
@@ -63,8 +63,8 @@ def _warn_if_model_missing(model: str) -> None:
 SUPPORTED_MODELS = {
     "none": "不使用抠图（整图直接作为卡面素材）",
     "birefnet-massive": "多数据集通用分割，质量最高（~970MB）",
-    "birefnet-general": "通用分割（默认，速度与质量平衡）",
-    "birefnet-general-lite": "通用分割轻量版",
+    "birefnet-general": "通用分割（速度与质量平衡）",
+    "birefnet-general-lite": "通用分割轻量版（默认，速度与质量平衡）",
     "birefnet-portrait": "人像特化分割",
     "isnet-anime": "动漫插画特化，体积小质量好（适合二次元封面）",
     "isnet-general-use": "通用分割，速度快",
@@ -117,10 +117,25 @@ class RembgEngine(MattingEngine):
     def _get_session(self):
         """会话惰性加载并缓存（同一进程内多次抠图只加载一次模型）。"""
         if self._session is None:
-            from rembg import new_session
-
             _warn_if_model_missing(self.model)
-            self._session = new_session(self.model)
+            import os
+
+            import onnxruntime as ort
+            from rembg import sessions
+
+            cls = next((sc for sc in sessions.sessions_class if sc.name() == self.model), None)
+            if cls is None:
+                raise ValueError(f"未知抠图模型: {self.model}")
+            opts = ort.SessionOptions()
+            # 关闭 onnxruntime CPU 内存池：推理中间内存用完即归还系统。
+            # 实测 BiRefNet 系列开启时进程常驻 ~6.5GB（分配后不归还），
+            # 关闭后常驻 ~0.5GB，速度损失 <1s（大图 3072x4096 约 8s→10s）
+            opts.enable_cpu_mem_arena = False
+            if "OMP_NUM_THREADS" in os.environ:
+                threads = int(os.environ["OMP_NUM_THREADS"])
+                opts.inter_op_num_threads = threads
+                opts.intra_op_num_threads = threads
+            self._session = cls(self.model, opts)
         return self._session
 
     def remove_background(self, image: Image.Image) -> Image.Image:

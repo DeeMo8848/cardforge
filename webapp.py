@@ -31,7 +31,7 @@ from urllib.parse import unquote, quote, parse_qs
 
 import cardforge
 from carddef import build_card_def, save_card_def
-from compositor import CARD_H, CARD_W, compose_card, save_frame_interior_mask
+from compositor import CARD_H, CARD_W, _cover, compose_card, frame_glow_boost, save_frame_interior_mask
 from engine import DEFAULT_MODEL, SUPPORTED_MODELS, create_engine, get_api_config, model_status
 import webcard
 
@@ -161,10 +161,15 @@ def _remove_builtin_glow(stem: str) -> str | None:
 def list_cards() -> list[dict]:
     """已有卡牌（assets/output/ 下含 front.png 的目录），附收集册展示所需字段。"""
     out = ASSETS / "output"
+    # 其他工具调用生成的卡牌不展示：settings.json 显式排除的 id + 16 位 hex id 通用规则
+    _exclude = set((_load_settings().get("album_exclude_ids") or []))
+    _is_hex_id = lambda n: bool(re.fullmatch(r"[0-9a-f]{16}", n))
     cards = []
     if out.exists():
         for d in sorted(out.iterdir()):
             if not d.is_dir() or d.name.startswith("_"):
+                continue
+            if d.name in _exclude or _is_hex_id(d.name):
                 continue
             if not (d / "front.png").exists():
                 continue
@@ -207,7 +212,9 @@ def list_cards() -> list[dict]:
                 "subject_outline": inherit.get("subject_outline"),
                 "mask_clip": inherit.get("mask_clip"),
                 "back": inherit.get("back"),
-                "scale": _parse_scale((data.get("extra") or {}).get("card_scale", 1.0)),
+                "scale": _parse_scale(data.get("card_scale", (data.get("extra") or {}).get("card_scale", 1.0))),
+                "subject_offset_x": _parse_offset(data.get("subject_offset_x", (data.get("extra") or {}).get("subject_offset_x", 0.0))),
+                "subject_offset_y": _parse_offset(data.get("subject_offset_y", (data.get("extra") or {}).get("subject_offset_y", 0.0))),
                 "glow": data.get("glow_name") or (data.get("extra") or {}).get("glow_name"),
                 "glow_strength": data.get("glow_strength",
                                         (data.get("extra") or {}).get("glow_strength", 1.0)),
@@ -281,6 +288,15 @@ def _parse_glow_strength(v, dflt: float = 1.0) -> float:
     except (TypeError, ValueError):
         return dflt
     return min(2.0, max(0.0, s))
+
+
+def _parse_offset(v, dflt: float = 0.0) -> float:
+    """解析主体偏移（卡宽/卡高比例，-0.9~0.9，默认 0 不偏移）。"""
+    try:
+        s = float(v)
+    except (TypeError, ValueError):
+        return dflt
+    return min(0.9, max(-0.9, s))
 
 
 def _abs_effect_images(effects: list[dict]) -> list[dict]:
@@ -563,7 +579,7 @@ def _save_assembly(data: dict) -> dict:
     if seal_frame_same:
         seal_frame_sel = seal_sel
     fg_url = (data.get("foreground") or "").strip()
-    back = (data.get("back") or "three-kingdoms-back.png").strip()
+    back = (data.get("back") or "sample-1.png").strip()
     desc = (data.get("desc") or "").strip() or None
     text_type = data.get("text_type") or "none"
     if desc and text_type == "none":
@@ -585,6 +601,8 @@ def _save_assembly(data: dict) -> dict:
     scale = _parse_scale(data.get("scale"))
     glow_name = (data.get("glow") or "none")
     glow_strength = _parse_glow_strength(data.get("glow_strength"))
+    subject_offset_x = _parse_offset(data.get("subject_offset_x"))
+    subject_offset_y = _parse_offset(data.get("subject_offset_y"))
     # 卡面素材可作为「前景主体层」使用：
     #   - 浮于边框之上：卡面同时作底图与前景层（同一图对齐，前景浮起后主体跃出边框）
     #   - 文本型（boxed）：卡面只在余卡面范围（卡顶到文本区顶部）呈现，底图改用背景/深色
@@ -637,7 +655,7 @@ def _save_assembly(data: dict) -> dict:
     if back_file and (ASSETS / "backs" / back_file).exists():
         shutil.copy(ASSETS / "backs" / back_file, out / "back.png")
     else:
-        back_file = "three-kingdoms-back.png"
+        back_file = "sample-1.png"
         shutil.copy(ASSETS / "backs" / back_file, out / "back.png")
 
     # 边框 / 卡封（边框可能来自 frames/ 或 frames-text/；layers 存原始素材路径，便于反查）
@@ -727,7 +745,10 @@ def _save_assembly(data: dict) -> dict:
                                 interior_rel=interior_rel,
                                 background_rel=bg_rel_url,
                                 glow_name=glow_name,
-                                glow_strength=glow_strength),
+                                glow_strength=glow_strength,
+                                glow_boost=frame_glow_boost(frame_src) if frame_src else 1.0,
+                                subject_offset_x=subject_offset_x,
+                                subject_offset_y=subject_offset_y),
         encoding="utf-8",
     )
 
@@ -752,6 +773,8 @@ def _save_assembly(data: dict) -> dict:
             "subject_outline": subject_outline,
             "mask_clip": mask_clip,
             "card_scale": scale,
+            "subject_offset_x": subject_offset_x,
+            "subject_offset_y": subject_offset_y,
             "seal_strength_front": seal_front,
             "seal_strength_back": seal_back,
             "seal_frame_strength_front": seal_frame_front,
@@ -787,7 +810,9 @@ def _save_assembly(data: dict) -> dict:
                                 subject_outline=subject_outline, size=(CARD_W, CARD_H),
                                 content_scale=scale,
                                 face_scales=face_scales,
-                                mask_clip=mask_clip)
+                                mask_clip=mask_clip,
+                                subject_offset_x=subject_offset_x,
+                                subject_offset_y=subject_offset_y)
         composed.save(out / "card.png")
     except Exception:
         pass
@@ -817,18 +842,38 @@ def _make_text(data: dict) -> dict:
     seal_name = None
     seal_frame_name = None
     card_scale = 1.0
+    subject_offset_x = 0.0
+    subject_offset_y = 0.0
     glow_name = None
     glow_strength = 1.0
+    follow_bg = False
+    _matted = False
     cf = PROJECT_ROOT / "cards" / f"{card_id}.json"
+    card_style = "transparent"
     try:
         card = json.loads(cf.read_text(encoding="utf-8"))
         name = card.get("name") or card_id
+        card_style = card.get("style") or "transparent"
         title = (card.get("text") or {}).get("title")
+        # 整幅+抠图+文本型：背景跟随主体变换（与 cardforge.make_card 的 follow_bg 判定一致）
+        _engine = card.get("engine") or ""
+        _matted = bool(_engine) and _engine != "不使用抠图"
+        if not _matted:
+            try:
+                from PIL import Image as _Img
+                _fg = _Img.open(out / "foreground.png").getchannel("A").getextrema()
+                _matted = _fg[1] >= 200
+            except Exception:
+                pass
+        follow_bg = card_style == "full-bleed" and _matted and text_type == "boxed"
         _extra = card.get("extra") or {}
         subject_over_frame = bool(card.get("subject_over_frame", _extra.get("subject_over_frame")))
         subject_outline = bool(card.get("subject_outline", _extra.get("subject_outline")))
         mask_clip = bool(card.get("mask_clip", _extra.get("mask_clip", True)))
-        card_scale = _parse_scale(_extra.get("card_scale", 1.0))
+        # build_card_def 会把 extra 展开到 JSON 顶层：顶层优先、extra 兜底（兼容新旧卡）
+        card_scale = _parse_scale(card.get("card_scale", _extra.get("card_scale", 1.0)))
+        subject_offset_x = _parse_offset(card.get("subject_offset_x", _extra.get("subject_offset_x", 0.0)))
+        subject_offset_y = _parse_offset(card.get("subject_offset_y", _extra.get("subject_offset_y", 0.0)))
         glow_name = card.get("glow_name") or _extra.get("glow_name")
         glow_strength = _parse_glow_strength(
             card.get("glow_strength", _extra.get("glow_strength", 1.0)))
@@ -897,6 +942,20 @@ def _make_text(data: dict) -> dict:
     elif (out / "outline.png").exists():
         (out / "outline.png").unlink()
     cardforge._materialize_effect_images(effect_instances, out)
+    # 整幅+抠图+文本型：重新生成与当前主体同几何的背景跟随图（源图按主体相同的 cover 适配，
+    # 任意源图比例下主体像素级遮盖背景原主体；文本框移动后按新主体尺寸重新适配）
+    bg_follow_rel = None
+    if follow_bg:
+        try:
+            from PIL import Image as _Img
+            _fg_h = _Img.open(out / "foreground.png").height
+            if (out / "source.png").exists():
+                _cover(_Img.open(out / "source.png"), CARD_W, _fg_h).save(out / "bg_follow.png")
+                bg_follow_rel = "bg_follow.png"
+        except Exception:
+            bg_follow_rel = None
+    elif (out / "bg_follow.png").exists():
+        (out / "bg_follow.png").unlink()
     (out / "card.html").write_text(
         webcard.build_card_html(name, "front.png", "foreground.png", "back.png", effects=effect_instances,
                                 frame_rel=frame_rel, seal_rel=seal_rel,
@@ -917,7 +976,12 @@ def _make_text(data: dict) -> dict:
                                 interior_rel=interior_rel,
                                 background_rel=bg_rel_url,
                                 glow_name=glow_name,
-                                glow_strength=glow_strength),
+                                glow_strength=glow_strength,
+                                follow_bg=follow_bg,
+                                bg_follow_rel=bg_follow_rel,
+                                glow_boost=frame_glow_boost(out / "frame.png") if frame_rel else 1.0,
+                                subject_offset_x=subject_offset_x,
+                                subject_offset_y=subject_offset_y),
         encoding="utf-8",
     )
     try:
@@ -925,7 +989,7 @@ def _make_text(data: dict) -> dict:
         fg = None
         if (out / "foreground.png").stat().st_size > 0:
             fg = Image.open(out / "foreground.png")
-        composed = compose_card(fg, style="transparent", front=str(out / "front.png"),
+        composed = compose_card(fg, style=card_style, front=str(out / "front.png"),
                                 background=str(bg_rel_path) if bg_rel_path else None,
                                 frame=str(out / "frame.png") if frame_rel else None,
                                 seal=str(out / "seal.png") if seal_rel else None,
@@ -936,7 +1000,12 @@ def _make_text(data: dict) -> dict:
                                 subject_outline=subject_outline, size=(CARD_W, CARD_H),
                                 content_scale=card_scale,
                                 face_scales=face_scales,
-                                mask_clip=mask_clip)
+                                mask_clip=mask_clip,
+                                subject_full_bleed=_matted if card_style == "full-bleed" else False,
+                                follow_bg=follow_bg,
+                                follow_bg_src=str(out / "bg_follow.png") if bg_follow_rel else None,
+                                subject_offset_x=subject_offset_x,
+                                subject_offset_y=subject_offset_y)
         composed.convert("RGB").save(out / "card.png")
     except Exception:
         pass
@@ -1331,7 +1400,7 @@ class Handler(BaseHTTPRequestHandler):
                 seal_frame_sel = seal_sel
             fg = (data.get("foreground") or "").strip()
             back_sel = (data.get("back") or "").strip()
-            back = _safe_name(back_sel or "three-kingdoms-back.png")
+            back = _safe_name(back_sel or "sample-1.png")
             blank_url = _ensure_blank()
             desc = (data.get("desc") or "").strip() or None
             text_type = data.get("text_type") or "none"
@@ -1341,6 +1410,8 @@ class Handler(BaseHTTPRequestHandler):
             subject_outline = bool(data.get("subject_outline"))
             mask_clip = bool(data.get("mask_clip", True))
             scale = _parse_scale(data.get("scale"))
+            subject_offset_x = _parse_offset(data.get("subject_offset_x"))
+            subject_offset_y = _parse_offset(data.get("subject_offset_y"))
             # 底图优先级：卡面素材 > 背景素材 > 成品卡（与保存逻辑一致）；
             # 卡面素材自含完整画面（前景清空，彻底替换）；背景素材只换底图（保留成品卡主体）
             # 卡面素材可作为「前景主体层」：浮于边框之上时卡面同时作底图与前景层（主体跃出边框）；
@@ -1466,6 +1537,8 @@ class Handler(BaseHTTPRequestHandler):
                     content_scale=scale,
                     face_scales=face_scales,
                     mask_clip=mask_clip,
+                    subject_offset_x=subject_offset_x,
+                    subject_offset_y=subject_offset_y,
                 )
                 PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
                 pname = f"asm_{uuid.uuid4().hex[:8]}.png"
@@ -1492,7 +1565,10 @@ class Handler(BaseHTTPRequestHandler):
                                            interior_rel=interior_url,
                                            background_rel=bg_url,
                                            glow_name=(data.get("glow") or "none"),
-                                           glow_strength=_parse_glow_strength(data.get("glow_strength")))
+                                           glow_strength=_parse_glow_strength(data.get("glow_strength")),
+                                           glow_boost=frame_glow_boost(frame_path) if frame_path else 1.0,
+                                           subject_offset_x=subject_offset_x,
+                                           subject_offset_y=subject_offset_y)
         return _write_preview_html(html)
 
     def _tmp_upload(self, data: dict) -> dict:
@@ -2093,6 +2169,13 @@ PAGE_HTML = r"""<!DOCTYPE html>
           <input type="number" id="asmScale" min="0.5" max="1.5" step="0.05" value="1">
         </div>
         <div class="row">
+          <label>主体偏移（仅移动图像位置，渲染范围不跟随；左右/上下，卡宽/卡高比例 ±0.9）</label>
+          <div class="arearow">
+            <span>左右</span><input type="number" id="asmOffsetX" min="-0.9" max="0.9" step="0.05" value="0">
+            <span>上下</span><input type="number" id="asmOffsetY" min="-0.9" max="0.9" step="0.05" value="0">
+          </div>
+        </div>
+        <div class="row">
           <label class="checkrow">
             <input type="checkbox" id="asmFloatFg">
             <span>✨ 主体浮于边框之上（PVZ 式立体感，透明主体卡可选）</span>
@@ -2379,10 +2462,29 @@ function refillBgSelect() {
   fillSelect('background', vals, labels);
 }
 refillBgSelect();
+// 背景默认值跟随风格：整幅卡面（+抠图）默认无背景，底图用上传原图（主体遮盖在原图主体上形成视差）；
+// 透明主体卡默认示例背景；用户手动选过背景后不再自动切换
+let bgTouched = false;
+bgSel.addEventListener('change', () => { bgTouched = true; });
 function syncBgByStyle() {
   const style = document.querySelector('#styleRadios .radio.on').dataset.style;
   const fullBleed = style === 'full-bleed';
-  bgSel.value = bgSel.value || 'sample-1.png';
+  if (!bgTouched) bgSel.value = fullBleed ? '' : 'sample-1.png';
+  // 整幅卡面：自适应方式锁定方式1（主体与底图同为 cover 变换才能视差对齐），并禁用选择
+  const makeAdaptive = document.getElementById('makeAdaptive');
+  if (makeAdaptive) {
+    makeAdaptive.disabled = fullBleed;
+    makeAdaptive.closest('.checkrow').style.opacity = fullBleed ? 0.45 : 1;
+  }
+  if (fullBleed) {
+    adaptiveOpts.querySelectorAll('.radio').forEach(r => r.classList.remove('on'));
+    adaptiveOpts.querySelector('[data-adaptive-mode="1"]').classList.add('on');
+    adaptiveOpts.querySelectorAll('.radio').forEach(r => r.classList.add('disabled'));
+    adaptiveOpts.style.opacity = 0.45;
+    adaptiveOpts.style.pointerEvents = 'none';
+  } else {
+    syncAdaptive();
+  }
   const floatFg = document.getElementById('makeFloatFg');
   if (floatFg) {
     floatFg.disabled = fullBleed;
@@ -2509,7 +2611,7 @@ const makePicker = createEffectPicker(document.getElementById('makeFxPicker'));
 const goBtn = document.getElementById('go');
 goBtn.addEventListener('click', async () => {
   if (!fileData) { setStatus('status', '请先选择一张图像', true); return; }
-  const style = document.querySelector('.radio.on').dataset.style;
+  const style = document.querySelector('#styleRadios .radio.on').dataset.style;
   goBtn.disabled = true;
   setStatus('status', '⏳ 处理中…（首次使用模型需下载，请稍候）');
   document.getElementById('result').style.display = 'none';
@@ -3272,6 +3374,12 @@ asmCardSel.addEventListener('change', () => {
     const sc = parseFloat(card.scale);
     if (isFinite(sc) && sc >= 0.5 && sc <= 1.5) asmScaleEl.value = sc;
     else asmScaleEl.value = 1;
+    const asmOffsetXEl = document.getElementById('asmOffsetX');
+    const asmOffsetYEl = document.getElementById('asmOffsetY');
+    const ox = parseFloat(card.subject_offset_x);
+    const oy = parseFloat(card.subject_offset_y);
+    asmOffsetXEl.value = (isFinite(ox) && ox >= -0.9 && ox <= 0.9) ? ox : 0;
+    asmOffsetYEl.value = (isFinite(oy) && oy >= -0.9 && oy <= 0.9) ? oy : 0;
     if (card.text_pos) {
       const vals = [card.text_pos.x1, card.text_pos.x2, card.text_pos.y1, card.text_pos.y2];
       ['asmAreaL', 'asmAreaR', 'asmAreaT', 'asmAreaB'].forEach((id, idx) => {
@@ -3319,6 +3427,9 @@ document.getElementById('asmDesc').addEventListener('input', scheduleAsmPreview)
 });
 // 缩放：调整时实时刷新 3D 预览（与其它可调节项一致）
 document.getElementById('asmScale').addEventListener('input', scheduleAsmPreview);
+// 主体偏移：调整时实时刷新 3D 预览（仅偏移图像位置，渲染范围不跟随）
+document.getElementById('asmOffsetX').addEventListener('input', scheduleAsmPreview);
+document.getElementById('asmOffsetY').addEventListener('input', scheduleAsmPreview);
 syncAsmMutex();
 
 // 预览模式：仅 3D 卡牌（含粒子特效）
@@ -3341,6 +3452,8 @@ document.getElementById('asmReset').addEventListener('click', () => {
   document.getElementById('asmFloatFg').checked = false;
   document.getElementById('asmOutline').checked = false;
   document.getElementById('asmScale').value = 1;
+  document.getElementById('asmOffsetX').value = 0;
+  document.getElementById('asmOffsetY').value = 0;
   asmTextTypeSel.value = 'none';
   refillAsmFrame();
   document.getElementById('asmDesc').value = '';
@@ -3418,6 +3531,8 @@ async function postAsmPreview() {
         subject_outline: document.getElementById('asmOutline').checked,
         mask_clip: document.getElementById('asmMaskClip').checked,
         scale: parseFloat(document.getElementById('asmScale').value) || 1,
+        subject_offset_x: parseFloat(document.getElementById('asmOffsetX').value) || 0,
+        subject_offset_y: parseFloat(document.getElementById('asmOffsetY').value) || 0,
         seal_strength_front: getSealStrengths().front,
         seal_strength_back: getSealStrengths().back,
         seal_frame_strength_front: getSealFrameStrengths().front,
@@ -3472,6 +3587,8 @@ document.getElementById('asmSave').addEventListener('click', async () => {
         subject_outline: document.getElementById('asmOutline').checked,
         mask_clip: document.getElementById('asmMaskClip').checked,
         scale: parseFloat(document.getElementById('asmScale').value) || 1,
+        subject_offset_x: parseFloat(document.getElementById('asmOffsetX').value) || 0,
+        subject_offset_y: parseFloat(document.getElementById('asmOffsetY').value) || 0,
         seal_strength_front: getSealStrengths().front,
         seal_strength_back: getSealStrengths().back,
         seal_frame_strength_front: getSealFrameStrengths().front,

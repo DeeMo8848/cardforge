@@ -1,0 +1,47 @@
+{
+  "id": "foil-sekka",
+  "name": "雪华·宿命狐火",
+  "description": "",
+  "style": "full-bleed",
+  "engine": "不使用抠图",
+  "source": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\foil-sekka\\source.png",
+  "front": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\foil-sekka\\front.png",
+  "foreground": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\foil-sekka\\foreground.png",
+  "back": "assets/backs/sample-1.png",
+  "layers": {
+    "background": null,
+    "face": null,
+    "frame": null,
+    "seal": null
+  },
+  "text": {
+    "title": null,
+    "description": null,
+    "type": "none",
+    "pos": null
+  },
+  "card_size": "900x1200",
+  "composed": true,
+  "animation": "none",
+  "effects": [
+    {
+      "name": "雪华·宿命狐火",
+      "pos": {
+        "type": "random"
+      }
+    }
+  ],
+  "subject_over_frame": false,
+  "subject_outline": false,
+  "mask_clip": false,
+  "seal_name": null,
+  "seal_strength_front": 0.945,
+  "seal_strength_back": 0.5775,
+  "seal_frame_name": null,
+  "seal_frame_strength_front": 0.8,
+  "seal_frame_strength_back": 0.5,
+  "seal_frame_same": false,
+  "card_scale": 1.0,
+  "glow_name": null,
+  "glow_strength": 1.0
+}

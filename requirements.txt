@@ -2,6 +2,10 @@ rembg>=2.0.60
 onnxruntime>=1.18
 Pillow>=10.0
 
+# 用于把 isnet-anime 自量化为 int8 版（isnet-anime-q8，默认模型）——
+# 仅首次生成模型时用到，之后运行不再需要。
+onnx>=1.16
+
 # 抠图 API（阿里云视觉智能开放平台·分割抠图；仅在 settings.json 配置 matting_api 后使用）
 alibabacloud_imageseg20191230>=1.2.0
 alibabacloud_tea_openapi>=0.3.0

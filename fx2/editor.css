@@ -1,0 +1,196 @@
+/* ============================================================
+ * 特效DIY2 编辑器 · 样式（与 cardforge 金色/暗棕主题统一）
+ * 全部规则限定在 .fx2-root 内，颜色用全局变量（带回退），
+ * 因此既能嵌入 cardforge 分页，也能被 fx2/index.html 独立使用。
+ * ============================================================ */
+.fx2-root{
+  --fx2-panel: var(--panel, #221b16);
+  --fx2-panel2: var(--panel2, #2a211a);
+  --fx2-line: var(--line, #3d2f24);
+  --fx2-gold: var(--gold, #e3b95c);
+  --fx2-gold2: var(--gold2, #f3d48a);
+  --fx2-text: var(--text, #ece4d6);
+  --fx2-muted: var(--muted, #a99b86);
+  --fx2-err: var(--err, #e07a5f);
+  color: var(--fx2-text);
+  font-size: 13px;
+}
+.fx2-root *{ box-sizing: border-box; }
+.fx2-layout{
+  display: grid; grid-template-columns: minmax(300px, 380px) minmax(0, 1fr);
+  gap: 16px; align-items: start;
+}
+@media (max-width: 860px){ .fx2-layout{ grid-template-columns: 1fr; } }
+
+.fx2-card{
+  background: var(--fx2-panel); border: 1px solid var(--fx2-line); border-radius: 16px;
+  padding: 16px;
+}
+.fx2-card h2{
+  font-size: 15px; color: var(--fx2-gold); margin: 0 0 12px; font-weight: 600;
+  display: flex; align-items: center; gap: 8px; letter-spacing: .5px;
+}
+
+/* ---- 按钮 ---- */
+.fx2-btn{
+  border: 1px solid transparent; border-radius: 10px; cursor: pointer;
+  padding: 8px 14px; font-size: 13px; font-weight: 600; letter-spacing: .5px;
+  color: #2b1d08; background: linear-gradient(135deg, var(--fx2-gold2), var(--fx2-gold));
+  transition: transform .1s, box-shadow .2s, border-color .15s, color .15s;
+  white-space: nowrap;
+}
+.fx2-btn:hover{ transform: translateY(-1px); box-shadow: 0 6px 20px rgba(227,185,92,.28); }
+.fx2-btn:disabled{ opacity: .5; cursor: not-allowed; transform: none; box-shadow: none; }
+.fx2-btn.ghost{
+  background: transparent; color: var(--fx2-muted); border-color: var(--fx2-line);
+  font-weight: 500; letter-spacing: .5px;
+}
+.fx2-btn.ghost:hover{ color: var(--fx2-gold2); border-color: var(--fx2-gold); box-shadow: none; }
+.fx2-btn.danger{
+  background: linear-gradient(135deg, #e07a5f, #c25a3f); color: #2b120a;
+}
+.fx2-btn.on{ border-color: var(--fx2-gold); color: var(--fx2-gold2); background: #32281c; }
+.fx2-btn.tiny{ padding: 3px 8px; font-size: 11px; font-weight: 500; border-radius: 7px; }
+.fx2-btn.icon{ padding: 4px 9px; font-size: 12px; }
+
+/* ---- 预览区 ---- */
+.fx2-basebar{ display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+.fx2-basebar label{ font-size: 12px; color: var(--fx2-muted); }
+.fx2-tagchip{
+  font-size: 11px; color: var(--fx2-gold); border: 1px solid var(--fx2-line);
+  border-radius: 999px; padding: 2px 9px; background: var(--fx2-panel2);
+}
+.fx2-toolbar{ display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+.fx2-cvwrap{
+  position: relative; width: 100%; max-width: 360px; margin: 0 auto;
+  aspect-ratio: 300 / 364; border-radius: 14px; overflow: hidden;
+  border: 2px solid var(--fx2-line); background: #120f0c;
+  box-shadow: 0 10px 34px rgba(0,0,0,.55);
+}
+.fx2-cvwrap canvas{ width: 100%; height: 100%; display: block; }
+.fx2-cvwrap.bgOn canvas{ position: absolute; left: 5%; top: 5%; width: 90%; height: 90%; }
+.fx2-cvtag{
+  position: absolute; left: 8px; top: 8px; font-size: 11px; color: var(--fx2-gold2);
+  background: rgba(0,0,0,.55); padding: 3px 9px; border-radius: 8px;
+}
+.fx2-cvtitle{
+  text-align: center; color: var(--fx2-muted); font-size: 12px; margin-top: 8px;
+}
+.fx2-diag{
+  margin-top: 10px; padding: 7px 10px; border-radius: 9px; background: var(--fx2-panel2);
+  border: 1px solid var(--fx2-line); color: var(--fx2-muted); font-size: 11px;
+}
+.fx2-note{ margin-top: 10px; color: var(--fx2-muted); font-size: 11px; line-height: 1.7; }
+.fx2-note b{ color: var(--fx2-text); }
+.fx2-note code{ color: var(--fx2-gold); }
+
+/* ---- 控制面板 ---- */
+.fx2-controls{ max-height: calc(100vh - 150px); overflow-y: auto; }
+.fx2-sec{
+  background: var(--fx2-panel2); border: 1px solid var(--fx2-line); border-radius: 12px;
+  margin-bottom: 10px; overflow: hidden;
+}
+.fx2-sechead{
+  padding: 9px 12px; display: flex; align-items: center; gap: 8px;
+  cursor: pointer; user-select: none;
+}
+.fx2-sechead b{ font-size: 13px; color: var(--fx2-text); flex: 1; }
+.fx2-sechead .fx2-sub{ font-size: 11px; color: var(--fx2-muted); }
+.fx2-secbody{
+  padding: 10px 12px; border-top: 1px solid var(--fx2-line);
+  display: flex; flex-direction: column; gap: 8px;
+}
+.fx2-row{ display: flex; align-items: center; gap: 8px; }
+.fx2-lab{ width: 112px; flex-shrink: 0; color: var(--fx2-muted); font-size: 12px; }
+.fx2-val{
+  width: 58px; text-align: right; color: var(--fx2-gold); font-size: 12px;
+  flex-shrink: 0; font-variant-numeric: tabular-nums;
+}
+.fx2-root input[type=range]{
+  flex: 1; accent-color: var(--fx2-gold); height: 4px; min-width: 0;
+  background: transparent;
+}
+.fx2-root input[type=color]{
+  width: 38px; height: 26px; padding: 0; border: 1px solid var(--fx2-line);
+  border-radius: 7px; background: var(--fx2-panel2); cursor: pointer;
+}
+.fx2-root input[type=text], .fx2-root input[type=number], .fx2-root select{
+  background: var(--fx2-panel2); color: var(--fx2-text); border: 1px solid var(--fx2-line);
+  border-radius: 9px; padding: 7px 10px; font-size: 13px; outline: none;
+}
+.fx2-root input[type=text]:focus, .fx2-root input[type=number]:focus, .fx2-root select:focus{
+  border-color: var(--fx2-gold);
+}
+.fx2-root select{ cursor: pointer; }
+.fx2-hint{ color: var(--fx2-muted); font-size: 11px; line-height: 1.65; }
+.fx2-hint.warn{ color: var(--fx2-gold); }
+.fx2-status{ font-size: 12px; color: var(--fx2-muted); margin-top: 8px; min-height: 18px; line-height: 1.6; }
+.fx2-status.err{ color: var(--fx2-err); }
+.fx2-check{ display: flex; align-items: center; gap: 7px; cursor: pointer; font-size: 12px; color: var(--fx2-muted); }
+.fx2-check input{ accent-color: var(--fx2-gold); width: 15px; height: 15px; }
+.fx2-enhead{
+  display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--fx2-muted);
+  border: 1px solid var(--fx2-line); border-radius: 7px; padding: 1px 7px; flex-shrink: 0;
+}
+.fx2-enhead input{ width: 13px; height: 13px; accent-color: var(--fx2-gold); }
+.fx2-slotname{ font-size: 12px; color: var(--fx2-gold); width: 58px; flex-shrink: 0; }
+.fx2-slotTools{ display: flex; gap: 3px; flex-shrink: 0; }
+.fx2-coldot{ width: 14px; height: 14px; border-radius: 4px; border: 1px solid #000; flex-shrink: 0; }
+
+/* ---- 保存预设 ---- */
+.fx2-savebar{ display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+.fx2-savebar input[type=text]{ flex: 1 1 150px; min-width: 120px; }
+.fx2-savebar select{ flex: 1 1 150px; min-width: 120px; }
+.fx2-savebar .fx2-btn{ flex: 0 0 auto; }
+
+/* ---- 贴图选择浮层 ---- */
+.fx2-pick{
+  display: none; position: fixed; inset: 0; z-index: 80; overflow: auto; padding: 24px;
+  background: rgba(10, 8, 6, .78); backdrop-filter: blur(2px);
+}
+.fx2-pick.on{ display: block; }
+.fx2-pickinner{
+  max-width: 920px; margin: 0 auto; background: var(--fx2-panel);
+  border: 1px solid var(--fx2-line); border-radius: 16px; padding: 16px 18px;
+  box-shadow: 0 24px 70px rgba(0,0,0,.6);
+}
+.fx2-pickhead{
+  display: flex; align-items: center; gap: 10px; margin-bottom: 10px;
+}
+.fx2-pickhead h3{
+  font-size: 15px; color: var(--fx2-gold); font-weight: 600; margin: 0;
+  display: flex; align-items: center; gap: 8px;
+}
+.fx2-pickhead .fx2-sub{ font-size: 12px; color: var(--fx2-muted); }
+.fx2-pickhead .fx2-close{ margin-left: auto; }
+.fx2-pickhead input[type=text]{
+  width: 100%; background: var(--fx2-panel2); border: 1px solid var(--fx2-line);
+  color: var(--fx2-text); border-radius: 9px; padding: 8px 12px; font-size: 13px;
+}
+.fx2-texitems{
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(88px, 1fr));
+  gap: 8px; max-height: 60vh; overflow-y: auto; margin-top: 10px; padding: 2px;
+}
+.fx2-texitem{
+  text-align: center; cursor: pointer; padding: 6px; border-radius: 9px;
+  border: 1px solid var(--fx2-line); background: #241c15;
+  transition: border-color .1s, transform .1s;
+}
+.fx2-texitem:hover{ border-color: var(--fx2-gold); transform: translateY(-1px); }
+.fx2-texitem.cur{ border-color: var(--fx2-gold2); box-shadow: 0 0 0 2px rgba(243,212,138,.25); }
+.fx2-texitem img{
+  width: 72px; height: 72px; object-fit: contain;
+  background: repeating-conic-gradient(#2a231c 0% 25%, #1d1812 0% 50%) 50% / 12px 12px;
+  border-radius: 5px;
+}
+.fx2-texitem div{ font-size: 9px; color: var(--fx2-muted); word-break: break-all; margin-top: 4px; }
+
+/* 滚动条 */
+.fx2-root ::-webkit-scrollbar{ width: 8px; height: 8px; }
+.fx2-root ::-webkit-scrollbar-thumb{ background: #4a3a2a; border-radius: 4px; }
+.fx2-root ::-webkit-scrollbar-track{ background: transparent; }
+
+@media (max-width: 520px){
+  .fx2-lab{ width: 86px; }
+  .fx2-pick{ padding: 10px; }
+}

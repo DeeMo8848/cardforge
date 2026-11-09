@@ -34,6 +34,7 @@ from carddef import build_card_def, save_card_def
 from compositor import CARD_H, CARD_W, _cover, compose_card, frame_glow_boost, save_frame_interior_mask
 from engine import DEFAULT_MODEL, SUPPORTED_MODELS, create_engine, get_api_config, model_status
 import webcard
+import packs
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 ASSETS = PROJECT_ROOT / "assets"
@@ -44,13 +45,14 @@ EFFECTS_DIR = ASSETS / "effects"              # 自定义特效 JSON
 EFFECT_IMG_DIR = ASSETS / "effects-images"    # 特效图像/精灵帧图
 SETTINGS_FILE = PROJECT_ROOT / "settings.json"  # 界面参数持久化（如卡封强度）
 
-_ASSET_TYPES = ("backgrounds", "faces", "frames", "frames-text", "seals", "backs", "effects-images",
-                "effects", "frame-effects")
+_ASSET_TYPES = ("backgrounds", "faces", "frames", "frames-text", "seals", "backs", "subjects",
+                "effects-images", "effects", "frame-effects")
 # 特效/边框特效不是图片文件：内置定义在源码里、自定义在 JSON 里，不支持图片上传/重命名
 _EFFECT_ASSET_TYPES = ("effects", "frame-effects")
 _IMG_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".gif")
 
-for _d in (UPLOAD_DIR, TMP_DIR, PREVIEW_DIR, EFFECTS_DIR, EFFECT_IMG_DIR, ASSETS / "frames-text"):
+for _d in (UPLOAD_DIR, TMP_DIR, PREVIEW_DIR, EFFECTS_DIR, EFFECT_IMG_DIR,
+           ASSETS / "frames-text", ASSETS / "subjects"):
     _d.mkdir(parents=True, exist_ok=True)
 
 _engines: dict[str, object] = {}
@@ -66,10 +68,16 @@ def get_engine(model: str):
 
 
 def list_assets(subdir: str) -> list[str]:
-    d = ASSETS / subdir
-    if not d.exists():
-        return []
-    return sorted(p.name for p in d.iterdir() if p.is_file() and p.suffix.lower() in _IMG_EXTS)
+    """素材名列表（内置 + 已启用素材包）。
+
+    返回「素材键」：内置 = 文件名；素材包 = `包id/相对路径`（见 packs.py）。
+    """
+    return [a["key"] for a in packs.list_assets(subdir)]
+
+
+def resolve_asset(atype: str, name: str | None):
+    """把素材名/键解析为绝对路径（内置 assets/<type>/<文件名> 或素材包 packs/<id>/<相对路径>）。"""
+    return packs.resolve_asset(atype, name)
 
 
 def _remove_builtin_seal(stem: str) -> str | None:
@@ -175,6 +183,7 @@ def list_cards() -> list[dict]:
                 continue
             name, desc, text_type = d.name, "", "none"
             text_pos = None
+            data = {}
             try:
                 cf = PROJECT_ROOT / "cards" / f"{d.name}.json"
                 if cf.exists():
@@ -204,6 +213,9 @@ def list_cards() -> list[dict]:
                 "seal_frame_same": inherit.get("seal_frame_same"),
                 "face": inherit.get("face_name"),
                 "background": inherit.get("background_name"),
+                "subject": inherit.get("subject_name"),
+                "bg_scale": _parse_scale(data.get("background_scale", (data.get("extra") or {}).get("background_scale", 1.0))),
+                "frame_scale": _parse_scale(data.get("frame_scale", (data.get("extra") or {}).get("frame_scale", 1.0))),
                 "seal_strength_front": inherit.get("seal_strength_front"),
                 "seal_strength_back": inherit.get("seal_strength_back"),
                 "seal_frame_strength_front": inherit.get("seal_frame_strength_front"),
@@ -281,6 +293,27 @@ def _parse_scale(v) -> float:
     return min(1.5, max(0.5, s))
 
 
+def _scale_card_layer(src, scale: float, dst: Path, base_fill=None) -> Path:
+    """把素材按卡牌中心缩放后烘焙成 CARD_W×CARD_H PNG。
+
+    先 cover 铺满整卡（与现有背景/边框渲染一致），再按 scale 缩放并居中；
+    四周空白：base_fill 给定时填充该 RGB（卡体深色底），否则保持透明（边框）。
+    """
+    from PIL import Image, ImageOps
+    im = Image.open(src).convert("RGBA")
+    im = ImageOps.fit(im, (CARD_W, CARD_H), Image.LANCZOS)
+    sw, sh = max(1, round(CARD_W * scale)), max(1, round(CARD_H * scale))
+    im = im.resize((sw, sh), Image.LANCZOS)
+    canvas = Image.new(
+        "RGBA", (CARD_W, CARD_H),
+        (int(base_fill[0]), int(base_fill[1]), int(base_fill[2]), 255) if base_fill else (0, 0, 0, 0),
+    )
+    canvas.alpha_composite(im, ((CARD_W - sw) // 2, (CARD_H - sh) // 2))
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    canvas.save(dst)
+    return dst
+
+
 def _parse_glow_strength(v, dflt: float = 1.0) -> float:
     """解析辉光整体强度（0~2，默认 1）。"""
     try:
@@ -301,8 +334,24 @@ def _parse_offset(v, dflt: float = 0.0) -> float:
 
 def _abs_effect_images(effects: list[dict]) -> list[dict]:
     """预览页特效引用的图片改写为绝对 URL（页面不在输出目录，相对路径不可用）。组合特效递归处理。"""
+    def _walk_foil(defn: dict):
+        """闪卡特效（engine=foil）：贴图名 → 特效DIY2 自带贴图 URL；蒙版 → 素材库 URL。
+        tx_face_*（影之诗卡面差分）对 cardforge 卡牌无意义，置空即跳过该槽。"""
+        for s in defn.get("slots") or []:
+            t = (s.get("tex") or "").strip()
+            s["tex"] = f"/fx2/assets/foil/{t}.png" if t.startswith("tx_foil_") else ""
+        d = defn.get("dist") or {}
+        t = (d.get("tex") or "").strip()
+        d["tex"] = f"/fx2/assets/foil/{t}.png" if t.startswith("tx_foil_") else ""
+        m = (defn.get("mask") or "").strip()
+        if m:
+            defn["mask"] = f"/assets_abs/effects-images/{Path(m).name}"
+
     def _walk(defn: dict):
         if not isinstance(defn, dict):
+            return
+        if defn.get("engine") == "foil":
+            _walk_foil(defn)
             return
         src = defn.get("image") or ""
         if src.startswith("image:"):
@@ -388,20 +437,51 @@ def build_page() -> str:
         "seals": seal_options,
         "faces": list_assets("faces"),
         "backs": list_assets("backs"),
+        "subjects": list_assets("subjects"),
         "effect_images": list_assets("effects-images"),
         "glows": [*webcard.GLOW_EFFECTS.keys(), *webcard.list_custom_glows()],
     }, ensure_ascii=False)
+    # 素材包素材的来源标注（key → 显示标签），供下拉/缩略图打卡
+    asset_meta = {}
+    for _t in ("backgrounds", "frames", "seals", "faces", "backs", "subjects", "frames-text"):
+        for _a in packs.list_assets(_t):
+            if not _a["builtin"]:
+                asset_meta[_a["key"]] = {"label": f'{_a["name"]}（{_a["pack_name"]}）',
+                                         "pack": _a["pack"], "pack_name": _a["pack_name"]}
+    asset_meta_json = json.dumps(asset_meta, ensure_ascii=False)
+    packs_json = json.dumps(_packs_for_ui(), ensure_ascii=False)
     models_json = json.dumps(model_options, ensure_ascii=False)
     effects_json = json.dumps(list_effects(), ensure_ascii=False)
     cards_json = json.dumps(list_cards(), ensure_ascii=False)
     return (
         PAGE_HTML
         .replace("__ASSETS_JSON__", assets_json)
+        .replace("__ASSET_META_JSON__", asset_meta_json)
+        .replace("__PACKS_JSON__", packs_json)
         .replace("__MODELS_JSON__", models_json)
         .replace("__EFFECTS_JSON__", effects_json)
         .replace("__CARDS_JSON__", cards_json)
         .replace("__DEFAULT_MODEL__", json.dumps(default_model))
     )
+
+
+def _packs_for_ui() -> list[dict]:
+    """素材包管理页用的精简列表。"""
+    out = []
+    for p in packs.scan():
+        out.append({
+            "id": p["id"] or p["dir"],
+            "dir": p["dir"],
+            "name": p["name"],
+            "author": p["author"],
+            "description": p["description"],
+            "thumbnail": p["thumbnail"],
+            "enabled": p["enabled"],
+            "error": p["error"],
+            "counts": p["counts"],
+            "total": p["total"],
+        })
+    return out
 
 
 def build_cutout_page() -> str:
@@ -524,6 +604,7 @@ def _inherit_card(card_id: str) -> dict:
 
     out["face_name"] = (d.get("face_name") or extra.get("face_name")) or _layer_asset("face", ("faces",))
     out["background_name"] = (d.get("background_name") or extra.get("background_name")) or _layer_asset("background", ("backgrounds",))
+    out["subject_name"] = (d.get("subject_name") or extra.get("subject_name")) or _layer_asset("subject", ("subjects",))
     out["seal_strength_front"] = d.get("seal_strength_front", extra.get("seal_strength_front"))
     out["seal_strength_back"] = d.get("seal_strength_back", extra.get("seal_strength_back"))
     out["seal_frame_strength_front"] = d.get("seal_frame_strength_front", extra.get("seal_frame_strength_front"))
@@ -568,12 +649,14 @@ def _save_assembly(data: dict) -> dict:
     out = ASSETS / "output" / card_id
     out.mkdir(parents=True, exist_ok=True)
 
+    detail_rel = None  # 分层成品卡的主体层（叠在卡封之上）
     card_sel = (data.get("card") or "").strip()      # 成品预览：已完成卡牌
     face_sel = (data.get("face") or "").strip()      # 卡面素材
     custom_bg = (data.get("custom_bg") or "").strip()  # 背景素材
     frame_sel = (data.get("frame") or "").strip()    # 边框素材
     seal_sel = (data.get("seal") or "").strip()      # 卡封素材（层1：随内容缩放）
     seal_frame_sel = (data.get("seal_frame") or "").strip()  # 边框卡封（层2：边框作蒙版）
+    subject_sel = (data.get("subject") or "").strip()  # 主体素材（透明前景层）
     # 边框卡封"与卡封一致"：与卡牌卡封使用同一素材（只记录一次）
     seal_frame_same = seal_frame_sel == "same"
     if seal_frame_same:
@@ -599,6 +682,8 @@ def _save_assembly(data: dict) -> dict:
     subject_outline = bool(data.get("subject_outline"))
     mask_clip = bool(data.get("mask_clip", True))
     scale = _parse_scale(data.get("scale"))
+    bg_scale = _parse_scale(data.get("bg_scale"))
+    frame_scale = _parse_scale(data.get("frame_scale"))
     glow_name = (data.get("glow") or "none")
     glow_strength = _parse_glow_strength(data.get("glow_strength"))
     subject_offset_x = _parse_offset(data.get("subject_offset_x"))
@@ -608,33 +693,53 @@ def _save_assembly(data: dict) -> dict:
     #   - 文本型（boxed）：卡面只在余卡面范围（卡顶到文本区顶部）呈现，底图改用背景/深色
     face_floats = subject_over_frame or text_type == "boxed"
     face_used = ""
-    if face_sel and (ASSETS / "faces" / _safe_name(face_sel)).exists():
+    face_p = resolve_asset("faces", face_sel)
+    bg_p = resolve_asset("backgrounds", custom_bg)
+    subject_p = resolve_asset("subjects", subject_sel)
+    # 背景渲染视图：背景倍率非 1 时按卡牌中心缩放并烘焙成整卡 PNG（深色底避免透明空洞）
+    bg_view_p = bg_p
+    bg_view_url = f"/assets_abs/backgrounds/{custom_bg}" if bg_p else None
+    if bg_p and bg_scale != 1.0:
+        bg_view_p = _scale_card_layer(bg_p, bg_scale, out / "background.png", base_fill=(14, 11, 9))
+        bg_view_url = f"/preview/{card_id}/background.png"
+    elif (out / "background.png").exists():
+        (out / "background.png").unlink()
+    if face_p:
         face_used = face_sel
         if text_type == "boxed":
-            if custom_bg and (ASSETS / "backgrounds" / _safe_name(custom_bg)).exists():
-                shutil.copy(ASSETS / "backgrounds" / _safe_name(custom_bg), out / "front.png")
+            if bg_view_p:
+                shutil.copy(bg_view_p, out / "front.png")
             else:
                 Image_dark(out / "front.png")
         else:
-            shutil.copy(ASSETS / "faces" / _safe_name(face_sel), out / "front.png")
+            shutil.copy(face_p, out / "front.png")
         fg_url = f"/assets_abs/faces/{face_sel}" if face_floats else ""
-    elif custom_bg and (ASSETS / "backgrounds" / _safe_name(custom_bg)).exists():
-        shutil.copy(ASSETS / "backgrounds" / _safe_name(custom_bg), out / "front.png")
+    elif bg_view_p:
+        shutil.copy(bg_view_p, out / "front.png")
         if card_sel and not fg_url:
             fg_url = f"/preview/{card_sel}/foreground.png"
     elif card_sel and (ASSETS / "output" / card_sel / "front.png").exists():
         _copy_if_diff(ASSETS / "output" / card_sel / "front.png", out / "front.png")
+        # 分层卡的主体层（立绘/图标/边框/文字），一起复制过来叠在卡封之上
+        _det = ASSETS / "output" / card_sel / "detail.png"
+        if _det.exists():
+            _copy_if_diff(_det, out / "detail.png")
+            detail_rel = "detail.png"
         if not fg_url:
             fg_url = f"/preview/{card_sel}/foreground.png"
     else:
         Image_dark(out / "front.png")
 
+    # 主体素材优先作为前景层（覆盖卡面浮起/成品卡前景）
+    if subject_p:
+        fg_url = f"/assets_abs/subjects/{subject_sel}"
+
     # 独立背景层素材：卡面单独缩放时背景整卡铺满（3D 独立背景层 / 2D 背景层共用）
     bg_rel_url = None
     bg_rel_path = None
-    if custom_bg and (ASSETS / "backgrounds" / _safe_name(custom_bg)).exists():
-        bg_rel_path = ASSETS / "backgrounds" / _safe_name(custom_bg)
-        bg_rel_url = f"/assets_abs/backgrounds/{_safe_name(custom_bg)}"
+    if bg_view_p:
+        bg_rel_path = bg_view_p
+        bg_rel_url = bg_view_url
 
     # 前景（无上传时留空透明层）
     if fg_url.startswith("/preview/_tmp/"):
@@ -644,43 +749,93 @@ def _save_assembly(data: dict) -> dict:
         else:
             Image_blank(out / "foreground.png")
     elif fg_url.startswith("/assets_abs/faces/"):
-        _copy_if_diff(ASSETS / "faces" / Path(fg_url).name, out / "foreground.png")
+        _fp = resolve_asset("faces", unquote(fg_url[len("/assets_abs/faces/"):]))
+        if _fp:
+            _copy_if_diff(_fp, out / "foreground.png")
+        else:
+            Image_blank(out / "foreground.png")
+    elif fg_url.startswith("/assets_abs/subjects/"):
+        _sp = resolve_asset("subjects", unquote(fg_url[len("/assets_abs/subjects/"):]))
+        if _sp:
+            _copy_if_diff(_sp, out / "foreground.png")
+        else:
+            Image_blank(out / "foreground.png")
     elif fg_url and (ASSETS / "output" / Path(fg_url).parts[2] / "foreground.png").exists():
         _copy_if_diff(ASSETS / "output" / Path(fg_url).parts[2] / "foreground.png", out / "foreground.png")
     else:
         Image_blank(out / "foreground.png")
 
     # 牌背（记录原始素材名，供再次拼装时反查）
-    back_file = _safe_name(back)
-    if back_file and (ASSETS / "backs" / back_file).exists():
-        shutil.copy(ASSETS / "backs" / back_file, out / "back.png")
-    else:
-        back_file = "sample-1.png"
-        shutil.copy(ASSETS / "backs" / back_file, out / "back.png")
+    back_p = resolve_asset("backs", back)
+    back_file = back if back_p else "sample-1.png"
+    if not back_p:
+        back_p = resolve_asset("backs", back_file)
+    shutil.copy(back_p, out / "back.png")
 
     # 边框 / 卡封（边框可能来自 frames/ 或 frames-text/；layers 存原始素材路径，便于反查）
     frame_rel = seal_rel = seal_frame_rel = None
     frame_src = seal_src = seal_frame_src = None
     seal_used = seal_sel
+    # 卡封叠加层（拼装页「＋ 添加卡封层」）：每层独立素材 + 正/背强度
+    seal_extra_sel = data.get("seal_extra") or []
+    if not isinstance(seal_extra_sel, list):
+        seal_extra_sel = []
     seal_frame_used = seal_frame_sel
     if frame_sel:
         for _d in ("frames", "frames-text"):
-            _p = ASSETS / _d / _safe_name(frame_sel)
-            if _p.exists():
+            _p = resolve_asset(_d, frame_sel)
+            if _p:
                 shutil.copy(_p, out / "frame.png")
+                if frame_scale != 1.0:
+                    _scale_card_layer(_p, frame_scale, out / "frame.png")
                 frame_rel = "frame.png"
                 frame_src = str(_p)
                 break
-    if seal_sel and (ASSETS / "seals" / _safe_name(seal_sel)).exists():
-        _p = ASSETS / "seals" / _safe_name(seal_sel)
-        shutil.copy(_p, out / "seal.png")
-        seal_rel = "seal.png"
-        seal_src = str(_p)
-    if seal_frame_sel and (ASSETS / "seals" / _safe_name(seal_frame_sel)).exists():
-        _p = ASSETS / "seals" / _safe_name(seal_frame_sel)
-        shutil.copy(_p, out / "seal_frame.png")
-        seal_frame_rel = "seal_frame.png"
-        seal_frame_src = str(_p)
+    if seal_sel:
+        _p = resolve_asset("seals", seal_sel)
+        if _p:
+            shutil.copy(_p, out / "seal.png")
+            seal_rel = "seal.png"
+            seal_src = str(_p)
+    if seal_frame_sel:
+        _p = resolve_asset("seals", seal_frame_sel)
+        if _p:
+            shutil.copy(_p, out / "seal_frame.png")
+            seal_frame_rel = "seal_frame.png"
+            seal_frame_src = str(_p)
+
+    # 卡封叠加层：逐层复制成 seal_<n>.png（素材只存一份，卡里只存引用）
+    seal_extra_layers = []
+    seal_extra_used = []
+    for _i, _it in enumerate(seal_extra_sel):
+        _name = (_it or {}).get("seal") or (_it or {}).get("rel") or ""
+        _name = str(_name).strip()
+        if not _name:
+            continue
+        _p = resolve_asset("seals", _name)
+        if not _p:
+            continue
+        _fn = "seal_%d.png" % (_i + 1)
+        shutil.copy(_p, out / _fn)
+        _f = float(_it.get("front", 0.6) or 0)
+        _b = float(_it.get("back", 0.0) or 0)
+        seal_extra_layers.append(dict(
+            rel=_fn,
+            front_strength=_f,
+            back_strength=_b,
+            base=float(_it.get("base", 0.10)),
+            amp=float(_it.get("amp", 1.0)),
+            tilt=float(_it.get("tilt", 0.50)),
+            tilt_lo=float(_it.get("tilt_lo", 0.004)),
+            tilt_hi=float(_it.get("tilt_hi", 0.060)),
+            sheen_base=float(_it.get("sheen_base", 0.02)),
+            band_power=float(_it.get("band_power", 2.0)),
+            z=0.012 + 0.0015 * _i,
+            order=4.5 + 0.1 * _i,
+            add=True,
+            front_only=(_b <= 0.0),
+        ))
+        seal_extra_used.append((_name, _f, _b))
 
     # 未选边框/卡封时删除旧副本，避免再次读取时被字节反查误判为仍在使用
     if not frame_rel and (out / "frame.png").exists():
@@ -740,13 +895,15 @@ def _save_assembly(data: dict) -> dict:
                                 seal_strength_back=seal_back,
                                 seal_frame_strength_front=seal_frame_front,
                                 seal_frame_strength_back=seal_frame_back,
+                                detail_rel=detail_rel,
+                                seal_extra=seal_extra_layers,
                                 content_scale=scale,
                                 face_scales=face_scales,
                                 interior_rel=interior_rel,
                                 background_rel=bg_rel_url,
                                 glow_name=glow_name,
                                 glow_strength=glow_strength,
-                                glow_boost=frame_glow_boost(frame_src) if frame_src else 1.0,
+                                glow_boost=frame_glow_boost(out / "frame.png") if frame_rel else 1.0,
                                 subject_offset_x=subject_offset_x,
                                 subject_offset_y=subject_offset_y),
         encoding="utf-8",
@@ -758,10 +915,11 @@ def _save_assembly(data: dict) -> dict:
         source=str(out / "front.png"), front=str(out / "front.png"),
         foreground=str(out / "foreground.png"), engine="assembly",
         description=desc or "",
-        back=str(ASSETS / "backs" / back_file),
+        back=str(resolve_asset("backs", back_file)),
         layers={
             "background": str(out / "front.png"),
-            "face": str(ASSETS / "faces" / _safe_name(face_sel)) if face_used else None,
+            "face": str(resolve_asset("faces", face_sel)) if face_used else None,
+            "subject": str(subject_p) if subject_p else None,
             "frame": frame_src,
             "seal": seal_src,
             "seal_frame": seal_frame_src,
@@ -773,6 +931,9 @@ def _save_assembly(data: dict) -> dict:
             "subject_outline": subject_outline,
             "mask_clip": mask_clip,
             "card_scale": scale,
+            "background_scale": bg_scale,
+            "frame_scale": frame_scale,
+            "subject_name": subject_sel if subject_p else None,
             "subject_offset_x": subject_offset_x,
             "subject_offset_y": subject_offset_y,
             "seal_strength_front": seal_front,
@@ -791,6 +952,8 @@ def _save_assembly(data: dict) -> dict:
             "effects": [{"name": e["name"], "pos": e["pos"]} for e in effect_instances],
         },
     )
+    # 卡封叠加层清单（重开这张卡时回填到拼装面板）
+    card["seal_extra"] = [dict(seal=n, front=f, back=b) for n, f, b in seal_extra_used]
     save_card_def(card, PROJECT_ROOT / "cards" / f"{card_id}.json")
 
     # 2D 预览图
@@ -923,9 +1086,10 @@ def _make_text(data: dict) -> dict:
         face_scales = bool(_fname and text_type != "boxed")
         # 独立背景层素材：卡面单独缩放时背景整卡铺满（从卡牌记录恢复）
         _bgname = _fcard.get("background_name") or _fextra.get("background_name")
-        if _bgname and (ASSETS / "backgrounds" / _safe_name(_bgname)).exists():
-            bg_rel_path = ASSETS / "backgrounds" / _safe_name(_bgname)
-            bg_rel_url = f"/assets_abs/backgrounds/{_safe_name(_bgname)}"
+        _bg_p = resolve_asset("backgrounds", _bgname) if _bgname else None
+        if _bg_p:
+            bg_rel_path = _bg_p
+            bg_rel_url = f"/assets_abs/backgrounds/{_bgname}"
     except (OSError, ValueError):
         pass
     # 主体白色描边：启用时从已有前景图重新生成
@@ -1119,6 +1283,21 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
 
+        if path in ("/fx2", "/fx2/"):
+            path = "/fx2/index.html"
+
+        if path.startswith("/fx2/"):
+            rel = path[len("/fx2/"):]
+            if ".." not in rel and "\\" not in rel:
+                target = PROJECT_ROOT / "fx2"
+                for seg in rel.split("/"):
+                    if seg:
+                        target = target / unquote(seg)
+                if self._send_file(target):
+                    return
+            self._send_json({"ok": False, "error": "not found"}, 404)
+            return
+
         if path == "/api/export":
             qs = {k: unquote(v[0]) for k, v in parse_qs(self.path.split("?", 1)[1]).items()}
             cid = qs.get("id", "")
@@ -1154,14 +1333,24 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path.startswith("/assets_abs/"):
-            # /assets_abs/<type>/<file> —— 直接引用素材库文件
+            # /assets_abs/<type>/<素材名或 包id/相对路径> —— 直接引用素材库文件（含素材包）
             parts = path.strip("/").split("/")
-            if len(parts) == 3 and parts[1] in _ASSET_TYPES:
-                fname = unquote(parts[2])
-                if _safe_name(fname) == fname:
-                    rel = ASSETS / parts[1] / fname
-                    if self._send_file(rel):
-                        return
+            if len(parts) >= 3 and parts[1] in _ASSET_TYPES:
+                key = "/".join(unquote(p) for p in parts[2:])
+                rel = resolve_asset(parts[1], key)
+                if rel and self._send_file(rel):
+                    return
+            self._send_json({"ok": False, "error": "not found"}, 404)
+            return
+
+        if path.startswith("/packs_abs/"):
+            # /packs_abs/<包id>/<相对路径> —— 素材包缩略图等
+            parts = path.strip("/").split("/")
+            if len(parts) >= 3:
+                rel = "/".join(unquote(p) for p in parts[2:])
+                f = packs.pack_file(unquote(parts[1]), rel)
+                if f and self._send_file(f):
+                    return
             self._send_json({"ok": False, "error": "not found"}, 404)
             return
 
@@ -1185,8 +1374,11 @@ class Handler(BaseHTTPRequestHandler):
             if atype not in _ASSET_TYPES:
                 self._send_json({"ok": False, "error": "未知素材类型"}, 400)
                 return
-            files = list_effect_assets(atype) if atype in _EFFECT_ASSET_TYPES else list_assets(atype)
+            files = list_effect_assets(atype) if atype in _EFFECT_ASSET_TYPES else packs.list_assets(atype)
             self._send_json({"ok": True, "type": atype, "files": files})
+            return
+        if path == "/api/packs":
+            self._send_json({"ok": True, "packs": _packs_for_ui()})
             return
 
         self._send_json({"ok": False, "error": "not found"}, 404)
@@ -1216,6 +1408,14 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(self._asset_delete(data))
             elif self.path == "/api/assets/rename":
                 self._send_json(self._asset_rename(data))
+            elif self.path == "/api/packs/import":
+                self._send_json(self._pack_import(data))
+            elif self.path == "/api/packs/import_folder":
+                self._send_json(self._pack_import_folder(data))
+            elif self.path == "/api/packs/toggle":
+                self._send_json(self._pack_toggle(data))
+            elif self.path == "/api/packs/delete":
+                self._send_json(self._pack_delete(data))
             elif self.path == "/api/assembly/save":
                 self._send_json(_save_assembly(data))
             elif self.path == "/api/make_text":
@@ -1229,6 +1429,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(self._card_delete(data))
             elif self.path == "/api/cutout":
                 self._send_json(self._cutout(data))
+            elif self.path == "/api/subject/cutout":
+                self._send_json(self._subject_cutout(data))
             else:
                 self._send_json({"ok": False, "error": "not found"}, 404)
         except ValueError as e:
@@ -1336,6 +1538,35 @@ class Handler(BaseHTTPRequestHandler):
             except OSError:
                 pass
 
+    def _subject_cutout(self, data: dict) -> dict:
+        """从当前背景素材/成品卡底图抠出透明主体，cover 适配到卡牌尺寸后存入 assets/subjects/。"""
+        bg = (data.get("background") or "").strip()
+        card_id = _safe_name((data.get("card") or "").strip())
+        src = resolve_asset("backgrounds", bg) if bg else None
+        if src is None and card_id:
+            p = ASSETS / "output" / card_id / "front.png"
+            if p.exists():
+                src = p
+        if src is None:
+            raise ValueError("请先选择背景素材或成品卡")
+        model = data.get("model") or DEFAULT_MODEL
+        if model not in SUPPORTED_MODELS or model in ("none", "sam"):
+            raise ValueError(f"不支持的抠图模型: {model}")
+        from PIL import Image, ImageOps
+        engine = get_engine(model)
+        t0 = time.time()
+        res = engine.remove_background(Image.open(src).convert("RGBA"))
+        res = ImageOps.fit(res, (CARD_W, CARD_H), Image.LANCZOS)
+        stem = _safe_name(Path(bg).stem if bg else f"{card_id}-front") + "-主体"
+        dst = ASSETS / "subjects" / f"{stem}.png"
+        n = 2
+        while dst.exists():
+            dst = ASSETS / "subjects" / f"{stem}-{n}.png"
+            n += 1
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        res.save(dst)
+        return {"ok": True, "name": dst.name, "seconds": round(time.time() - t0, 2)}
+
     def _card_delete(self, data: dict) -> dict:
         card_id = _safe_name((data.get("id") or "").strip())
         if not card_id:
@@ -1400,7 +1631,7 @@ class Handler(BaseHTTPRequestHandler):
                 seal_frame_sel = seal_sel
             fg = (data.get("foreground") or "").strip()
             back_sel = (data.get("back") or "").strip()
-            back = _safe_name(back_sel or "sample-1.png")
+            back = back_sel if resolve_asset("backs", back_sel) else "sample-1.png"
             blank_url = _ensure_blank()
             desc = (data.get("desc") or "").strip() or None
             text_type = data.get("text_type") or "none"
@@ -1410,45 +1641,70 @@ class Handler(BaseHTTPRequestHandler):
             subject_outline = bool(data.get("subject_outline"))
             mask_clip = bool(data.get("mask_clip", True))
             scale = _parse_scale(data.get("scale"))
+            bg_scale = _parse_scale(data.get("bg_scale"))
+            frame_scale = _parse_scale(data.get("frame_scale"))
+            subject_sel = (data.get("subject") or "").strip()
             subject_offset_x = _parse_offset(data.get("subject_offset_x"))
             subject_offset_y = _parse_offset(data.get("subject_offset_y"))
             # 底图优先级：卡面素材 > 背景素材 > 成品卡（与保存逻辑一致）；
             # 卡面素材自含完整画面（前景清空，彻底替换）；背景素材只换底图（保留成品卡主体）
             # 卡面素材可作为「前景主体层」：浮于边框之上时卡面同时作底图与前景层（主体跃出边框）；
             # 文本型（boxed）时卡面只在余卡面范围（卡顶到文本区顶部）呈现，底图改用背景/深色
+            detail_url = None  # 分层成品卡的主体层（无则 None）
             face_floats = subject_over_frame or text_type == "boxed"
-            if face_sel and _safe_name(face_sel) == face_sel and (ASSETS / "faces" / _safe_name(face_sel)).exists():
+            face_p = resolve_asset("faces", face_sel)
+            bg_p = resolve_asset("backgrounds", custom_bg)
+            subject_p = resolve_asset("subjects", subject_sel)
+            # 背景渲染视图：背景倍率非 1 时按卡牌中心缩放并烘焙成整卡 PNG（深色底避免透明空洞）
+            bg_view_url = f"/assets_abs/backgrounds/{custom_bg}" if bg_p else None
+            bg_view_p = bg_p
+            if bg_p and bg_scale != 1.0:
+                PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
+                bname = f"bgs_{uuid.uuid4().hex[:8]}.png"
+                bg_view_p = _scale_card_layer(bg_p, bg_scale, PREVIEW_DIR / bname, base_fill=(14, 11, 9))
+                bg_view_url = f"/preview/_preview/{bname}"
+            if face_p:
                 if text_type == "boxed":
-                    front_url = (f"/assets_abs/backgrounds/{_safe_name(custom_bg)}"
-                                 if custom_bg and (ASSETS / "backgrounds" / _safe_name(custom_bg)).exists()
-                                 else _ensure_dark())
+                    front_url = bg_view_url if bg_p else _ensure_dark()
                 else:
                     front_url = f"/assets_abs/faces/{face_sel}"
                 fg = f"/assets_abs/faces/{face_sel}" if face_floats else blank_url
-            elif custom_bg and (ASSETS / "backgrounds" / _safe_name(custom_bg)).exists():
-                front_url = f"/assets_abs/backgrounds/{_safe_name(custom_bg)}"
+            elif bg_p:
+                front_url = bg_view_url
                 fg = fg or (f"/preview/{card_sel}/foreground.png" if card_sel else blank_url)
             elif card_sel:
                 front_url = f"/preview/{card_sel}/front.png"
                 fg = fg or f"/preview/{card_sel}/foreground.png"
+                # 分层卡：底图只有背景，主体层单独一张（叠在卡封之上）
+                if (ASSETS / "output" / card_sel / "detail.png").exists():
+                    detail_url = f"/preview/{card_sel}/detail.png"
             else:
                 front_url = _ensure_dark()
                 fg = fg or blank_url
+            # 主体素材优先作为前景层（覆盖卡面浮起/成品卡前景）
+            if subject_p:
+                fg = f"/assets_abs/subjects/{subject_sel}"
             # 独立背景层素材：卡面素材随缩放时背景整卡铺满（3D 独立背景层；2D 背景层共用）
             bg_url = None
             bg_path = None
-            if custom_bg and (ASSETS / "backgrounds" / _safe_name(custom_bg)).exists():
-                bg_path = ASSETS / "backgrounds" / _safe_name(custom_bg)
-                bg_url = f"/assets_abs/backgrounds/{_safe_name(custom_bg)}"
+            if bg_p:
+                bg_path = bg_view_p
+                bg_url = bg_view_url
             frame_url = None
             frame_path = None
             if frame_sel:
-                frame_name = _safe_name(frame_sel)
                 for _d in ("frames", "frames-text"):
-                    if (ASSETS / _d / frame_name).exists():
-                        frame_url = f"/assets_abs/{_d}/{frame_name}"
-                        frame_path = ASSETS / _d / frame_name
+                    _fp = resolve_asset(_d, frame_sel)
+                    if _fp:
+                        frame_url = f"/assets_abs/{_d}/{frame_sel}"
+                        frame_path = _fp
                         break
+            # 边框渲染视图：边框倍率非 1 时按卡牌中心缩放并烘焙成整卡 PNG（四周透明）
+            if frame_path is not None and frame_scale != 1.0:
+                PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
+                fname = f"frs_{uuid.uuid4().hex[:8]}.png"
+                frame_path = _scale_card_layer(frame_path, frame_scale, PREVIEW_DIR / fname)
+                frame_url = f"/preview/_preview/{fname}"
             # 边框内区域蒙版：有边框时整卡内容仅绘制在边框外围以内（3D shader 裁剪）
             interior_url = None
             if frame_path is not None:
@@ -1461,13 +1717,13 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception:
                     interior_url = None
             # 卡面素材是否作为整幅卡面（随缩放）：非文本型选择卡面素材时为真
-            face_scales = bool(face_sel and _safe_name(face_sel) == face_sel
-                               and (ASSETS / "faces" / _safe_name(face_sel)).exists()
-                               and text_type != "boxed")
-            seal_url = f"/assets_abs/seals/{_safe_name(seal_sel)}" if seal_sel else None
-            seal_path = ASSETS / "seals" / _safe_name(seal_sel) if seal_sel else None
-            seal_frame_url = f"/assets_abs/seals/{_safe_name(seal_frame_sel)}" if seal_frame_sel else None
-            seal_frame_path = ASSETS / "seals" / _safe_name(seal_frame_sel) if seal_frame_sel else None
+            face_scales = bool(face_p and text_type != "boxed")
+            seal_p = resolve_asset("seals", seal_sel) if seal_sel else None
+            seal_url = f"/assets_abs/seals/{seal_sel}" if seal_p else None
+            seal_path = seal_p
+            seal_frame_p = resolve_asset("seals", seal_frame_sel) if seal_frame_sel else None
+            seal_frame_url = f"/assets_abs/seals/{seal_frame_sel}" if seal_frame_p else None
+            seal_frame_path = seal_frame_p
             back_url = f"/assets_abs/backs/{back}"
             seal_name = seal_sel if seal_url else None
             seal_frame_name = seal_frame_sel if seal_frame_url else None
@@ -1482,8 +1738,12 @@ class Handler(BaseHTTPRequestHandler):
                     if p.exists():
                         fg_src = p
                 elif fg.startswith("/assets_abs/faces/"):
-                    p = ASSETS / "faces" / Path(fg).name
-                    if p.exists():
+                    p = resolve_asset("faces", unquote(fg[len("/assets_abs/faces/"):]))
+                    if p and p.exists():
+                        fg_src = p
+                elif fg.startswith("/assets_abs/subjects/"):
+                    p = resolve_asset("subjects", unquote(fg[len("/assets_abs/subjects/"):]))
+                    if p and p.exists():
                         fg_src = p
                 elif fg.startswith("/preview/") and not fg.startswith("/preview/_preview/"):
                     p = ASSETS / "output" / fg.split("/")[2] / "foreground.png"
@@ -1504,20 +1764,22 @@ class Handler(BaseHTTPRequestHandler):
                 # 2D 合成预览：与保存时 card.png 同一套 compose_card 逻辑（收集册缩略图同款）
                 from PIL import Image
                 front_p = None
-                if face_sel and (ASSETS / "faces" / _safe_name(face_sel)).exists():
+                if face_p:
                     if text_type == "boxed":
                         # 文本型：底图用背景/深色，卡面作前景（与 3D 预览一致）
-                        if custom_bg and (ASSETS / "backgrounds" / _safe_name(custom_bg)).exists():
-                            front_p = ASSETS / "backgrounds" / _safe_name(custom_bg)
+                        if bg_p:
+                            front_p = bg_view_p
                     else:
-                        front_p = ASSETS / "faces" / _safe_name(face_sel)
+                        front_p = face_p
                 elif card_sel and (ASSETS / "output" / card_sel / "front.png").exists():
                     front_p = ASSETS / "output" / card_sel / "front.png"
-                elif custom_bg and (ASSETS / "backgrounds" / _safe_name(custom_bg)).exists():
-                    front_p = ASSETS / "backgrounds" / _safe_name(custom_bg)
+                elif bg_p:
+                    front_p = bg_view_p
                 fg_im = None
-                if face_sel and text_type == "boxed" and (ASSETS / "faces" / _safe_name(face_sel)).exists():
-                    fg_im = Image.open(ASSETS / "faces" / _safe_name(face_sel))
+                if subject_p:
+                    fg_im = Image.open(subject_p)
+                elif face_sel and text_type == "boxed" and face_p:
+                    fg_im = Image.open(face_p)
                 elif card_sel:
                     fp = ASSETS / "output" / card_sel / "foreground.png"
                     if fp.exists() and fp.stat().st_size > 0:
@@ -1568,7 +1830,8 @@ class Handler(BaseHTTPRequestHandler):
                                            glow_strength=_parse_glow_strength(data.get("glow_strength")),
                                            glow_boost=frame_glow_boost(frame_path) if frame_path else 1.0,
                                            subject_offset_x=subject_offset_x,
-                                           subject_offset_y=subject_offset_y)
+                                           subject_offset_y=subject_offset_y,
+                                detail_rel=detail_url)
         return _write_preview_html(html)
 
     def _tmp_upload(self, data: dict) -> dict:
@@ -1603,6 +1866,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def _asset_delete(self, data: dict) -> dict:
         atype = data.get("type", "")
+        if "/" in str(data.get("name") or ""):
+            raise ValueError("素材包里的素材请在「素材包管理」中处理（不支持单独删除）")
         name = _safe_name(data.get("name", ""))
         if atype not in _ASSET_TYPES or not name:
             raise ValueError("参数错误")
@@ -1628,6 +1893,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def _asset_rename(self, data: dict) -> dict:
         atype = data.get("type", "")
+        if "/" in str(data.get("old") or "") or "/" in str(data.get("new") or ""):
+            raise ValueError("素材包里的素材不支持重命名，请在「素材包管理」中处理")
         old = _safe_name(data.get("old", ""))
         new = _safe_name(data.get("new", ""))
         if atype not in _ASSET_TYPES or not old or not new:
@@ -1644,6 +1911,37 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError(f"「{new}」已存在")
         src.rename(dst)
         return {"ok": True, "name": new}
+
+    # ---------- 素材包 ----------
+
+    def _pack_import(self, data: dict) -> dict:
+        name = str(data.get("name") or "pack.zip")
+        b64 = data.get("b64") or ""
+        if not b64:
+            raise ValueError("未收到压缩包数据")
+        res = packs.import_zip(name, base64.b64decode(b64))
+        return res
+
+    def _pack_import_folder(self, data: dict) -> dict:
+        files = data.get("files") or []
+        if not isinstance(files, list):
+            raise ValueError("文件列表无效")
+        return packs.import_folder(files)
+
+    def _pack_toggle(self, data: dict) -> dict:
+        pid = str(data.get("id") or "").strip()
+        if not pid:
+            raise ValueError("缺少素材包 id")
+        packs.set_enabled(pid, bool(data.get("enabled")))
+        return {"ok": True, "id": pid, "enabled": bool(data.get("enabled"))}
+
+    def _pack_delete(self, data: dict) -> dict:
+        pid = str(data.get("id") or "").strip()
+        if not pid:
+            raise ValueError("缺少素材包 id")
+        if not packs.delete_pack(pid):
+            raise ValueError(f"找不到素材包「{pid}」")
+        return {"ok": True, "id": pid}
 
 
 PAGE_HTML = r"""<!DOCTYPE html>
@@ -1708,6 +2006,9 @@ PAGE_HTML = r"""<!DOCTYPE html>
   .arearow span { font-size: 11px; color: var(--muted); }
   .arearow input[type=number] { width: 62px; padding: 5px 6px; }
   .arearow .hint { font-size: 11px; color: var(--muted); margin-left: 2px; }
+  .pickrow { display: flex; gap: 8px; align-items: center; }
+  .pickrow select { flex: 1; min-width: 0; }
+  .pickrow .btn { flex-shrink: 0; }
   .cardimg-placing { outline: 3px dashed var(--gold); cursor: crosshair !important; }
   .radios { display: flex; gap: 10px; }
   .radio {
@@ -1883,6 +2184,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
   .asset-tile .arow .btn.small { flex: 1; font-size: 12px; padding: 6px 8px; }
   .asset-empty { color: var(--muted); font-size: 13px; text-align: center; padding: 30px 0; }
 </style>
+<link rel="stylesheet" href="/fx2/editor.css">
 </head>
 <body>
 <div class="wrap">
@@ -1894,8 +2196,10 @@ PAGE_HTML = r"""<!DOCTYPE html>
   <nav class="tabs">
     <div class="tab on" data-tab="make">🎨 生成卡牌</div>
     <div class="tab" data-tab="diy">✨ 特效DIY</div>
+    <div class="tab" data-tab="fx2">🌟 特效DIY2</div>
     <div class="tab" data-tab="assemble">🧩 卡牌拼装</div>
     <div class="tab" data-tab="assets">🗂️ 素材管理</div>
+    <div class="tab" data-tab="packs">📦 素材包</div>
 <a class="tab" href="/album.html" target="_blank" style="text-decoration:none">📖 收集册</a>
 <a class="tab" href="/cutout.html" target="_blank" style="text-decoration:none">✂️ 抠图工具</a>
   </nav>
@@ -2090,6 +2394,11 @@ PAGE_HTML = r"""<!DOCTYPE html>
     </div>
   </section>
 
+  <!-- ============ 2b 特效DIY2（影之诗官方闪卡特效，原生分页） ============ -->
+  <section class="tabpage" id="page-fx2">
+    <div id="fx2App"></div>
+  </section>
+
   <!-- 特效DIY 浮动实时预览（可拖动/收起，改参数即时可见） -->
   <div class="fx-float" id="fxFloat">
     <div class="fx-float-head" id="fxFloatHead">
@@ -2120,23 +2429,55 @@ PAGE_HTML = r"""<!DOCTYPE html>
         </div>
         <div class="row">
           <label>卡面（可选，未选成品预览时使用卡面素材）</label>
-          <select id="asmFace"></select>
+          <div class="pickrow">
+            <select id="asmFace"></select>
+            <button class="btn small ghost" id="asmFaceUp" type="button" title="上传图片到卡面素材">＋ 导入</button>
+            <input type="file" id="asmFaceFile" accept="image/*" hidden>
+          </div>
+        </div>
+        <div class="row">
+          <label>主体（可选，透明前景层；可从当前背景自动抠取）</label>
+          <div class="pickrow">
+            <select id="asmSubject"></select>
+            <button class="btn small ghost" id="asmSubjectUp" type="button" title="上传图片到主体素材">＋ 导入</button>
+            <button class="btn small ghost" id="asmSubjectCut" type="button" title="从当前背景/成品卡抠出透明主体">✂️ 从背景抠取</button>
+            <input type="file" id="asmSubjectFile" accept="image/*" hidden>
+          </div>
         </div>
         <div class="row">
           <label>边框（可选，叠加在卡面之上）</label>
-          <select id="asmFrame"></select>
+          <div class="pickrow">
+            <select id="asmFrame"></select>
+            <button class="btn small ghost" id="asmFrameUp" type="button" title="上传图片到边框素材">＋ 导入</button>
+            <input type="file" id="asmFrameFile" accept="image/*" hidden>
+          </div>
         </div>
         <div class="row">
           <label>背景（未选卡面时作底图；文本型时作卡面底图，可与卡面并存）</label>
-          <select id="asmBg"></select>
+          <div class="pickrow">
+            <select id="asmBg"></select>
+            <button class="btn small ghost" id="asmBgUp" type="button" title="上传图片到背景素材">＋ 导入</button>
+            <input type="file" id="asmBgFile" accept="image/*" hidden>
+          </div>
         </div>
         <div class="row">
           <label>牌背</label>
-          <select id="asmBack"></select>
+          <div class="pickrow">
+            <select id="asmBack"></select>
+            <button class="btn small ghost" id="asmBackUp" type="button" title="上传图片到牌背素材">＋ 导入</button>
+            <input type="file" id="asmBackFile" accept="image/*" hidden>
+          </div>
         </div>
         <div class="row">
           <label>卡封（可选，如镭射覆层/封印，随卡面缩放、低于边框）</label>
           <select id="asmSeal"></select>
+        </div>
+        <div class="row">
+          <label>卡封叠加层（可选多层，自下而上依次叠加；每层独立正面/背面强度）</label>
+          <div id="asmSealExtra"></div>
+          <div class="pickrow" style="margin-top:6px">
+            <button class="btn small ghost" id="asmSealAdd" type="button" title="再加一层卡封（如稀有度描边、细闪）">＋ 添加卡封层</button>
+          </div>
         </div>
         <div class="row">
           <label>边框卡封（可选，仅边框区域显示，需配合边框使用）</label>
@@ -2165,8 +2506,12 @@ PAGE_HTML = r"""<!DOCTYPE html>
           <input type="number" id="asmGlowStrength" min="0" max="2" step="0.05" value="1">
         </div>
         <div class="row">
-          <label>缩放（卡面渲染比例，0.5~1.5，默认 1 不缩放）</label>
-          <input type="number" id="asmScale" min="0.5" max="1.5" step="0.05" value="1">
+          <label>缩放倍率（卡面 / 背景 / 边框各自独立，0.5~1.5，默认 1）</label>
+          <div class="arearow">
+            <span>卡面</span><input type="number" id="asmScale" min="0.5" max="1.5" step="0.05" value="1">
+            <span>背景</span><input type="number" id="asmBgScale" min="0.5" max="1.5" step="0.05" value="1">
+            <span>边框</span><input type="number" id="asmFrameScale" min="0.5" max="1.5" step="0.05" value="1">
+          </div>
         </div>
         <div class="row">
           <label>主体偏移（仅移动图像位置，渲染范围不跟随；左右/上下，卡宽/卡高比例 ±0.9）</label>
@@ -2252,6 +2597,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
       <div class="typechips">
         <div class="typechip on" data-type="backgrounds">🖼️ 背景</div>
         <div class="typechip" data-type="faces">🌄 卡面</div>
+        <div class="typechip" data-type="subjects">✂️ 主体</div>
         <div class="typechip" data-type="frames">🖌️ 边框</div>
         <div class="typechip" data-type="frames-text">📜 文本框边框</div>
         <div class="typechip" data-type="seals">🌟 卡封</div>
@@ -2259,6 +2605,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
         <div class="typechip" data-type="effects-images">✨ 特效图</div>
         <div class="typechip" data-type="effects">🎆 特效</div>
         <div class="typechip" data-type="frame-effects">💡 边框特效</div>
+        <select id="assetPackFilter" title="按来源包筛选" style="margin-left:8px;padding:8px 10px;border-radius:10px;border:1px solid var(--line);background:var(--panel);color:var(--text)"></select>
         <span class="grow" style="flex:1"></span>
         <button class="btn small" id="assetUploadBtn" type="button">⬆️ 上传素材</button>
         <input type="file" id="assetFile" accept="image/*" hidden>
@@ -2268,14 +2615,50 @@ PAGE_HTML = r"""<!DOCTYPE html>
     </div>
   </section>
 
+  <!-- ============ 5 素材包管理 ============ -->
+  <section class="tabpage" id="page-packs">
+    <div class="panel">
+      <h2>素材包管理</h2>
+      <p class="hint" style="text-align:left;padding:0;margin:-6px 0 12px">
+        素材包 = 一个文件夹（或压缩包），包根放一份 <code>pack.json</code> 索引。导入会【复制】进工具的
+        <code>packs/</code> 目录，原文件不动；删除只删这里面的，不影响内置素材。
+      </p>
+      <div class="typechips">
+        <button class="btn small" id="packImportZipBtn" type="button">📥 导入压缩包 (.zip)</button>
+        <button class="btn small" id="packImportDirBtn" type="button">📁 导入文件夹</button>
+        <span class="grow" style="flex:1"></span>
+        <button class="btn small ghost" id="packRefreshBtn" type="button">🔄 刷新</button>
+        <input type="file" id="packZipFile" accept=".zip,application/zip" hidden>
+        <input type="file" id="packDirFile" webkitdirectory directory multiple hidden>
+      </div>
+      <div class="asset-grid" id="packList"></div>
+      <div class="status" id="packStatus"></div>
+    </div>
+  </section>
+
   <p class="hint">所有处理都在本机完成 · 产物保存在 assets/output/ 目录 · 模型首次使用自动下载</p>
 </div>
 
+<script src="/fx2/editor.js"></script>
 <script>
 const ASSETS = __ASSETS_JSON__;
 const MODELS = __MODELS_JSON__;
 const EFFECTS = __EFFECTS_JSON__;
 const CARDS = __CARDS_JSON__;
+const ASSET_META = __ASSET_META_JSON__;
+let PACKS = __PACKS_JSON__;
+// 素材键 → 显示标签：素材包素材标注来源包，内置素材直接用文件名
+function assetLabel(k) {
+  if (!k) return k;
+  const m = ASSET_META[k];
+  return m ? m.label : k;
+}
+function assetLabels(list) { return (list || []).map(assetLabel); }
+// 素材键 → 可访问 URL（内置 = 文件名；素材包 = 包id/相对路径，逐段转义）
+function assetUrl(type, key) {
+  const segs = String(key).split('/').map(encodeURIComponent).join('/');
+  return '/assets_abs/' + type + '/' + segs;
+}
 const POSITIONS = [
   ['random', '🎲 随机'], ['top', '⬆️ 上'], ['bottom', '⬇️ 下'], ['left', '⬅️ 左'], ['right', '➡️ 右'],
   ['center', '🎯 中央'], ['topLeft', '↖️ 左上'], ['topRight', '↗️ 右上'],
@@ -2286,6 +2669,11 @@ const POSITIONS = [
 function switchTab(name) {
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('on', t.dataset.tab === name));
   document.querySelectorAll('.tabpage').forEach(p => { p.style.display = (p.id === 'page-' + name) ? 'block' : 'none'; });
+  // 特效DIY2 原生编辑器：切到该页时才挂载，避免初始渲染时 WebGL 拿到 0×0 画布
+  if (name === 'fx2') {
+    const host = document.getElementById('fx2App');
+    if (host) requestAnimationFrame(() => window.Fx2Editor && window.Fx2Editor.mount(host));
+  }
   const fxFloat = document.getElementById('fxFloat');
   if (fxFloat) fxFloat.style.display = (name === 'diy') ? 'flex' : 'none';
 }
@@ -2298,9 +2686,12 @@ function setStatus(id, msg, isErr) {
   if (el) { el.textContent = msg || ''; el.className = 'status' + (isErr ? ' err' : ''); }
 }
 function effectEmoji(def) {
+  if (def && def.engine === 'foil') return '🌀';   // 特效DIY2 的闪卡特效
   const img = (def && def.image) || '';
   return img.startsWith('text:') ? img.slice(5).trim().slice(0, 2) : '🖼️';
 }
+// 闪卡特效（特效DIY2）与粒子特效走两套完全不同的渲染路径
+function isFoilDef(def) { return !!(def && def.engine === 'foil'); }
 function fillSelect(id, items, labels) {
   const sel = document.getElementById(id);
   sel.innerHTML = '';
@@ -2310,16 +2701,28 @@ function fillSelect(id, items, labels) {
     sel.appendChild(op);
   });
 }
-function fillFxSelect(sel) {
+function fillFxSelect(sel, skipFoil) {
   sel.innerHTML = '';
-  const push = (list, builtin) => list.forEach(e => {
-    const op = document.createElement('option');
-    op.value = e.name;
-    op.textContent = effectEmoji(e.def) + ' ' + e.name + (builtin ? '（内置）' : '');
-    sel.appendChild(op);
-  });
-  push(EFFECTS.custom, false);
-  push(EFFECTS.builtin, true);
+  const addGroup = (label, list, builtin) => {
+    if (!list.length) return;
+    const g = document.createElement('optgroup');
+    g.label = label;
+    list.forEach(e => {
+      if (skipFoil && isFoilDef(e.def)) return;   // 组合特效只接受粒子特效
+      const op = document.createElement('option');
+      op.value = e.name;
+      op.textContent = effectEmoji(e.def) + ' ' + e.name + (builtin ? '（内置）' : '');
+      g.appendChild(op);
+    });
+    sel.appendChild(g);
+  };
+  // 特效DIY（粒子）与特效DIY2（闪卡 foil）分组展示，不混在同一组
+  const custom = EFFECTS.custom || [];
+  const foil = custom.filter(e => isFoilDef(e.def));
+  const particle = custom.filter(e => !isFoilDef(e.def));
+  addGroup('✨ 粒子特效 · 特效DIY', particle, false);
+  addGroup('🌀 闪卡特效 · 特效DIY2', foil, false);
+  addGroup('🧩 内置特效', EFFECTS.builtin || [], true);
 }
 function buildPosSelect(sel) {
   sel.innerHTML = '';
@@ -2458,7 +2861,7 @@ const styleRadios = document.getElementById('styleRadios');
 const bgSel = document.getElementById('background');
 function refillBgSelect() {
   const vals = ['', ...ASSETS.backgrounds.slice(1)];
-  const labels = ['无背景', ...ASSETS.backgrounds.slice(1).map(b => b === 'sample-1.png' ? '默认示例背景（羊皮纸）' : b)];
+  const labels = ['无背景', ...ASSETS.backgrounds.slice(1).map(b => b === 'sample-1.png' ? '默认示例背景（羊皮纸）' : assetLabel(b))];
   fillSelect('background', vals, labels);
 }
 refillBgSelect();
@@ -2507,8 +2910,8 @@ syncBgByStyle();
 
 fillSelect('model', MODELS.map(m => m[0]), MODELS.map(m => m[0] + ' — ' + m[1]));
 document.getElementById('model').value = __DEFAULT_MODEL__;
-fillSelect('seal', ['', ...ASSETS.seals], ['不使用卡封', ...ASSETS.seals]);
-fillSelect('sealFrame', ['', 'same', ...ASSETS.seals], ['不使用边框卡封', '与卡封一致', ...ASSETS.seals]);
+fillSelect('seal', ['', ...ASSETS.seals], ['不使用卡封', ...assetLabels(ASSETS.seals)]);
+fillSelect('sealFrame', ['', 'same', ...ASSETS.seals], ['不使用边框卡封', '与卡封一致', ...assetLabels(ASSETS.seals)]);
 // 辉光：默认选中第一个内置预设（旧卡未填时也是默认暖金描边，保持一致）
 fillSelect('makeGlow', ['', ...ASSETS.glows], ['—— 不使用 ——', ...ASSETS.glows]);
 (function () { const g = document.getElementById('makeGlow'); const def = ASSETS.glows.find(x => x) || ''; if (!g.value && def) g.value = def; })();
@@ -2538,10 +2941,10 @@ function refillFrameSelect() {
   let opts, labels;
   if (boxed) {
     opts = [...ASSETS.frames_text, ...ASSETS.frames];
-    labels = [...ASSETS.frames_text.map(f => '文本框·' + f), ...ASSETS.frames];
+    labels = [...ASSETS.frames_text.map(f => '文本框·' + assetLabel(f)), ...assetLabels(ASSETS.frames)];
   } else {
     opts = ASSETS.frames;
-    labels = [...opts];
+    labels = assetLabels(opts);
   }
   fillSelect('frame', ['', ...opts], ['不使用边框', ...labels]);
   syncSealFrameEnabled();
@@ -3014,7 +3417,8 @@ function renderFxList() {
     }
     box.appendChild(d);
   };
-  EFFECTS.custom.forEach(e => item(e, false));
+  // 这里是粒子特效编辑器：闪卡特效（engine=foil）由「特效DIY2」页编辑，不在此列出
+  EFFECTS.custom.filter(e => !isFoilDef(e.def)).forEach(e => item(e, false));
   EFFECTS.builtin.forEach(e => item(e, true));
 }
 
@@ -3078,7 +3482,7 @@ function renderComboList() {
 }
 
 function fillComboSel() {
-  fillFxSelect(document.getElementById('comboAddSel'));
+  fillFxSelect(document.getElementById('comboAddSel'), true);
 }
 document.getElementById('comboAddBtn').addEventListener('click', () => {
   const sel = document.getElementById('comboAddSel');
@@ -3231,12 +3635,13 @@ schedulePreview(600);
 
 // ================= 3 卡牌拼装 =================
 fillSelect('asmCard', ['', ...CARDS.map(c => c.id)], ['—— 不使用 ——', ...CARDS.map(c => c.name + '（' + c.id + '）')]);
-fillSelect('asmFace', ['', ...ASSETS.faces], ['—— 不使用 ——', ...ASSETS.faces]);
-fillSelect('asmBg', ['', ...ASSETS.backgrounds.slice(1)], ['无背景', ...ASSETS.backgrounds.slice(1).map(b => b === 'sample-1.png' ? '默认示例背景（羊皮纸）' : b)]);
-fillSelect('asmBack', ASSETS.backs);
-fillSelect('asmSeal', ['', ...ASSETS.seals], ['—— 不使用 ——', ...ASSETS.seals]);
+fillSelect('asmFace', ['', ...ASSETS.faces], ['—— 不使用 ——', ...assetLabels(ASSETS.faces)]);
+fillSelect('asmSubject', ['', ...ASSETS.subjects], ['—— 不使用 ——', ...assetLabels(ASSETS.subjects)]);
+fillSelect('asmBg', ['', ...ASSETS.backgrounds.slice(1)], ['无背景', ...ASSETS.backgrounds.slice(1).map(b => b === 'sample-1.png' ? '默认示例背景（羊皮纸）' : assetLabel(b))]);
+fillSelect('asmBack', ASSETS.backs, assetLabels(ASSETS.backs));
+fillSelect('asmSeal', ['', ...ASSETS.seals], ['—— 不使用 ——', ...assetLabels(ASSETS.seals)]);
 // 边框卡封："与卡封一致"=与卡牌卡封同素材（默认）；"不使用边框卡封"=空
-fillSelect('asmSealFrame', ['', 'same', ...ASSETS.seals], ['—— 不使用边框卡封 ——', '与卡封一致', ...ASSETS.seals]);
+fillSelect('asmSealFrame', ['', 'same', ...ASSETS.seals], ['—— 不使用边框卡封 ——', '与卡封一致', ...assetLabels(ASSETS.seals)]);
 // 辉光：默认选中第一个内置预设（旧卡未填时也是默认暖金描边，保持一致）
 fillSelect('asmGlow', ['', ...ASSETS.glows], ['—— 不使用 ——', ...ASSETS.glows]);
 (function () { const g = document.getElementById('asmGlow'); const def = ASSETS.glows.find(x => x) || ''; if (!g.value && def) g.value = def; })();
@@ -3244,10 +3649,60 @@ fillSelect('asmGlow', ['', ...ASSETS.glows], ['—— 不使用 ——', ...ASSE
 // 卡牌类型：文本型（boxed）只展示带文本框边框（frames-text/）
 const asmCardSel = document.getElementById('asmCard');
 const asmFaceSel = document.getElementById('asmFace');
+const asmSubjectSel = document.getElementById('asmSubject');
 const asmFrameSel = document.getElementById('asmFrame');
 const asmBgSel = document.getElementById('asmBg');
 const asmSealSel = document.getElementById('asmSeal');
 const asmSealFrameSel = document.getElementById('asmSealFrame');
+
+// 卡封叠加层：多层独立 shader，各层正/背强度分开（正面看封、牌背不封）
+const asmSealExtraBox = document.getElementById('asmSealExtra');
+function asmSealExtraRow(sel, front, back) {
+  const row = document.createElement('div');
+  row.className = 'pickrow seal-extra-row';
+  row.style.marginTop = '6px';
+  const selEl = document.createElement('select');
+  const opts = [['', '—— 不使用 ——'], ...ASSETS.seals.map(n => [n, assetLabel(n)])];
+  for (const [v, t] of opts) {
+    const o = document.createElement('option');
+    o.value = v; o.textContent = t;
+    selEl.appendChild(o);
+  }
+  selEl.value = sel || '';
+  const fEl = document.createElement('input');
+  fEl.type = 'number'; fEl.min = '0'; fEl.max = '2'; fEl.step = '0.05';
+  fEl.title = '正面强度'; fEl.style.width = '64px';
+  fEl.value = (front === undefined || front === null) ? '0.6' : front;
+  const bEl = document.createElement('input');
+  bEl.type = 'number'; bEl.min = '0'; bEl.max = '2'; bEl.step = '0.05';
+  bEl.title = '背面强度'; bEl.style.width = '64px';
+  bEl.value = (back === undefined || back === null) ? '0' : back;
+  const del = document.createElement('button');
+  del.type = 'button'; del.className = 'btn small ghost'; del.textContent = '✕';
+  del.onclick = () => row.remove();
+  const tag1 = document.createElement('span'); tag1.textContent = '正面';
+  const tag2 = document.createElement('span'); tag2.textContent = '背面';
+  row.append(selEl, tag1, fEl, tag2, bEl, del);
+  asmSealExtraBox.appendChild(row);
+  return row;
+}
+const asmSealExtra = {
+  get() {
+    return [...asmSealExtraBox.querySelectorAll('.seal-extra-row')]
+      .map(r => {
+        const el = r.querySelectorAll('input');
+        return { seal: r.querySelector('select').value,
+                 front: parseFloat(el[0].value) || 0,
+                 back: parseFloat(el[1].value) || 0 };
+      })
+      .filter(x => x.seal);
+  },
+  set(list) {
+    asmSealExtraBox.innerHTML = '';
+    (list || []).forEach(x => asmSealExtraRow(x.seal || x.rel, x.front, x.back));
+  },
+};
+document.getElementById('asmSealAdd').addEventListener('click', () => asmSealExtraRow('', 0.6, 0));
 const asmTextTypeSel = document.getElementById('asmTextType');
 // 用户是否手动选过边框卡封：手动选过后不再自动切换为"与卡封一致"
 let asmSealFrameTouched = false;
@@ -3256,10 +3711,10 @@ function refillAsmFrame() {
   let opts, labels;
   if (boxed) {
     opts = [...ASSETS.frames_text, ...ASSETS.frames];
-    labels = [...ASSETS.frames_text.map(f => '文本框·' + f), ...ASSETS.frames];
+    labels = [...ASSETS.frames_text.map(f => '文本框·' + assetLabel(f)), ...assetLabels(ASSETS.frames)];
   } else {
     opts = ASSETS.frames;
-    labels = [...opts];
+    labels = assetLabels(opts);
   }
   const prev = asmFrameSel.value;
   fillSelect('asmFrame', ['', ...opts], ['—— 不使用 ——', ...labels]);
@@ -3273,6 +3728,97 @@ function syncAsmSealFrameEnabled() {
   asmSealFrameSel.closest('.row').style.opacity = hasFrame ? 1 : 0.45;
 }
 refillAsmFrame();
+
+// 卡面 / 边框 / 牌背：快速导入素材（复用素材管理页的上传接口，成功后自动选中）
+function quickImport(btnId, fileId, type, after) {
+  const btn = document.getElementById(btnId);
+  const inp = document.getElementById(fileId);
+  if (!btn || !inp) return;
+  btn.addEventListener('click', () => inp.click());
+  inp.addEventListener('change', () => {
+    const f = inp.files && inp.files[0];
+    inp.value = '';
+    if (!f) return;
+    if (!f.type.startsWith('image/')) { setStatus('asmStatus', '请选择图片文件', true); return; }
+    const reader = new FileReader();
+    reader.onload = async () => {
+      try {
+        const r = await fetch('/api/assets/upload', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ type, b64: String(reader.result).split(',')[1], name: f.name }),
+        });
+        const d = await r.json();
+        if (!d.ok) throw new Error(d.error || '上传失败');
+        after(d.name);
+        setStatus('asmStatus', '✅ 已导入素材：' + d.name);
+      } catch (e) {
+        setStatus('asmStatus', '导入失败：' + e.message, true);
+      }
+    };
+    reader.readAsDataURL(f);
+  });
+}
+quickImport('asmFaceUp', 'asmFaceFile', 'faces', name => {
+  if (!ASSETS.faces.includes(name)) ASSETS.faces.push(name);
+  fillSelect('asmFace', ['', ...ASSETS.faces], ['—— 不使用 ——', ...assetLabels(ASSETS.faces)]);
+  asmFaceSel.value = name;
+  syncAsmMutex();
+  scheduleAsmPreview();
+});
+quickImport('asmSubjectUp', 'asmSubjectFile', 'subjects', name => {
+  if (!ASSETS.subjects.includes(name)) ASSETS.subjects.push(name);
+  fillSelect('asmSubject', ['', ...ASSETS.subjects], ['—— 不使用 ——', ...assetLabels(ASSETS.subjects)]);
+  asmSubjectSel.value = name;
+  scheduleAsmPreview();
+});
+// 从当前背景（或成品卡底图）抠出透明主体，存入「主体素材」并自动选中
+document.getElementById('asmSubjectCut').addEventListener('click', async () => {
+  const bg = asmBgSel.value;
+  if (!bg && !asmCardSel.value) {
+    setStatus('asmStatus', '请先选择背景素材或成品卡', true);
+    return;
+  }
+  const btn = document.getElementById('asmSubjectCut');
+  btn.disabled = true;
+  setStatus('asmStatus', '正在抠取主体…');
+  try {
+    const r = await fetch('/api/subject/cutout', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ background: bg, card: asmCardSel.value }),
+    });
+    const d = await r.json();
+    if (!d.ok) throw new Error(d.error || '抠图失败');
+    if (!ASSETS.subjects.includes(d.name)) ASSETS.subjects.push(d.name);
+    fillSelect('asmSubject', ['', ...ASSETS.subjects], ['—— 不使用 ——', ...assetLabels(ASSETS.subjects)]);
+    asmSubjectSel.value = d.name;
+    setStatus('asmStatus', '✅ 已抠取主体：' + d.name);
+    scheduleAsmPreview();
+  } catch (e) {
+    setStatus('asmStatus', '抠图失败：' + e.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+});
+quickImport('asmFrameUp', 'asmFrameFile', 'frames', name => {
+  if (!ASSETS.frames.includes(name)) ASSETS.frames.push(name);
+  refillAsmFrame();
+  asmFrameSel.value = name;
+  syncAsmSealFrameEnabled();
+  scheduleAsmPreview();
+});
+quickImport('asmBackUp', 'asmBackFile', 'backs', name => {
+  if (!ASSETS.backs.includes(name)) ASSETS.backs.push(name);
+  fillSelect('asmBack', ASSETS.backs, assetLabels(ASSETS.backs));
+  document.getElementById('asmBack').value = name;
+  scheduleAsmPreview();
+});
+quickImport('asmBgUp', 'asmBgFile', 'backgrounds', name => {
+  if (!ASSETS.backgrounds.includes(name)) ASSETS.backgrounds.push(name);
+  const items = ASSETS.backgrounds.slice(1);
+  fillSelect('asmBg', ['', ...items], ['无背景', ...items.map(b => b === 'sample-1.png' ? '默认示例背景（羊皮纸）' : assetLabel(b))]);
+  asmBgSel.value = name;
+  scheduleAsmPreview();
+});
 
 const asmPicker = createEffectPicker(document.getElementById('asmFxPicker'), () => scheduleAsmPreview());
 
@@ -3344,6 +3890,7 @@ asmCardSel.addEventListener('change', () => {
     }
     // 卡封：直接选中成品卡的卡封（改选"不使用"即可移除）
     asmSealSel.value = (card.seal && [...asmSealSel.options].some(o => o.value === card.seal)) ? card.seal : '';
+    if (window.asmSealExtra) asmSealExtra.set(card.seal_extra || []);
     // 边框卡封：记录过"与卡封一致"→ 同素材；有显式素材 → 用素材；只用了边框 → 默认"与卡封一致"
     asmSealFrameTouched = false;
     if (card.seal_frame_same) {
@@ -3374,6 +3921,15 @@ asmCardSel.addEventListener('change', () => {
     const sc = parseFloat(card.scale);
     if (isFinite(sc) && sc >= 0.5 && sc <= 1.5) asmScaleEl.value = sc;
     else asmScaleEl.value = 1;
+    const bgScEl = document.getElementById('asmBgScale');
+    const bgSc = parseFloat(card.bg_scale);
+    if (isFinite(bgSc) && bgSc >= 0.5 && bgSc <= 1.5) bgScEl.value = bgSc;
+    else bgScEl.value = 1;
+    const frScEl = document.getElementById('asmFrameScale');
+    const frSc = parseFloat(card.frame_scale);
+    if (isFinite(frSc) && frSc >= 0.5 && frSc <= 1.5) frScEl.value = frSc;
+    else frScEl.value = 1;
+    asmSubjectSel.value = (card.subject && [...asmSubjectSel.options].some(o => o.value === card.subject)) ? card.subject : '';
     const asmOffsetXEl = document.getElementById('asmOffsetX');
     const asmOffsetYEl = document.getElementById('asmOffsetY');
     const ox = parseFloat(card.subject_offset_x);
@@ -3391,6 +3947,7 @@ asmCardSel.addEventListener('change', () => {
     asmPicker.set(effectsToPicker(card.effects));
   } else {
     asmFaceSel.value = '';
+    asmSubjectSel.value = '';
     asmBgSel.value = '';
   }
   syncAsmSealFrameEnabled();
@@ -3398,6 +3955,7 @@ asmCardSel.addEventListener('change', () => {
   scheduleAsmPreview();
 });
 asmFaceSel.addEventListener('change', () => { syncAsmMutex(); scheduleAsmPreview(); });
+asmSubjectSel.addEventListener('change', scheduleAsmPreview);
 asmFrameSel.addEventListener('change', () => {
   syncAsmSealFrameEnabled();
   // 使用边框时默认边框卡封"与卡封一致"（用户手动选过边框卡封则不再覆盖）
@@ -3425,8 +3983,10 @@ document.getElementById('asmDesc').addEventListener('input', scheduleAsmPreview)
 ['asmAreaL', 'asmAreaR', 'asmAreaT', 'asmAreaB'].forEach(id => {
   document.getElementById(id).addEventListener('input', scheduleAsmPreview);
 });
-// 缩放：调整时实时刷新 3D 预览（与其它可调节项一致）
-document.getElementById('asmScale').addEventListener('input', scheduleAsmPreview);
+// 缩放：卡面 / 背景 / 边框三个倍率各自独立，调整时实时刷新 3D 预览
+['asmScale', 'asmBgScale', 'asmFrameScale'].forEach(id => {
+  document.getElementById(id).addEventListener('input', scheduleAsmPreview);
+});
 // 主体偏移：调整时实时刷新 3D 预览（仅偏移图像位置，渲染范围不跟随）
 document.getElementById('asmOffsetX').addEventListener('input', scheduleAsmPreview);
 document.getElementById('asmOffsetY').addEventListener('input', scheduleAsmPreview);
@@ -3452,6 +4012,9 @@ document.getElementById('asmReset').addEventListener('click', () => {
   document.getElementById('asmFloatFg').checked = false;
   document.getElementById('asmOutline').checked = false;
   document.getElementById('asmScale').value = 1;
+  document.getElementById('asmBgScale').value = 1;
+  document.getElementById('asmFrameScale').value = 1;
+  asmSubjectSel.value = '';
   document.getElementById('asmOffsetX').value = 0;
   document.getElementById('asmOffsetY').value = 0;
   asmTextTypeSel.value = 'none';
@@ -3521,16 +4084,20 @@ async function postAsmPreview() {
         name: document.getElementById('asmName').value.trim() || null,
         card: asmCardSel.value,
         face: asmFaceSel.value,
+        subject: asmSubjectSel.value,
         frame: asmFrameSel.value,
         custom_bg: asmBgSel.value,
         back: document.getElementById('asmBack').value,
         seal: asmSealSel.value,
+        seal_extra: asmSealExtra.get(),
         seal_frame: asmSealFrameSel.value,
         effects: asmPicker.get(),
         subject_over_frame: document.getElementById('asmFloatFg').checked,
         subject_outline: document.getElementById('asmOutline').checked,
         mask_clip: document.getElementById('asmMaskClip').checked,
         scale: parseFloat(document.getElementById('asmScale').value) || 1,
+        bg_scale: parseFloat(document.getElementById('asmBgScale').value) || 1,
+        frame_scale: parseFloat(document.getElementById('asmFrameScale').value) || 1,
         subject_offset_x: parseFloat(document.getElementById('asmOffsetX').value) || 0,
         subject_offset_y: parseFloat(document.getElementById('asmOffsetY').value) || 0,
         seal_strength_front: getSealStrengths().front,
@@ -3568,10 +4135,12 @@ document.getElementById('asmSave').addEventListener('click', async () => {
         name,
         card: asmCardSel.value,
         face: asmFaceSel.value,
+        subject: asmSubjectSel.value,
         frame: asmFrameSel.value,
         custom_bg: asmBgSel.value,
         back: document.getElementById('asmBack').value,
         seal: asmSealSel.value,
+        seal_extra: asmSealExtra.get(),
         seal_frame: asmSealFrameSel.value,
         desc: document.getElementById('asmDesc').value.trim() || null,
         text_type: asmTextTypeSel.value,
@@ -3587,6 +4156,8 @@ document.getElementById('asmSave').addEventListener('click', async () => {
         subject_outline: document.getElementById('asmOutline').checked,
         mask_clip: document.getElementById('asmMaskClip').checked,
         scale: parseFloat(document.getElementById('asmScale').value) || 1,
+        bg_scale: parseFloat(document.getElementById('asmBgScale').value) || 1,
+        frame_scale: parseFloat(document.getElementById('asmFrameScale').value) || 1,
         subject_offset_x: parseFloat(document.getElementById('asmOffsetX').value) || 0,
         subject_offset_y: parseFloat(document.getElementById('asmOffsetY').value) || 0,
         seal_strength_front: getSealStrengths().front,
@@ -3637,7 +4208,7 @@ document.getElementById('asmExportHtml').addEventListener('click', () => exportA
 scheduleAsmPreview(600);
 
 // ================= 4 素材管理 =================
-const ASSET_TYPES = ['backgrounds', 'faces', 'frames', 'frames-text', 'seals', 'backs', 'effects-images', 'effects', 'frame-effects'];
+const ASSET_TYPES = ['backgrounds', 'faces', 'subjects', 'frames', 'frames-text', 'seals', 'backs', 'effects-images', 'effects', 'frame-effects'];
 const NON_IMAGE_TYPES = ['effects', 'frame-effects'];
 let currentAssetType = 'backgrounds';
 
@@ -3651,6 +4222,28 @@ function renderAssetTypes() {
     c.classList.toggle('on', c.dataset.type === currentAssetType);
   });
 }
+let assetPackFilter = '';   // '' = 全部；'__builtin__' = 仅内置；否则为素材包 id
+
+function renderAssetPackFilter() {
+  const sel = document.getElementById('assetPackFilter');
+  if (!sel) return;
+  const prev = assetPackFilter;
+  sel.innerHTML = '';
+  const opts = [['', '全部来源'], ['__builtin__', '仅内置']];
+  PACKS.forEach(p => { if (!p.error) opts.push([p.id, '📦 ' + p.name]); });
+  opts.forEach(([v, t]) => { const o = document.createElement('option'); o.value = v; o.textContent = t; sel.appendChild(o); });
+  sel.value = opts.some(o => o[0] === prev) ? prev : '';
+  assetPackFilter = sel.value;
+  sel.onchange = () => { assetPackFilter = sel.value; loadAssets(); };
+}
+
+function assetMatchFilter(it) {
+  if (NON_IMAGE_TYPES.includes(currentAssetType)) return true;
+  if (!assetPackFilter) return true;
+  if (assetPackFilter === '__builtin__') return !!it.builtin;
+  return it.pack === assetPackFilter;
+}
+
 async function loadAssets() {
   const grid = document.getElementById('assetGrid');
   grid.innerHTML = '<div class="asset-empty">加载中…</div>';
@@ -3697,17 +4290,29 @@ async function loadAssets() {
     });
     return;
   }
-  d.files.forEach(name => {
+  const items = d.files.filter(assetMatchFilter);
+  if (!items.length) {
+    grid.innerHTML = '<div class="asset-empty">这个分类没有符合条件的素材（可在上方切换来源筛选）</div>';
+    return;
+  }
+  items.forEach(it => {
+    const name = it.name;
+    const isPack = !it.builtin;
     const tile = document.createElement('div');
     tile.className = 'asset-tile';
+    const badge = isPack
+      ? '<div style="font-size:11px;color:var(--gold2);margin-top:2px">📦 ' + it.pack_name + '</div>'
+      : '';
+    const actions = isPack
+      ? '<div style="font-size:11px;color:var(--muted)">素材包提供 · 只读</div>'
+      : '<button class="btn small ghost" data-act="rename">✏️ 重命名</button>' +
+        '<button class="btn small danger" data-act="del">🗑️</button>';
     tile.innerHTML =
-      '<img src="/assets_abs/' + currentAssetType + '/' + encodeURIComponent(name) + '?t=' + Date.now() + '" alt="">' +
-      '<div class="aname">' + name + '</div>' +
-      '<div class="arow">' +
-      '<button class="btn small ghost" data-act="rename">✏️ 重命名</button>' +
-      '<button class="btn small danger" data-act="del">🗑️</button>' +
-      '</div>';
-    tile.querySelector('[data-act=rename]').addEventListener('click', async () => {
+      '<img src="' + assetUrl(currentAssetType, it.key) + '?t=' + Date.now() + '" alt="">' +
+      '<div class="aname">' + name + '</div>' + badge +
+      '<div class="arow">' + actions + '</div>';
+    const rb = tile.querySelector('[data-act=rename]');
+    if (rb) rb.addEventListener('click', async () => {
       const neu = prompt('新名称（可含中文）：', name);
       if (!neu || neu === name) return;
       try {
@@ -3722,7 +4327,8 @@ async function loadAssets() {
         setStatus('assetStatus', '重命名失败：' + e.message, true);
       }
     });
-    tile.querySelector('[data-act=del]').addEventListener('click', async () => {
+    const db = tile.querySelector('[data-act=del]');
+    if (db) db.addEventListener('click', async () => {
       const delMsg = currentAssetType === 'seals'
         ? '删除卡封「' + name + '」？\n内置卡封将同步删除其 3D 效果定义（删除后需重新生成/重新上传才能恢复）。'
         : '删除素材「' + name + '」？';
@@ -3778,8 +4384,152 @@ assetFileInput.addEventListener('change', async () => {
   reader.readAsDataURL(f);
 });
 
+// ================= 5 素材包管理 =================
+const TYPE_LABELS = { backgrounds: '背景', faces: '卡面', frames: '边框', seals: '卡封', backs: '卡背' };
+
+function packCountText(p) {
+  const parts = Object.keys(p.counts || {}).map(t => (TYPE_LABELS[t] || t) + ' ' + p.counts[t]);
+  return parts.length ? parts.join(' · ') : '未识别到素材';
+}
+
+async function loadPacks() {
+  const grid = document.getElementById('packList');
+  grid.innerHTML = '<div class="asset-empty">加载中…</div>';
+  let d;
+  try {
+    const r = await fetch('/api/packs');
+    d = await r.json();
+  } catch (e) {
+    grid.innerHTML = ''; setStatus('packStatus', '加载失败：' + e.message, true); return;
+  }
+  if (!d.ok) { grid.innerHTML = ''; setStatus('packStatus', '加载失败：' + d.error, true); return; }
+  PACKS = d.packs;
+  setStatus('packStatus', '');
+  renderAssetPackFilter();
+  grid.innerHTML = '';
+  if (!d.packs.length) {
+    grid.innerHTML = '<div class="asset-empty">还没有素材包，点上方「导入压缩包 / 导入文件夹」添加</div>';
+    return;
+  }
+  d.packs.forEach(p => {
+    const tile = document.createElement('div');
+    tile.className = 'asset-tile';
+    const thumb = p.thumbnail
+      ? '<img src="/packs_abs/' + encodeURIComponent(p.id) + '/' + p.thumbnail.split('/').map(encodeURIComponent).join('/') + '?t=' + Date.now() + '" alt="">'
+      : '<div class="asset-emoji">📦</div>';
+    if (p.error) {
+      tile.innerHTML = thumb +
+        '<div class="aname">' + p.id + '</div>' +
+        '<div style="font-size:11px;color:var(--err)">⚠️ 索引异常</div>' +
+        '<div style="font-size:12px;color:var(--err);margin-top:4px">' + p.error + '</div>' +
+        '<div class="arow"><button class="btn small danger" data-act="del">🗑️ 删除</button></div>';
+    } else {
+      const desc = p.description ? '<div style="font-size:12px;color:var(--muted);margin-top:4px">' + p.description + '</div>' : '';
+      const author = p.author ? ' · ' + p.author : '';
+      tile.innerHTML = thumb +
+        '<div class="aname">' + p.name + '</div>' +
+        '<div style="font-size:11px;color:var(--muted)">id: ' + p.id + author + '</div>' +
+        desc +
+        '<div style="font-size:12px;color:var(--gold2);margin-top:4px">' + packCountText(p) + '</div>' +
+        '<div class="arow">' +
+        '<button class="btn small ' + (p.enabled ? '' : 'ghost') + '" data-act="toggle">' + (p.enabled ? '✅ 已启用' : '⏸️ 已禁用') + '</button>' +
+        '<button class="btn small danger" data-act="del">🗑️</button>' +
+        '</div>';
+    }
+    const tb = tile.querySelector('[data-act=toggle]');
+    if (tb) tb.addEventListener('click', async () => {
+      try {
+        const r = await fetch('/api/packs/toggle', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: p.id, enabled: !p.enabled }),
+        });
+        const res = await r.json();
+        if (!res.ok) throw new Error(res.error);
+        setStatus('packStatus', (res.enabled ? '✅ 已启用：' : '⏸️ 已禁用：') + p.name + '（刷新页面后下拉列表生效）');
+        await loadPacks();
+      } catch (e) { setStatus('packStatus', '操作失败：' + e.message, true); }
+    });
+    tile.querySelector('[data-act=del]').addEventListener('click', async () => {
+      if (!confirm('删除素材包「' + (p.name || p.id) + '」？\n只会删除工具 packs/ 里复制进来的这份，不影响你的原始文件夹和内置素材。')) return;
+      try {
+        const r = await fetch('/api/packs/delete', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: p.id }),
+        });
+        const res = await r.json();
+        if (!res.ok) throw new Error(res.error);
+        setStatus('packStatus', '✅ 已删除：' + (p.name || p.id) + '（刷新页面后下拉列表生效）');
+        await loadPacks();
+      } catch (e) { setStatus('packStatus', '删除失败：' + e.message, true); }
+    });
+    grid.appendChild(tile);
+  });
+}
+
+// 导入压缩包
+const packZipInput = document.getElementById('packZipFile');
+document.getElementById('packImportZipBtn').addEventListener('click', () => packZipInput.click());
+packZipInput.addEventListener('change', () => {
+  const f = packZipInput.files[0];
+  if (!f) return;
+  setStatus('packStatus', '正在导入压缩包：' + f.name + ' …');
+  const reader = new FileReader();
+  reader.onload = async () => {
+    try {
+      const r = await fetch('/api/packs/import', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: f.name, b64: reader.result.split(',')[1] }),
+      });
+      const d = await r.json();
+      if (!d.ok) throw new Error(d.error);
+      setStatus('packStatus', '✅ 已导入：' + d.name + '（刷新页面后下拉列表生效）');
+      await loadPacks();
+    } catch (e) { setStatus('packStatus', '导入失败：' + e.message, true); }
+    packZipInput.value = '';
+  };
+  reader.readAsDataURL(f);
+});
+
+// 导入文件夹（webkitdirectory 逐文件上传）
+const packDirInput = document.getElementById('packDirFile');
+document.getElementById('packImportDirBtn').addEventListener('click', () => packDirInput.click());
+packDirInput.addEventListener('change', () => {
+  const files = [...packDirInput.files];
+  if (!files.length) return;
+  setStatus('packStatus', '正在导入文件夹（' + files.length + ' 个文件）…');
+  const out = [];
+  let pending = files.length;
+  async function submitFolder() {
+    try {
+      const r = await fetch('/api/packs/import_folder', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ files: out }),
+      });
+      const d = await r.json();
+      if (!d.ok) throw new Error(d.error);
+      setStatus('packStatus', '✅ 已导入：' + d.name + '（刷新页面后下拉列表生效）');
+      await loadPacks();
+    } catch (e) { setStatus('packStatus', '导入失败：' + e.message, true); }
+    packDirInput.value = '';
+  }
+  files.forEach(f => {
+    const rel = f.webkitRelativePath || f.name;
+    const reader = new FileReader();
+    reader.onload = () => {
+      out.push({ path: rel, b64: reader.result.split(',')[1] });
+      if (--pending === 0) submitFolder();
+    };
+    reader.onerror = () => { if (--pending === 0) submitFolder(); };
+    reader.readAsDataURL(f);
+  });
+});
+
+document.getElementById('packRefreshBtn').addEventListener('click', loadPacks);
+
+renderAssetPackFilter();
 syncAssetUploadBtn();
 loadAssets();
+loadPacks();
 </script>
 </body>
 </html>

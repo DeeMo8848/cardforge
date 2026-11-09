@@ -1,7 +1,7 @@
 @echo off
 rem cardforge one-click deploy: create venv + install dependencies
 rem venv 位置来源优先级：settings.json "venv" 配置项 > 项目自带 .venv
-rem Models (~2GB) are not in the repo, auto-downloaded by rembg to models/
+rem Models are not in the repo; default isnet-anime-q8 (~42MB) is auto-downloaded + quantized to models/ on first use
 setlocal
 set "ROOT=%~dp0"
 cd /d "%ROOT%"

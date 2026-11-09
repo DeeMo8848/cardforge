@@ -1,0 +1,34 @@
+{
+  "id": "146",
+  "name": "146",
+  "description": "",
+  "style": "full-bleed",
+  "engine": "不使用抠图",
+  "source": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\146\\source.png",
+  "front": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\146\\front.png",
+  "foreground": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\146\\foreground.png",
+  "back": "assets/backs/three-kingdoms-back.png",
+  "layers": {
+    "background": null,
+    "face": null,
+    "frame": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\frames\\sample-1.png",
+    "seal": null
+  },
+  "text": {
+    "title": null,
+    "description": null,
+    "type": "none",
+    "pos": {
+      "x1": 0.08,
+      "x2": 0.92,
+      "y1": 0.7,
+      "y2": 0.92
+    }
+  },
+  "card_size": "900x1200",
+  "composed": true,
+  "animation": "none",
+  "subject_over_frame": true,
+  "subject_outline": false,
+  "mask_clip": false
+}

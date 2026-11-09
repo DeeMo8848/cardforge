@@ -4,7 +4,12 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 
-# 虚拟环境（部署时用 setup.cmd 自动重建）
+# 虚拟环境（部署时用 setup.cmd / setup.sh 自动重建）
+#
+# ★ 本项目的 venv 由 bot 统一管理，位置在 <bot>/tools/.venv，
+#   通过环境变量 CARDFORGE_VENV 或 settings.json 的 "venv" 字段指过来，
+#   不在这里再建一份（rembg + onnxruntime 体积大，重复装没意义）。
+#   独立使用 cardforge 时才会回退到本目录的 .venv。
 .venv/
 venv/
 env/
@@ -13,20 +18,20 @@ env/
 models/
 *.onnx
 
-# 生成产物（每张卡一个目录 + 临时缓存；卡牌定义默认不入库，cards/ 下样例除外）
+# 生成产物（每张卡一个目录 + 临时缓存）
 assets/output/
-cards/*
-!cards/a55-snowflake-test.json
-!cards/seal-dot-test.json
-!cards/描边测试.json
-!cards/测试-主体在边框之上.json
-!cards/测试-整幅抠图.json
-!cards/测试-整幅裁剪.json
-!cards/hasunosora-duo.json
-!cards/预览.json
 cards.zip
 album.html
 demo-all-layers.png
+
+# 素材包（大素材不入仓库，按需导入到 packs/ 下；packs.json 是本地启用/禁用状态）
+packs/
+packs.json
+
+# ⚠️ 注意：assets/ 下的**素材**（backgrounds / frames / seals / backs / faces /
+#    frames-text / effects / effects-images / lib）是【必须入库】的项目资产 ——
+#    它们是卡牌制作的基础素材，不随 bot 仓库分发，缺了就会"素材清单为空"。
+#    别给 assets/ 整体加忽略规则，只忽略 assets/output/（生成产物）即可。
 
 # 临时/测试脚本与诊断图（_ 前缀；工具脚本豁免）
 _*.py

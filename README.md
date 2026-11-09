@@ -40,7 +40,10 @@ cardforge.cmd 封面.png --name "xxx" --style full-bleed
 :: 机器可读输出（供其他工具解析）
 cardforge.cmd 封面.png --name xxx --json
 
-:: 动漫/插画封面推荐用动漫特化模型（体积小 5 倍、发丝更好）
+:: 抠图默认用动漫特化模型 isnet-anime-q8（int8，体积小 4 倍、发丝更好、内存低）
+cardforge.cmd 封面.png --name "xxx"
+
+:: 需要更高保真时可换回 fp32 版（体积/内存更大）
 cardforge.cmd 封面.png --name "xxx" --model isnet-anime
 ```
 
@@ -73,7 +76,7 @@ cardforge.cmd 封面.png --name "xxx" --model isnet-anime
 | `--slug` | 由名称生成 | 卡片 id（小写连字符） |
 | `--style` | `transparent` | `transparent`=透明主体卡（PVZ 风）；`full-bleed`=整幅图卡面（影之诗/游戏王风） |
 | `--engine` | `local` | 抠图引擎（`local`=rembg+BiRefNet；配置了抠图 API 时选 `api` 自动切换） |
-| `--model` | 自动 | 抠图模型。缺省时：`settings.json` 配置了抠图 API（`matting_api`）则用 `api`，否则用 `birefnet-general`；显式指定则用指定模型（`api`=阿里云分割抠图；质量优先 `birefnet-massive`；动漫素材推荐 `isnet-anime`） |
+| `--model` | 自动 | 抠图模型。缺省时：`settings.json` 配置了抠图 API（`matting_api`）则用 `api`，否则用 `isnet-anime-q8`（动漫特化 int8 量化版，默认）；显式指定则用指定模型（`api`=阿里云分割抠图；质量优先 `birefnet-massive`；动漫素材推荐默认的 `isnet-anime-q8`） |
 
 ### 卡面文字（印在卡面上，可选）
 
@@ -145,7 +148,7 @@ GitHub 仓库只包含本体程序（约几 MB），**虚拟环境和模型都�
 
 1. 克隆或解压项目后，直接运行 `webui.cmd` 或 `cardforge.cmd`（首次使用会自动执行 `setup.cmd`，创建 `.venv` 虚拟环境并安装依赖）
 2. 也可以手动执行 `setup.cmd` 单独完成环境初始化
-3. 首次抠图时，rembg 会自动把所选模型下载到 `models/` 目录（默认 `birefnet-general`，约 970MB），之后完全离线使用
+3. 首次抠图时，会自动准备所选模型到 `models/` 目录（默认 `isnet-anime-q8`：先由 rembg 下载 fp32 的 `isnet-anime.onnx`，再本地量化成 int8 版，约 42MB），之后完全离线使用
 
 > **模型复用**：多个副本/多台机器想共享已下载的模型时，设置环境变量 `CARDFORGE_MODELS_DIR` 指向模型所在目录即可，例如
 > `set CARDFORGE_MODELS_DIR=D:\ai\shared-models`（再运行 webui.cmd）。
@@ -184,18 +187,76 @@ CLI 缺省也会自动走 API（显式 `--model` 仍然优先）。
 
 > 区分：**卡封** = 静态覆层（镭射这类，叠在卡面最上层）；**特效** = 3D 网页卡里的动态动画（冒爱心、冒闪光，周期随机触发），由 `--effect` 或界面下拉选择。
 
+## 素材包（asset pack）
+
+素材变多后，仓库只保留少量示例素材，大素材以「素材包」分发：一个包 = 一个文件夹（或压缩包），
+包根放**一份** `pack.json` 索引，界面「📦 素材包」页里可导入 / 启用 / 禁用 / 删除。
+
+导入（压缩包或文件夹）会把内容**复制**进工具的 `packs/` 目录，源文件不动；删除也只删 `packs/` 里的这份，
+不影响内置 `assets/` 与你自己另放的素材。启用的包会和内置素材合并出现在各页下拉里（标注来源包）。
+
+### `pack.json` 格式
+
+```json
+{
+  "id": "sakura-pack",
+  "name": "樱色素材包",
+  "author": "xxx",
+  "description": "樱花主题背景 + 金边边框",
+  "thumbnail": "cover.png",
+  "assets": [
+    { "type": "backgrounds", "dir": "bg" },
+    { "type": "frames", "dir": "frames" }
+  ]
+}
+```
+
+| 字段 | 必填 | 说明 |
+|---|---|---|
+| `id` | ✅ | 包唯一 id（字母/数字/`._-`）；导入后文件夹名即此 id |
+| `name` | ✅ | 显示名 |
+| `author` / `description` / `thumbnail` | — | 可选；`thumbnail` 为相对包根的缩略图 |
+| `assets` | — | 素材声明：`{"type": 类型, "dir": 相对包根的目录}`，目录会递归扫描（非图片跳过） |
+
+- 素材类型只认 5 类：`backgrounds`（背景）/ `faces`（卡面）/ `frames`（边框）/ `seals`（卡封）/ `backs`（卡背）；未知类型跳过。
+- **不写 `assets` 时**按标准目录名自动识别：包根下的 `backgrounds/` `faces/` `frames/` `seals/` `backs/`。
+- 一个包只读**顶层**的 `pack.json`（嵌套的当普通文件忽略）；坏索引会在管理页标红并跳过，不影响工具运行。
+
+### 包目录示例
+
+```text
+sakura-pack/
+├── pack.json          ← 索引（必需）
+├── cover.png          ← 缩略图（可选）
+├── bg/                ← 声明为 backgrounds
+│   ├── sakura-1.png
+│   └── sakura-2.png
+└── frames/            ← 声明为 frames
+    └── gold.png
+```
+
+导入方式：把上面的文件夹打包成 `sakura-pack.zip`（`pack.json` 在压缩包顶层）后在「素材包」页导入，
+或直接选文件夹导入。启用/禁用只是逻辑开关，不搬动文件；切换后在「素材管理」页可即时看到，各页下拉刷新页面后生效。
+
 ## 抠图引擎
 
-- 默认本地引擎：`rembg + birefnet-general`（通用显著性分割，人像/动物/物体通吃，速度与质量平衡；离线免费；模型约 970MB）
-- **动漫/插画素材推荐**：加 `--model isnet-anime`（动漫特化，发丝保留更好、边缘更细，模型仅约 176MB，体积小 5 倍）
+- 默认模型：`isnet-anime-q8`（动漫/插画特化的 ISNet-anime 之 int8 量化版；离线免费）。
+  实测（输入 1450×2051）：模型约 42MB，推理约 1s，进程峰值内存约 475MB，发丝边缘干净。
+- 该模型由项目**自量化**生成：首次使用时以 rembg 官方 fp32 的 `isnet-anime.onnx` 为源，
+  用 `assets/` 下的素材做校准，现场跑 QDQ int8 静态量化（约 20s），产物缓存在 `models/`。
+  - 为什么不用现成的 fp32：峰值内存 916MB、耗时 2.3s，约是 q8 的两倍；量化后质量几乎不变
+    （与 fp32 的互相 IoU ≈ 0.998）。
+  - 量化需要 `onnx` 包（已列入 requirements.txt；仅首次生成时用到）。
+- 需要更高保真时可用 `--model isnet-anime`（fp32）或 `--model birefnet-general-lite`
+  （通用分割质量更高，但峰值内存约 5.4GB，小内存机器会被内存守卫自动降级）。
 - 引擎抽象在 `engine.py`，未来可插拔火山引擎等 API 引擎（`create_engine()` 注册）
-- 模型存放在 `models/` 目录（默认项目内；缺失时首次抠图自动下载，之后离线可用）
-- 启动时会在控制台列出各模型已下载/未下载状态，未下载的模型首次使用自动下载
+- 模型存放在 `models/` 目录（默认项目内；缺失时首次使用自动下载/生成，之后离线可用）
+- 启动时会在控制台列出各模型已下载/未下载状态，并给出内存守卫结论
 
 ## 环境
 
 - Python 虚拟环境：`.venv`（用系统 Python 3.10 创建，避免依赖冲突；`setup.cmd` 自动创建）
-- 依赖：`requirements.txt`（rembg + Pillow）
+- 依赖：`requirements.txt`（rembg + onnxruntime + Pillow + onnx）
 - 调用入口：`webui.cmd` / `cardforge.cmd`（自动检测环境，缺失时先部署再运行）
 
 ## 开发

@@ -1,0 +1,47 @@
+{
+  "id": "air-cat-01a-metallic",
+  "name": "喵祥云 Macleod · 金属",
+  "description": "Air / Rare / 金属版 / No.081　听说每片云里都藏着这样一只喵。",
+  "style": "full-bleed",
+  "engine": "不使用抠图",
+  "source": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\air-cat-01a-metallic\\source.png",
+  "front": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\air-cat-01a-metallic\\front.png",
+  "foreground": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\air-cat-01a-metallic\\foreground.png",
+  "back": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\backs\\ripit-card-back.png",
+  "layers": {
+    "background": null,
+    "face": null,
+    "frame": null,
+    "seal": null
+  },
+  "text": {
+    "title": null,
+    "description": null,
+    "type": "none",
+    "pos": null
+  },
+  "card_size": "1465x2048",
+  "canvas_size": "1465x2048",
+  "composed": true,
+  "animation": "none",
+  "effects": [
+    {
+      "name": "RipIt版_Metallic_air-cat-01a-metallic",
+      "posType": "random"
+    }
+  ],
+  "subject_over_frame": false,
+  "subject_outline": false,
+  "mask_clip": true,
+  "seal_name": null,
+  "seal_strength_front": 0.945,
+  "seal_strength_back": 0.5775,
+  "seal_frame_name": null,
+  "seal_frame_strength_front": 0.8,
+  "seal_frame_strength_back": 0.5,
+  "seal_frame_same": false,
+  "card_scale": 1.0,
+  "glow_name": "none",
+  "glow_strength": 0.0,
+  "edition": "Metallic"
+}

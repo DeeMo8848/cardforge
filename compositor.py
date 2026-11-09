@@ -8,12 +8,218 @@
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-CARD_W, CARD_H = 900, 1200  # 2:3，与 3D 卡应用比例一致
+CARD_W, CARD_H = 900, 1200  # 默认 3:4，与 3D 卡应用比例一致
+
+# 单卡可覆盖的画布尺寸（用于非 3:4 的卡面，如 Rip It! 游戏的 1465×2048 ≈ 5:7）。
+# 取值来源：卡牌定义 cards/<id>.json 里的 "canvas_size" 字段；
+# 为空时回落到上面的默认尺寸。
+# 说明：3D 卡网页的卡体比例固定为 2.25:3，canvas_size 只影响 2D 合成图与
+# front/foreground 等位图资产的像素尺寸，避免 3:4 画布把 5:7 的卡面裁掉上下两条。
+
+# ---------------------------------------------------------------- 字体解析
+# ★ 原先这里写的是 ImageFont.truetype("msyh.ttc") —— 那是 Windows 独有的
+#   微软雅黑短名，只有系统字体目录（C:\Windows\Fonts）能解析到。
+#   在 Linux / macOS 上必然抛 OSError，然后落到 `load_default()`：
+#   那个位图字体**没有 CJK 字形**，于是卡面中文全部变成「口口口口」。
+#
+# 解析优先级（自上而下，第一个成功即用）：
+#   1. bot 通过环境变量 CARDFORGE_FONT_DIR 指定的字体目录（最可靠，见下）
+#   2. cardforge 自带的 assets/fonts/（便于 cardforge 独立使用）
+#   3. 常见系统中文字体文件名（按各平台字体目录搜索）
+#   4. 目录下任何像中文字体的文件（按文件名启发式）
+#   5. 极端的最后手段 —— 显式告警，绝不静默出豆腐块
+#
+# ★ 为什么优先环境变量：cardforge 由 bot 以子进程方式调用
+#   （plugins/cards/forge.py 的 _run_forge），bot 自己就有内置字体包，
+#   通过环境变量把路径传进来，比让 cardforge 猜项目位置要可靠得多。
+_FONT_CACHE: dict[int, ImageFont.FreeTypeFont] = {}
+# 字体「是否含中文字形」的探测结果缓存（同一路径只探测一次）
+_CJK_CACHE: dict[str, bool] = {}
+
+
+def _bundled_candidates() -> list[Path]:
+    """按优先级列出候选的内置字体文件。"""
+    out: list[Path] = []
+
+    # 1) bot 传入的字体目录（环境变量）
+    env_dir = os.environ.get("CARDFORGE_FONT_DIR", "").strip()
+    if env_dir:
+        d = Path(env_dir)
+        if d.is_dir():
+            try:
+                out.extend(sorted(
+                    p for p in d.iterdir()
+                    if p.suffix.lower() in (".ttc", ".ttf", ".otf", ".otc")
+                    and p.is_file()
+                ))
+            except OSError:
+                pass
+
+    # 2) cardforge 自带字体目录
+    local = PROJECT_ROOT / "assets" / "fonts"
+    if local.is_dir():
+        try:
+            out.extend(sorted(
+                p for p in local.iterdir()
+                if p.suffix.lower() in (".ttc", ".ttf", ".otf", ".otc")
+                and p.is_file()
+            ))
+        except OSError:
+            pass
+
+    # 3) 兄弟目录里的 bot（开发期的常见布局，尽力而为）
+    for guess in (PROJECT_ROOT.parent / "qqbot", PROJECT_ROOT.parent.parent / "qqbot"):
+        for rel in (("bot", "assets", "fonts"),
+                    ("bot", "parse", "resources", "HYSongYunLangHeiW-1.ttf")):
+            p = guess.joinpath(*rel)
+            if p.is_file():
+                out.append(p)
+
+    return out
+
+# 各平台常见系统中文字体文件名
+_SYSTEM_FONT_NAMES = (
+    "msyh.ttc", "msyh.ttf", "msyhbd.ttc",          # Windows 微软雅黑
+    "simhei.ttf", "simsun.ttc", "Deng.ttf",        # Windows 黑体/宋体/等线
+    "PingFang.ttc", "Hiragino Sans GB.ttc",        # macOS
+    "NotoSansCJK-Regular.ttc", "NotoSansSC-Regular.otf",
+    "NotoSansCJKsc-Regular.otf",
+    "SourceHanSansSC-Regular.otf",
+    "wqy-microhei.ttc", "wqy-zenhei.ttc",          # Linux 文泉驿
+    "DroidSansFallbackFull.ttf",
+    "NotoSansSC-VF.ttf",
+)
+
+_SYSTEM_FONT_DIRS = (
+    Path(r"C:\Windows\Fonts"),
+    Path("/usr/share/fonts"),
+    Path("/usr/local/share/fonts"),
+    Path.home() / ".fonts",
+    Path.home() / "Library" / "Fonts",
+    Path("/System/Library/Fonts"),
+    Path("/Library/Fonts"),
+)
+
+_FONT_WARNED = False
+
+
+def _font_search_dirs() -> list[Path]:
+    dirs = [d for d in _SYSTEM_FONT_DIRS if d.is_dir()]
+    # /usr/share/fonts 下是嵌套的 opentype/ truetype/ 等子目录，展开一层
+    extra: list[Path] = []
+    for d in dirs:
+        try:
+            extra.extend(p for p in d.iterdir() if p.is_dir())
+        except OSError:
+            pass
+    return dirs + extra
+
+
+def _has_cjk(path: Path) -> bool:
+    """检测字体是否真的含中文字形。
+
+    ★ 必须实测字形覆盖，不能只看文件存在 —— 同一个字体目录里可能放着
+      纯 emoji 字体（如 NotoColorEmoji.ttf），它**没有任何 CJK 字形**，
+      拿它渲染中文照样是口口口。实测 `unicharToGlyph(ord('我')) == 0`
+      即代表缺字形。
+    """
+    key = str(path)
+    if key in _CJK_CACHE:
+        return _CJK_CACHE[key]
+    ok = False
+    probe = ("我", "测", "卡")
+    try:
+        from PIL import ImageFont as _IF
+        f = _IF.truetype(str(path), 20)
+        # PIL: getmask 对缺字形会返回全空；用 getbbox 更直接
+        ok = all(f.getbbox(ch) is not None for ch in probe)
+    except Exception:
+        # PIL 解不开（如纯 CBDT 位图字体）→ 退回 Skia 探测
+        try:
+            import skia
+            tf = skia.Typeface.MakeFromFile(str(path))
+            if tf:
+                sf = skia.Font(tf, 20)
+                ok = all(sf.unicharToGlyph(ord(ch)) != 0 for ch in probe)
+        except Exception:
+            ok = False
+    _CJK_CACHE[key] = ok
+    return ok
+
+
+def _find_font_file() -> Path | None:
+    """按优先级找一款**含 CJK 字形**的字体文件，返回路径或 None。"""
+    # 1~3) 内置候选（环境变量指定的 bot 字体目录 / cardforge 自带 / 兄弟目录的 bot）
+    for p in _bundled_candidates():
+        try:
+            if p.is_file() and p.stat().st_size > 0 and _has_cjk(p):
+                return p
+        except OSError:
+            continue
+    # 2) 按已知文件名在系统字体目录里找
+    dirs = _font_search_dirs()
+    for name in _SYSTEM_FONT_NAMES:
+        for d in dirs:
+            p = d / name
+            try:
+                if p.is_file() and p.stat().st_size > 0 and _has_cjk(p):
+                    return p
+            except OSError:
+                continue
+    # 3) 广撒网：目录下任何 .ttc/.ttf/.otf，名字里带 cjk/hei/song/ming/sc 的
+    hints = ("cjk", "hei", "song", "ming", "sc-", "sc_", "sourcehan", "noto")
+    for d in dirs:
+        try:
+            entries = sorted(d.iterdir())
+        except OSError:
+            continue
+        for p in entries:
+            if p.suffix.lower() not in (".ttc", ".ttf", ".otf", ".otc"):
+                continue
+            low = p.name.lower()
+            if any(h in low for h in hints):
+                try:
+                    if p.is_file() and p.stat().st_size > 0 and _has_cjk(p):
+                        return p
+                except OSError:
+                    continue
+    return None
+
+
+def _load_font(size: int) -> ImageFont.FreeTypeFont:
+    """按优先级加载一款中文字体（带缓存）。找不到时告警并给出可用降级。"""
+    global _FONT_WARNED
+    size = max(1, int(size))
+    cached = _FONT_CACHE.get(size)
+    if cached is not None:
+        return cached
+
+    path = _find_font_file()
+    if path is not None:
+        try:
+            f = ImageFont.truetype(str(path), size)
+            _FONT_CACHE[size] = f
+            return f
+        except OSError as e:
+            if not _FONT_WARNED:
+                _FONT_WARNED = True
+                print("[cardforge] 字体加载失败 %s: %s" % (path, e), flush=True)
+
+    # 没有任何可用字体 —— 明确告警（返回的对象仍不含 CJK，但至少日志能查）
+    if not _FONT_WARNED:
+        _FONT_WARNED = True
+        print("[cardforge] 警告：未找到任何中文字体，卡面文字可能出现方块。"
+              "请把字体放到 %s 或安装系统字体。"
+              % (PROJECT_ROOT / "assets" / "fonts"), flush=True)
+    f = ImageFont.load_default()
+    _FONT_CACHE[size] = f
+    return f
 
 
 def _cover(im: Image.Image, w: int, h: int) -> Image.Image:
@@ -189,6 +395,26 @@ def _load_optional(path: str | Path | None) -> Image.Image | None:
     if not p.exists():
         return None
     return Image.open(p).convert("RGBA")
+
+
+def resolve_canvas_size(card_def: dict | None) -> tuple[int, int]:
+    """按卡牌定义里的 canvas_size 解析该卡的实际画布尺寸。
+
+    卡牌定义形如 {"canvas_size": "1465x2048"}；缺省或非法时回落到默认 CARD_W×CARD_H。
+    """
+    if not card_def:
+        return CARD_W, CARD_H
+    raw = card_def.get("canvas_size") or (card_def.get("extra") or {}).get("canvas_size")
+    if not raw:
+        return CARD_W, CARD_H
+    try:
+        w, h = str(raw).lower().split("x")
+        w, h = int(w), int(h)
+    except Exception:
+        return CARD_W, CARD_H
+    if w <= 0 or h <= 0:
+        return CARD_W, CARD_H
+    return w, h
 
 
 def frame_interior_mask(frame: Image.Image, w: int = CARD_W, h: int = CARD_H) -> Image.Image:
@@ -544,11 +770,9 @@ def _draw_text(canvas: Image.Image, title: str | None, description: str | None,
         return
     w, h = canvas.size
     draw = ImageDraw.Draw(canvas)
-    try:
-        font_t = ImageFont.truetype("msyh.ttc", max(8, round(46 * scale)))
-        font_d = ImageFont.truetype("msyh.ttc", max(8, round(34 * scale)))
-    except OSError:
-        font_t = font_d = ImageFont.load_default()
+    # ★ 用 _load_font() 而非硬编码 "msyh.ttc"：见文件顶部字体解析说明
+    font_t = _load_font(max(8, round(46 * scale)))
+    font_d = _load_font(max(8, round(34 * scale)))
 
     if title:
         box = draw.textbbox((0, 0), title, font=font_t)
@@ -577,8 +801,10 @@ def _draw_text(canvas: Image.Image, title: str | None, description: str | None,
         return
     area_w, area_h = area_x1 - area_x0, area_y1 - area_y0
     fs = max(10, round(34 * scale))
+    lines = []
+    font = _load_font(fs)
     while fs > max(10, round(13 * scale)):
-        font = ImageFont.truetype("msyh.ttc", fs)
+        font = _load_font(fs)
         lines = _wrap_text(draw, description, font, area_w - 20)
         if len(lines) * round(fs * 1.4) <= area_h:
             break

@@ -1,0 +1,48 @@
+{
+  "id": "异形测试-辉光测试",
+  "name": "异形测试+辉光测试",
+  "description": "",
+  "style": "transparent",
+  "engine": "assembly",
+  "source": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\异形测试-辉光测试\\front.png",
+  "front": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\异形测试-辉光测试\\front.png",
+  "foreground": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\异形测试-辉光测试\\foreground.png",
+  "back": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\backs\\three-kingdoms-back.png",
+  "layers": {
+    "background": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\异形测试-辉光测试\\front.png",
+    "face": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\faces\\two girls.png",
+    "frame": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\frames-text\\异形测试.png",
+    "seal": null
+  },
+  "text": {
+    "title": "异形测试+辉光测试",
+    "description": "",
+    "type": "boxed",
+    "pos": {
+      "x1": 0.08,
+      "x2": 0.92,
+      "y1": 0.7,
+      "y2": 0.92
+    }
+  },
+  "composed": false,
+  "assembly": true,
+  "subject_over_frame": false,
+  "subject_outline": false,
+  "mask_clip": true,
+  "card_scale": 1.0,
+  "seal_strength_front": 0.945,
+  "seal_strength_back": 0.5775,
+  "seal_frame_strength_front": 0.8,
+  "seal_frame_strength_back": 0.5,
+  "seal_name": null,
+  "seal_frame_name": null,
+  "seal_frame_same": true,
+  "frame_name": "异形测试.png",
+  "back_name": "three-kingdoms-back.png",
+  "face_name": "two girls.png",
+  "background_name": "铜板.png",
+  "glow_name": "发廊螺纹",
+  "glow_strength": 2.0,
+  "effects": []
+}

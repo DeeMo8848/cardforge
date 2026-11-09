@@ -255,8 +255,43 @@ def _materialize_effect_images(effects: list[dict], out_dir: Path) -> list[dict]
     effect_img_dir = out_dir / "effects"
     effect_img_dir.mkdir(parents=True, exist_ok=True)
 
+    foil_src_dir = PROJECT_ROOT / "fx2" / "assets" / "foil"
+
+    def _walk_foil(defn: dict):
+        """闪卡特效：把用到的 foil 贴图/蒙版复制进 out_dir/effects/，保证导出的 HTML 自包含。"""
+        def _put(tex: str) -> str:
+            name = Path(str(tex or "").replace("\\", "/")).name
+            if not name:
+                return ""
+            if not name.lower().endswith(".png"):
+                name += ".png"
+            src = foil_src_dir / name
+            if not src.exists():
+                return ""
+            target = effect_img_dir / name
+            if not target.exists():
+                target.write_bytes(src.read_bytes())
+            return "effects/" + name
+
+        for s in defn.get("slots") or []:
+            s["tex"] = _put(s.get("tex"))
+        dist = defn.get("dist") or {}
+        dist["tex"] = _put(dist.get("tex"))
+        mname = Path(str(defn.get("mask") or "").replace("\\", "/")).name
+        defn["mask"] = ""
+        if mname:
+            msrc = EFFECT_IMG_DIR / mname
+            if msrc.exists():
+                target = effect_img_dir / mname
+                if not target.exists():
+                    target.write_bytes(msrc.read_bytes())
+                defn["mask"] = "effects/" + mname
+
     def _walk(defn: dict):
         if not isinstance(defn, dict):
+            return
+        if defn.get("engine") == "foil":
+            _walk_foil(defn)
             return
         src = defn.get("image") or ""
         if src.startswith("text:"):
@@ -306,15 +341,28 @@ def _load_layer(path: str | None, kind: str | None = None) -> str | None:
         return None
     p = Path(path)
     if not p.is_absolute() and not p.exists():
-        candidates = [PROJECT_ROOT / "assets" / p]
         subs = _LAYER_DIRS.get(kind or "")
         if isinstance(subs, str):
             subs = [subs]
+        candidates = [PROJECT_ROOT / "assets" / p]
         for sub in subs or []:
             candidates.append(PROJECT_ROOT / "assets" / sub / p)
+            # 路径已带类型前缀（如 "assets/backs/x.png"）时，去掉前缀再拼一次
+            name = Path(path).name
+            candidates.append(PROJECT_ROOT / "assets" / sub / name)
         for candidate in candidates:
             if candidate.exists():
                 return str(candidate)
+        # 素材包：素材键形如 「包id/相对路径」（见 packs.py）
+        if "/" in path:
+            try:
+                import packs as _packs
+                for sub in subs or []:
+                    rp = _packs.resolve_asset(sub, path)
+                    if rp:
+                        return str(rp)
+            except Exception:
+                pass
     return str(p) if p.exists() else None
 
 
@@ -379,10 +427,27 @@ def make_card(
     frame: str | None = None,
     seal: str | None = None,
     seal_frame: str | None = None,
+    seal_strength_front: float = 0.945,
+    seal_strength_back: float = 0.5775,
+    seal_base: float = 0.55,
+    seal_amp: float = 0.45,
+    seal_tilt: float = 0.045,
+    seal_add: bool = False,
+    seal_tilt_lo: float = 0.12,
+    seal_tilt_hi: float = 0.6,
+    seal_sheen_base: float = 0.03,
+    seal_band_power: float = 4.0,
+    seal_extra: list | None = None,
+    detail: str | None = None,
+    flow_mask_rel: str | None = None,
+    flow_noise_rel: str | None = None,
+    flow_amt: float = 1.0,
+    flow_speed: float = 1.0,
     animation: str = "none",
     effects: list | None = None,
     back: str | None = None,
     card_size: str = f"{CARD_W}x{CARD_H}",
+    canvas_size: str | None = None,
     compose: bool = True,
     subject_over_frame: bool = False,
     subject_outline: bool = False,
@@ -459,17 +524,30 @@ def make_card(
             adapt_limit = min(1.0, max(0.05, float(text_pos["y1"])))
         except (TypeError, ValueError):
             pass
-    adapt_h = max(1, round(CARD_H * adapt_limit))
+
+    # 该卡的实际画布尺寸：默认 900×1200；canvas_size 可指定别的比例
+    # （如 Rip It! 游戏的 1465×2048 ≈ 5:7），避免 3:4 画布把卡面上下裁掉。
+    cw, ch = CARD_W, CARD_H
+    if canvas_size:
+        try:
+            _w, _h = str(canvas_size).lower().split("x")
+            cw, ch = int(_w), int(_h)
+            if cw <= 0 or ch <= 0:
+                cw, ch = CARD_W, CARD_H
+        except Exception:
+            cw, ch = CARD_W, CARD_H
+
+    adapt_h = max(1, round(ch * adapt_limit))
 
     source_orig = source.convert("RGBA")
-    source = _fit_card(source, CARD_W, CARD_H, adaptive=True, mode=1)
+    source = _fit_card(source, cw, ch, adaptive=True, mode=1)
     # 整幅卡面：主体适配必须与底图（恒 cover 整幅）完全一致，才能保证抠出主体
     # 恰好遮盖在底图原主体位置上（视差效果）；方式2（contain）或关闭自适应会
     # 让主体变换与底图不一致，导致错位
     if style == "full-bleed":
         adaptive, adaptive_mode = True, 1
     foreground = _fit_card(
-        foreground, CARD_W, adapt_h if text_adapt else CARD_H,
+        foreground, cw, adapt_h if text_adapt else ch,
         adaptive=adaptive, mode=adaptive_mode,
     )
     # 整幅卡面+未使用抠图：裁剪后的整图即底图，无独立主体层。
@@ -490,11 +568,11 @@ def make_card(
     # 任意源图比例下主体都能像素级遮盖背景原主体；文本框让位后背景随主体同步缩放/位移）
     bg_follow_rel = None
     if follow_bg:
-        _fit_card(source_orig, CARD_W, foreground.height, adaptive=True, mode=1).save(
+        _fit_card(source_orig, cw, foreground.height, adaptive=True, mode=1).save(
             out_dir / "bg_follow.png")
         bg_follow_rel = "bg_follow.png"
     bg_path = None if full_bleed_subject else _load_layer(background, "background")
-    front_img = build_front(source, foreground, style, bg_path)
+    front_img = build_front(source, foreground, style, bg_path, size=(cw, ch))
     front_img.save(out_dir / "front.png")
     foreground.save(out_dir / "foreground.png")
     # 主体白色描边（贴纸边）：透明主体卡与整幅+抠图卡启用时生成
@@ -537,11 +615,13 @@ def make_card(
         back=back,
         layers=layers,
         text=text,
-        extra={"card_size": card_size, "composed": compose, "animation": animation,
+        extra={"card_size": card_size, "canvas_size": f"{cw}x{ch}", "composed": compose, "animation": animation,
+               "effects": [{"name": e["name"], "pos": e["pos"]} for e in effect_instances],
                "subject_over_frame": subject_over_frame, "subject_outline": subject_outline,
                "mask_clip": mask_clip,
                "seal_name": Path(seal_path).name if seal_path else None,
-               "seal_strength_front": 0.945, "seal_strength_back": 0.5775,
+               "seal_strength_front": seal_strength_front,
+               "seal_strength_back": seal_strength_back,
                "seal_frame_name": Path(seal_frame_path).name if seal_frame_path else None,
                "seal_frame_strength_front": 0.8, "seal_frame_strength_back": 0.5,
                "seal_frame_same": seal_frame_same,
@@ -557,6 +637,9 @@ def make_card(
     if compose:
         log("合成预览卡图…")
         size = parse_size(card_size)
+        # 2D 合成图默认按该卡画布尺寸输出（保持卡面原始比例，不裁切）
+        if not canvas_size:
+            size = (cw, ch)
         composed = compose_card(
             foreground if (style == "transparent" or text_adapt or full_bleed_subject) else None,
             style=style,
@@ -589,6 +672,32 @@ def make_card(
     back_src = _load_layer(back, "back") or (PROJECT_ROOT / "assets" / "backs" / "sample-1.png")
     back_copy = out_dir / "back.png"
     Image.open(back_src).convert("RGB").save(back_copy)
+    # 多卡封叠加：把额外层 PNG 复制进输出目录，保证 card.html 自包含
+    seal_extra_resolved = []
+    for _ex in (seal_extra or []):
+        _src = _load_layer(_ex.get("rel"), "seal")
+        if not _src:
+            continue
+        _dst = out_dir / Path(_src).name
+        if Path(_src).resolve() != _dst.resolve():
+            shutil.copy2(_src, _dst)
+        _item = dict(_ex)
+        _item["rel"] = Path(_src).name
+        seal_extra_resolved.append(_item)
+
+    # 流动背景：掩码 + 噪声复制进输出目录（card.html 自包含）
+    flow_mask_out = flow_noise_out = None
+    if flow_mask_rel:
+        _fm = _load_layer(flow_mask_rel, "seal")
+        if _fm:
+            shutil.copy2(_fm, out_dir / Path(_fm).name)
+            flow_mask_out = Path(_fm).name
+    if flow_noise_rel:
+        _fn = _load_layer(flow_noise_rel, "seal")
+        if _fn:
+            shutil.copy2(_fn, out_dir / Path(_fn).name)
+            flow_noise_out = Path(_fn).name
+
     from webcard import build_card_html
 
     _materialize_effect_images(effect_instances, out_dir)
@@ -608,13 +717,20 @@ def make_card(
     if seal_frame_path:
         shutil.copy(seal_frame_path, out_dir / "seal_frame.png")
         seal_frame_rel = "seal_frame.png"
+    # 分层素材：主体层（立绘+图标+边框+文字）叠在所有卡封之上
+    detail_rel = None
+    if detail:
+        _dp = Path(detail)
+        if _dp.exists():
+            shutil.copy(_dp, out_dir / "detail.png")
+            detail_rel = "detail.png"
     # 边框内区域蒙版：整卡内容仅绘制在边框外围以内（3D shader 裁剪，与 2D 一致）
     interior_rel = None
     if frame_path:
         from compositor import save_frame_interior_mask
 
         try:
-            save_frame_interior_mask(Image.open(frame_path), out_dir / "interior.png")
+            save_frame_interior_mask(Image.open(frame_path), out_dir / "interior.png", cw, ch)
             interior_rel = "interior.png"
         except Exception:
             interior_rel = None
@@ -624,6 +740,22 @@ def make_card(
                         frame_rel=frame_rel,
                         seal_rel=seal_rel,
                         seal_name=Path(seal_path).name if seal_path else None,
+                        seal_strength_front=seal_strength_front,
+                        seal_strength_back=seal_strength_back,
+                        seal_base=seal_base,
+                        seal_amp=seal_amp,
+                        seal_tilt=seal_tilt,
+                        seal_add=seal_add,
+                        seal_tilt_lo=seal_tilt_lo,
+                        seal_tilt_hi=seal_tilt_hi,
+                        seal_sheen_base=seal_sheen_base,
+                        seal_band_power=seal_band_power,
+                        seal_extra=seal_extra_resolved,
+                        detail_rel=detail_rel,
+                        flow_mask_rel=flow_mask_out,
+                        flow_noise_rel=flow_noise_out,
+                        flow_amt=float(flow_amt),
+                        flow_speed=float(flow_speed),
                         seal_frame_rel=seal_frame_rel,
                         seal_frame_name=Path(seal_frame_path).name if seal_frame_path else None,
                         description=desc, text_type=text_type, text_pos=text_pos,
@@ -639,7 +771,8 @@ def make_card(
                         glow_strength=glow_strength,
                         glow_boost=frame_glow_boost(frame_path) if frame_path else 1.0,
                         follow_bg=follow_bg,
-                        bg_follow_rel=bg_follow_rel),
+                        bg_follow_rel=bg_follow_rel,
+                        card_width=round(3.0 * cw / ch, 6)),
         encoding="utf-8",
     )
 
@@ -716,14 +849,17 @@ def _fit_card(im: Image.Image, w: int, h: int, adaptive: bool = True, mode: int 
     return canvas
 
 
-def build_front(source: Image.Image, foreground: Image.Image, style: str, background_path: str | None) -> Image.Image:
+def build_front(source: Image.Image, foreground: Image.Image, style: str, background_path: str | None,
+                size: tuple[int, int] | None = None) -> Image.Image:
     """生成 3D 应用底图层 front（恒整卡尺寸）。
 
     full-bleed（整幅卡面）：用户选择背景层时背景作底（文本型卡的主体区外露背景），
         未选背景时整幅原图即底图；
     transparent：选了背景用背景（等比裁剪铺满），未选背景用深色底。
+    size: 该卡的实际画布尺寸，默认 CARD_W×CARD_H（3:4）；非 3:4 的卡面
+        （如 Rip It! 游戏的 1465×2048 ≈ 5:7）需按自身比例传入，否则会被裁掉上下。
     """
-    w, h = CARD_W, CARD_H
+    w, h = size or (CARD_W, CARD_H)
     if background_path is not None:
         bg = Image.open(background_path).convert("RGBA")
         scale = max(w / bg.width, h / bg.height)
@@ -777,6 +913,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="动画特效（3D 网页卡触发），可用逗号分隔多个 '名称@位置'，如 love@top,sparkle@右下 或 love@0.3:0.7")
     parser.add_argument("--back", default=None, help="卡背图片（默认 assets/backs/sample-1.png）")
     parser.add_argument("--card-size", default=f"{CARD_W}x{CARD_H}", help="2D 合成卡图尺寸，如 900x1200")
+    parser.add_argument("--canvas-size", default=None,
+                        help="该卡的画布尺寸（工作画布比例），如 1465x2048；缺省用默认 900x1200。"
+                             "非 3:4 的卡面需指定，否则会被裁掉上下部分")
     parser.add_argument("--no-compose", action="store_true", help="不生成 2D 合成预览卡图")
     parser.add_argument("--float-fg", action="store_true",
                         help="透明主体浮于边框之上（PVZ 式立体感；默认边框盖住主体）")
@@ -845,6 +984,7 @@ def main(argv: list[str] | None = None) -> int:
             effects=effect_specs,
             back=args.back,
             card_size=args.card_size,
+            canvas_size=args.canvas_size,
             compose=not args.no_compose,
             subject_over_frame=args.float_fg,
             subject_outline=args.outline,

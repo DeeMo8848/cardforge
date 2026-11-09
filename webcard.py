@@ -111,7 +111,7 @@ EFFECT_ENGINE_JS = r"""
       return s;
     }
 
-    // 预设动作：区别于偏移量（某点到某点），动作是"从某点向某方向持续运动"
+    "// 预设动作：区别于偏移量（某点到某点），动作是\"从某点向某方向持续运动\"\n"
     function motionParams(def) {
       var m = def.motion || '';
       var dirSign = def.motionDir === 'ccw' ? -1 : 1;
@@ -294,12 +294,36 @@ EFFECT_ENGINE_JS = r"""
         }
       }
       for (var j = particles.length - 1; j >= 0; j--) update(particles[j], dt);
+      // 前景纹理异步加载完成后再补建主体特效层（含 FG_ROUND_JS 重绘圆角后的画布）
+      if (foilSubjDef && foregroundTexture && foregroundTexture.image && foregroundTexture.image.width) {
+        var subDef = foilSubjDef;
+        foilSubjDef = null;
+        foilBuildSubject(subDef);
+      }
+      if (foilObj) foilUpdate(foilObj, dt);
+      if (foilSubj) {
+        // 主体层跟随 fgMesh 的几何/位置（文本型 contain 适配会改几何），
+        // 并把网格 uv 换算成卡片 uv（含前景组视差位移），特效图案才与整卡层对齐
+        var fsMesh = foilSubj.mesh;
+        if (fsMesh.geometry !== fgMesh.geometry) fsMesh.geometry = fgMesh.geometry;
+        fsMesh.position.x = fgMesh.position.x;
+        fsMesh.position.y = fgMesh.position.y;
+        var gp = fgMesh.geometry.parameters || {};
+        var cs = cardContent.scale.x;
+        var mw = (gp.width || CARD_WIDTH) * cs, mh = (gp.height || CARD_HEIGHT) * cs;
+        foilSubj.uniforms.uMeshRect.value.set(
+          ((foregroundGroup.position.x + fgMesh.position.x - mw / 2) / CARD_WIDTH) + 0.5,
+          ((foregroundGroup.position.y + fgMesh.position.y - mh / 2) / CARD_HEIGHT) + 0.5,
+          mw / CARD_WIDTH, mh / CARD_HEIGHT);
+        foilUpdate(foilSubj, dt);
+      }
     }
 
     function init(list) {
       emitters = [];
       (list || []).forEach(function (item) {
         var def = item.def || {};
+        if (def.engine === 'foil') return;   // 闪卡特效不参与粒子发射，由 foilApply 单独接管卡面
         var basePos = item.pos || { type: 'random' };
         if (def.subs && def.subs.length) {
           // 组合特效（多合一）：展开为多个子发射器，各自位置与定义
@@ -310,6 +334,480 @@ EFFECT_ENGINE_JS = r"""
           emitters.push({ def: def, pos: basePos, timer: 0 });
         }
       });
+      foilApply(list);   // 闪卡特效：整面接管卡面渲染（无 cardMesh 时自动跳过）
+    }
+
+    // ===== 影之诗闪卡特效（engine:'foil'）：整面接管卡面渲染 =====
+    // 由特效DIY2 保存，落到卡牌上时用 5 槽着色器重绘整张卡面：
+    // 底层画面 = 卡面素材，叠加官方语义的 加法/减法/透明 槽位 + 扭曲 + 虹光。
+    var foilObj = null;
+    var foilSubj = null;       // 前景主体层同步特效（挂在 foregroundGroup，随主体视差移动）
+    var foilSubjDef = null;    // 前景纹理尚未加载完成时暂存待建的特效定义
+    var foilWhiteTex = null;
+    var FOIL_LUT = {
+      fire:    ['0 0.35 0.85 1 1', '0 0.02 0.25 0.65 0.95', '0 0 0.02 0.1 0.7'],
+      ice:     ['0 0.1 0.3 0.6 1', '0 0.4 0.7 0.9 1', '0 0.7 0.9 1 1'],
+      gold:    ['0 0.3 0.7 1 1', '0 0.15 0.45 0.85 1', '0 0 0.05 0.3 0.85'],
+      magic:   ['0 0.2 0.6 0.9 1', '0 0 0.1 0.5 0.95', '0 0.3 0.8 1 1'],
+      official:['0.031 0.078 0.165 0.251 0.325', '0.027 0.082 0.184 0.329 0.490', '0.165 0.235 0.369 0.557 0.769']
+    };
+    var FOIL_SHEEN = {
+      rainbow: [[1, 0.31, 0.31], [1, 0.90, 0.35], [0.35, 1, 0.55], [0.31, 0.71, 1]],
+      gold:    [[1, 0.75, 0.35], [1, 0.93, 0.75], [1, 0.59, 0.24], [1, 0.86, 0.59]],
+      ice:     [[0.47, 0.78, 1], [0.82, 0.96, 1], [0.35, 0.63, 1], [0.88, 0.98, 1]]
+    };
+    var FOIL_ORDER = { Back1: 0, Back2: 1, Middle: 2, Front1: 3, Front2: 4 };
+    var PI_JS = Math.PI;
+
+    function foilWhite() {
+      if (foilWhiteTex) return foilWhiteTex;
+      var c = document.createElement('canvas');
+      c.width = c.height = 1;
+      var x = c.getContext('2d');
+      x.fillStyle = '#ffffff';
+      x.fillRect(0, 0, 1, 1);
+      foilWhiteTex = new THREE.CanvasTexture(c);
+      foilWhiteTex.colorSpace = THREE.NoColorSpace;
+      return foilWhiteTex;
+    }
+
+    function foilLoad(url, clamp) {
+      if (!url) return foilWhite();
+      var t = new THREE.TextureLoader().load(url);
+      t.colorSpace = THREE.NoColorSpace;
+      t.wrapS = t.wrapT = clamp ? THREE.ClampToEdgeWrapping : THREE.RepeatWrapping;
+      t.anisotropy = 4;
+      return t;
+    }
+
+    function foilLut(name) {
+      var tab = FOIL_LUT[name];
+      if (!tab) return foilWhite();
+      var n = 256, data = new Uint8Array(n * 4);
+      var interp = function (stops, x) {
+        var f = Math.min(0.99999, Math.max(0, x)) * (stops.length - 1);
+        var i = Math.floor(f), k = f - i;
+        var a = stops[i], b = stops[Math.min(i + 1, stops.length - 1)];
+        return (a + (b - a) * k) * 255;
+      };
+      var rows = tab.map(function (s) {
+        return s.trim().split(/ +/).map(Number);
+      });
+      for (var x = 0; x < n; x++) {
+        data[x * 4] = Math.round(interp(rows[0], x / (n - 1)));
+        data[x * 4 + 1] = Math.round(interp(rows[1], x / (n - 1)));
+        data[x * 4 + 2] = Math.round(interp(rows[2], x / (n - 1)));
+        data[x * 4 + 3] = 255;
+      }
+      var t = new THREE.DataTexture(data, n, 1, THREE.RGBAFormat);
+      t.minFilter = THREE.LinearFilter;
+      t.magFilter = THREE.LinearFilter;
+      t.wrapS = t.wrapT = THREE.ClampToEdgeWrapping;
+      t.colorSpace = THREE.NoColorSpace;
+      t.needsUpdate = true;
+      return t;
+    }
+
+    function v4(a, b, c, d) { return new THREE.Vector4(a || 0, b || 0, c || 0, d || 0); }
+
+    var FOIL_VS = 'varying vec2 vUv;\n' +
+      'void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }';
+
+    var FOIL_FS = 'precision highp float;\n' +
+      'uniform float uTime;\n' +
+      'uniform sampler2D uMain, uMask, uDist, uInteriorMap;\n' +
+      'uniform sampler2D uBgTex;\n' +
+      'uniform float uBgOn, uBgHasTex, uBgAspect;\n' +
+      'uniform vec3 uBgColor;\n' +
+      'uniform float uMaskClip, uAspect, uFaceContain, uFaceAspect, uContentScale;\n' +
+      'uniform float uSubject, uOpacity;\n' +
+      'uniform vec4 uMeshRect;\n' +
+      'uniform vec4 uFaceBox;\n' +
+      'uniform vec4 uDistCtl, uDistCtl2, uGlob, uGlob2, uDistTile, uTone, uSheen;\n' +
+      'uniform vec4 uSheenA, uSheenB, uSheenC, uSheenD;\n' +
+      'uniform sampler2D uFlowMask, uFlowNoise;\n' +
+      'uniform float uFlowAmt, uFlowSpeed;\n' +
+      'uniform sampler2D uTex0, uTex1, uTex2, uTex3, uTex4;\n' +
+      'uniform vec4 uSlot0, uSlot1, uSlot2, uSlot3, uSlot4;\n' +
+      'uniform vec4 uTile0, uTile1, uTile2, uTile3, uTile4;\n' +
+      'uniform vec4 uMove0, uMove1, uMove2, uMove3, uMove4;\n' +
+      'uniform vec4 uFx0, uFx1, uFx2, uFx3, uFx4;\n' +
+      'uniform vec4 uCtl0, uCtl1, uCtl2, uCtl3, uCtl4;\n' +
+      'uniform vec4 uF0, uF1, uF2, uF3, uF4;\n' +
+      'uniform vec4 uPos0, uPos1, uPos2, uPos3, uPos4;\n' +
+      'uniform vec4 uTint0, uTint1, uTint2, uTint3, uTint4;\n' +
+      'uniform vec4 uLx0, uLx1, uLx2, uLx3, uLx4;\n' +
+      'uniform vec4 uBlink0, uBlink1, uBlink2, uBlink3, uBlink4;\n' +
+      'uniform sampler2D uLut0, uLut1, uLut2, uLut3, uLut4;\n' +
+      'varying vec2 vUv;\n' +
+      'const float PI = 3.14159265359;\n' +
+      'const float INV2PI = 0.15915494309;\n' +
+      'mat2 rotM(float a){ float c = cos(a), s = sin(a); return mat2(c, s, -s, c); }\n' +
+      'float roundedCard(vec2 uv, float radius){\n' +
+      '  vec2 scaled = vec2((uv.x - 0.5) * uAspect, uv.y - 0.5);\n' +
+      '  vec2 halfSize = vec2(0.5 * uAspect, 0.5);\n' +
+      '  vec2 edge = abs(scaled) - (halfSize - vec2(radius));\n' +
+      '  return length(max(edge, 0.0)) + min(max(edge.x, edge.y), 0.0) - radius;\n' +
+      '}\n' +
+      'float maskChVal(vec2 uv, float ch){\n' +
+      '  if (uGlob2.z < 0.5) return 1.0;\n' +   // 未上传蒙版：忽略通道，恒为 1
+      '  vec4 m = texture2D(uMask, uv);\n' +
+      '  float v;\n' +
+      '  if (ch < 0.5) v = m.r; else if (ch < 1.5) v = m.g; else if (ch < 2.5) v = m.b;\n' +
+      '  else if (ch < 3.5) v = m.a; else if (ch < 4.5) v = 1.0; else v = 1.0 - m.r;\n' +
+      '  return clamp(v, 0.0, 1.0);\n' +
+      '}\n' +
+      'float areaVal(vec2 uv, float ty){\n' +
+      '  if (ty < 0.5) return 1.0;\n' +
+      '  if (ty < 1.5){ float d = 1.0 - uv.y;\n' +
+      '    if (d < 0.18) return mix(1.0, 0.5, d / 0.18);\n' +
+      '    if (d < 0.44) return mix(0.5, 0.12, (d - 0.18) / 0.26);\n' +
+      '    if (d < 0.70) return mix(0.12, 0.0, (d - 0.44) / 0.26);\n' +
+      '    return 0.0; }\n' +
+      '  if (ty < 2.5){ float d = uv.y;\n' +
+      '    if (d < 0.16) return mix(1.0, 0.92, d / 0.16);\n' +
+      '    if (d < 0.40) return mix(0.92, 0.55, (d - 0.16) / 0.24);\n' +
+      '    if (d < 0.64) return mix(0.55, 0.16, (d - 0.40) / 0.24);\n' +
+      '    if (d < 0.86) return mix(0.16, 0.0, (d - 0.64) / 0.22);\n' +
+      '    return 0.0; }\n' +
+      '  vec2 e = vec2((uv.x - 0.5) / 0.64, (uv.y - 0.44) / 0.54);\n' +
+      '  float r = length(e);\n' +
+      '  if (r < 0.42) return mix(1.0, 0.7, r / 0.42);\n' +
+      '  if (r < 0.70) return mix(0.7, 0.22, (r - 0.42) / 0.28);\n' +
+      '  if (r < 0.92) return mix(0.22, 0.0, (r - 0.70) / 0.22);\n' +
+      '  return 0.0;\n' +
+      '}\n' +
+      'vec4 slotUV(vec4 mv, vec4 fx, float mt, vec4 tile, vec2 uv, float te){\n' +
+      '  vec2 T = vec2(tile.x == 0.0 ? 1e-4 : tile.x, tile.y == 0.0 ? 1e-4 : tile.y);\n' +
+      '  vec2 O = tile.zw;\n' +
+      '  vec2 tuv = uv * T + O;\n' +
+      '  if (mt > 3.5) return vec4(tuv, fract(-mv.y * te), fract(-mv.x * te));\n' +
+      '  if (mt > 2.5) { vec2 c = tuv - T * 0.5; return vec4(rotM(mv.w * te) * c + T * 0.5, 0.0, 0.0); }\n' +
+      '  if (mt > 1.5) {\n' +
+      '    vec2 r = rotM(-mv.z * PI / 180.0) * (tuv / T) * T;\n' +
+      '    return vec4(r + vec2(fract(-mv.x * te), fract(-mv.y * te)), 0.0, 0.0);\n' +
+      '  }\n' +
+      '  return vec4(rotM(-fx.y) * tuv, 0.0, 0.0);\n' +
+      '}\n' +
+      'vec2 polarUV(vec4 muv, float spiral, vec4 tile){\n' +
+      '  vec2 T = tile.xy;\n' +
+      '  vec2 d = T * 0.5 - muv.xy;\n' +
+      '  float r = length(d);\n' +
+      '  float ang = atan(d.y, d.x) - r * spiral + PI;\n' +
+      '  return vec2(r * INV2PI + muv.z, ang * INV2PI + muv.w);\n' +
+      '}\n' +
+      'vec3 blend(sampler2D tex, sampler2D lutT, vec4 col, vec4 mv, vec4 fx, vec4 ctl, vec4 f,\n' +
+      '           vec4 tile, vec4 pos, vec4 tint, vec4 lx, vec4 bl, vec2 uv, float te, vec3 acc){\n' +
+      '  if (ctl.w < 0.5) return acc;\n' +
+      '  vec4 muv = slotUV(mv, fx, ctl.x, tile, uv, te);\n' +
+      '  vec2 suv = (ctl.x > 3.5) ? polarUV(muv, fx.x, tile) : muv.xy;\n' +
+      '  vec4 tx = texture2D(tex, suv);\n' +
+      '  tx.rgb = (tx.rgb - 0.5) * tint.w + 0.5;\n' +
+      '  tx.rgb *= tint.rgb;\n' +
+      '  if (lx.x > 0.5){\n' +
+      '    float l = clamp(dot(tx.rgb, vec3(0.213, 0.715, 0.072)), 0.0, 1.0);\n' +
+      '    tx.rgb = texture2D(lutT, vec2(l, 0.5)).rgb;\n' +
+      '  }\n' +
+      '  float g = maskChVal(uv, f.y) * f.z * uDistCtl2.w * areaVal(uv, lx.y);\n' +
+      '  float a = tx.a * col.a * g;\n' +
+      '  float st = uGlob.x;\n' +
+      '  if (ctl.z > 0.5){\n' +
+      '    float w = 0.5 + 0.5 * sin(2.0 * PI * (f.x * te + pos.w));\n' +
+      '    float lo = fx.z, hi = fx.w;\n' +
+      '    if (pos.z > 0.5){ lo *= uGlob2.x; hi *= uGlob2.x; }\n' +
+      '    a *= lo + (hi - lo) * w;\n' +
+      '  }\n' +
+      '  if (bl.x > 0.5){\n' +
+      '    if (any(lessThan(suv, vec2(0.0))) || any(greaterThan(suv, vec2(1.0)))) return acc;\n' +
+      '    float per = max(bl.y, 0.05);\n' +
+      '    float halfD = clamp(bl.z * 0.5 / per, 0.001, 0.3);\n' +
+      '    float ph = fract((te + bl.w) / per);\n' +
+      '    float pulse = smoothstep(0.0, halfD, ph) * (1.0 - smoothstep(halfD, halfD * 2.0, ph));\n' +
+      '    float blinkA = smoothstep(0.10, 0.80, tx.a) * clamp(f.w, 0.0, 1.0) * pulse;\n' +
+      '    return mix(acc, tx.rgb, blinkA);\n' +
+      '  }\n' +
+      '  vec3 cMask  = tx.rgb * (col.rgb * g) * 2.0 * st;\n' +
+      '  vec3 cPlain = tx.rgb * col.rgb * 2.0 * st;\n' +
+      '  if (ctl.y > 2.5) return mix(acc, cPlain, a);\n' +
+      '  if (ctl.y > 1.5) return acc - cMask;\n' +
+      '  return acc + cMask;\n' +
+      '}\n' +
+      'void main(){\n' +
+      // 主体层网格可能小于整卡（文本型 contain 适配）：uv 换算到卡片坐标供特效/蒙版采样
+      '  vec2 uv = vUv;\n' +
+      '  if (uSubject > 0.5) uv = vUv * uMeshRect.zw + uMeshRect.xy;\n' +
+      '  if (roundedCard(uv, 0.032) > 0.0) discard;\n' +
+      '  vec2 faceUv = vUv;\n' +
+      '  if (uFaceContain > 0.5){\n' +
+      '    vec2 cardUv2 = (uv - 0.5) * max(uContentScale, 1e-4) + 0.5;\n' +
+      '    vec2 boxLo = uFaceBox.xy;\n' +
+      '    vec2 boxSize = max(uFaceBox.zw - uFaceBox.xy, vec2(1e-6));\n' +
+      '    vec2 inBox = (cardUv2 - boxLo) / boxSize;\n' +
+      '    if (inBox.x < 0.0 || inBox.x > 1.0 || inBox.y < 0.0 || inBox.y > 1.0) discard;\n' +
+      '    float boxAspect = boxSize.x * uAspect / boxSize.y;\n' +
+      '    float fa = max(uFaceAspect, 1e-6);\n' +
+      '    vec2 sc = vec2(min(1.0, fa / boxAspect), min(1.0, boxAspect / fa));\n' +
+      '    vec2 zc = sc * max(uContentScale, 1e-4);\n' +
+      '    faceUv = (inBox - 0.5) / zc + 0.5;\n' +
+      '    if (faceUv.x < 0.0 || faceUv.x > 1.0 || faceUv.y < 0.0 || faceUv.y > 1.0) discard;\n' +
+      '  }\n' +
+      '  float te = uTime * uGlob2.y;\n' +
+      '  vec2 disp = vec2(0.0);\n' +
+      '  if (uDistCtl2.y > 0.5){\n' +
+      '    float dmt = uDistCtl2.y;\n' +
+      '    vec4 muv = slotUV(vec4(uDistCtl.xy, uDistCtl.z, 0.0), vec4(0.0), dmt, uDistTile, uv, te);\n' +
+      '    vec2 duv = (dmt > 3.5) ? polarUV(muv, 0.0, uDistTile) : muv.xy;\n' +
+      '    vec2 d = texture2D(uDist, duv).rg - 0.5;\n' +
+      '    disp = clamp(d * vec2(uDistCtl.w, uDistCtl2.x), -0.06, 0.06);\n' +
+      '    disp *= maskChVal(uv, uGlob2.w);\n' +
+      '  }\n' +
+      // 主体层：按自身 uv 采样纹理（位移需换算回网格 uv 尺度），特效图案仍按卡片坐标采样
+      '  vec2 dispUv = (uSubject > 0.5) ? (disp * uMeshRect.zw) : disp;\n' +
+      '  vec2 fuv = faceUv + dispUv;\n' +
+      // 流动背景：只在「纯背景」掩码内给 UV 加慢速漂移 + 低频揉动。
+      // 掩码为 0（立绘/UI）处 fuv 不变 → 立绘/文字/图标原地不动；
+      // 只有一张贴图被揉，没有第二层覆盖，所以不会重影、也不会整体变亮。
+      '  if (uFlowAmt > 0.0) {\n' +
+      '    float fmask = texture2D(uFlowMask, faceUv).a;\n' +
+      '    if (fmask > 0.002) {\n' +
+      '      float ft = uTime * uFlowSpeed;\n' +
+      // 噪声当「角速度」，旋转 90° 得到旋涡：整卡净位移为 0，
+      // 所以背景是「原地翻涌」而不是「整张纸在平移」，冻结点也不会出现贴纸边。
+      '      vec2 n1 = texture2D(uFlowNoise, faceUv * vec2(0.62, 0.82)\n' +
+      '                             + vec2(ft * 0.052, -ft * 0.040)).rg - 0.5;\n' +
+      '      vec2 n2 = texture2D(uFlowNoise, faceUv * vec2(2.10, 2.70)\n' +
+      '                             + vec2(-ft * 0.095, ft * 0.072)).rg - 0.5;\n' +
+      '      vec2 sw = vec2(-n1.y, n1.x) * 0.0215 + vec2(-n2.y, n2.x) * 0.0062;\n' +
+      '      fuv += sw * fmask * uFlowAmt;\n' +
+      '    }\n' +
+      '  }\n' +
+      '  vec2 euv = (uSubject > 0.5) ? uv : faceUv;\n' +
+      '  vec4 mainTex = texture2D(uMain, fuv);\n' +
+      '  vec3 col = mainTex.rgb;\n' +
+      // 独立背景层存在时（卡面素材自带透明区），先在特效层内部合成背景底色，
+      // 否则 uMain 的透明像素（RGB=黑）会被当成不透明黑块盖住背景。
+      '  if (uBgOn > 0.5){\n' +
+      '    vec2 bv = uv;\n' +
+      '    if (uBgAspect > uAspect) { bv.x = (uv.x - 0.5) * (uAspect / uBgAspect) + 0.5; }\n' +
+      '    else { bv.y = (uv.y - 0.5) * (uBgAspect / uAspect) + 0.5; }\n' +
+      '    vec3 bgc = (uBgHasTex > 0.5) ? texture2D(uBgTex, clamp(bv, 0.001, 0.999)).rgb : uBgColor;\n' +
+      '    col = mix(bgc, mainTex.rgb, mainTex.a);\n' +
+      '  }\n' +
+      '  col = blend(uTex0, uLut0, uSlot0, uMove0, uFx0, uCtl0, uF0, uTile0, uPos0, uTint0, uLx0, uBlink0, euv, te, col);\n' +
+      '  col = blend(uTex1, uLut1, uSlot1, uMove1, uFx1, uCtl1, uF1, uTile1, uPos1, uTint1, uLx1, uBlink1, euv, te, col);\n' +
+      '  col = blend(uTex2, uLut2, uSlot2, uMove2, uFx2, uCtl2, uF2, uTile2, uPos2, uTint2, uLx2, uBlink2, euv, te, col);\n' +
+      '  col = blend(uTex3, uLut3, uSlot3, uMove3, uFx3, uCtl3, uF3, uTile3, uPos3, uTint3, uLx3, uBlink3, euv, te, col);\n' +
+      '  col = blend(uTex4, uLut4, uSlot4, uMove4, uFx4, uCtl4, uF4, uTile4, uPos4, uTint4, uLx4, uBlink4, euv, te, col);\n' +
+      '  vec3 c = col * uTone.z;\n' +
+      '  float knee = clamp(uTone.x, 0.05, 0.999);\n' +
+      '  if (uTone.y > 0.5){\n' +
+      '    vec3 over = max(c - knee, 0.0) / (1.0 - knee);\n' +
+      '    c = min(c, vec3(knee)) + (1.0 - knee) * (over / (over + 1.0));\n' +
+      '  }\n' +
+      '  if (uSheen.w > 0.5 && uSheen.y > 0.0){\n' +
+      '    vec2 dir = vec2(cos(uSheen.z), sin(uSheen.z));\n' +
+      '    float q = dot(uv - 0.5, dir) / 0.85 + 0.5;\n' +
+      '    float band = smoothstep(0.34, 0.0, abs(q - uSheen.x));\n' +
+      '    float k = clamp((q - (uSheen.x - 0.34)) / 0.68, 0.0, 1.0);\n' +
+      '    vec3 sc;\n' +
+      '    if (k < 0.25) sc = mix(uSheenA.rgb, uSheenB.rgb, k / 0.25);\n' +
+      '    else if (k < 0.5) sc = mix(uSheenB.rgb, uSheenC.rgb, (k - 0.25) / 0.25);\n' +
+      '    else if (k < 0.75) sc = mix(uSheenC.rgb, uSheenD.rgb, (k - 0.5) / 0.25);\n' +
+      '    else sc = mix(uSheenD.rgb, uSheenA.rgb, (k - 0.75) / 0.25);\n' +
+      '    c += sc * band * uSheen.y;\n' +
+      '  }\n' +
+      '  vec2 cardUv = (uv - 0.5) * max(uContentScale, 1e-4) + 0.5;\n' +
+      '  float a;\n' +
+      // 主体层（前景抠图）叠在整卡特效层之上：只按主体自身 alpha 绘制，
+      // 不套边框内蒙版、不合成背景，否则主体透明区会被整块盖黑。
+      '  if (uSubject > 0.5){\n' +
+      '    a = mainTex.a * uOpacity;\n' +
+      '  } else {\n' +
+      '    a = mix(1.0, texture2D(uInteriorMap, cardUv).a, uMaskClip);\n' +
+      // 没有独立背景层时跟随卡面自身 alpha（透明抠图卡不再被整块黑色特效层遮住）
+      '    if (uBgOn < 0.5) a *= mainTex.a;\n' +
+      '    a *= uOpacity;\n' +
+      '  }\n' +
+      '  gl_FragColor = vec4(clamp(c, 0.0, 1.0), a);\n' +
+      '}\n';
+
+    function foilBuild(def, opts) {
+      var o = opts || {};
+      var isSubj = !!o.subject;      // 主体层：只画前景抠图，不合成背景、不套边框蒙版
+      var mainTex = o.main || frontTexture;
+      var g = def.globals || {};
+      var d = def.dist || {};
+      var slots = def.slots || [];
+      var ord = slots.map(function (s, i) { return { s: s, i: i, l: (s._layer != null ? s._layer : (FOIL_ORDER[s.slot] == null ? 9 : FOIL_ORDER[s.slot])) }; })
+        .sort(function (a, b) { return a.l - b.l || a.i - b.i; })
+        .slice(0, 5);
+      var cm = (typeof cardMaterial !== 'undefined') ? cardMaterial.uniforms : null;
+      var interior = (typeof interiorTexture !== 'undefined') ? interiorTexture : foilWhite();
+      // 独立背景层（卡面素材自带透明区时由 _bg_layer_js 创建）：特效层内部合成该背景，
+      // 共享它的纹理 / 比例 / 底色 uniform，加载完成后自动跟随。
+      var bgMesh = (typeof window !== 'undefined' && window.__BG_LAYER__) ? window.__BG_LAYER__ : null;
+      var bgU = (bgMesh && bgMesh.material) ? bgMesh.material.uniforms : null;
+      var bgTex = (bgU && bgU.uBgTexture) ? bgU.uBgTexture.value : null;
+      var U = {
+        uTime: { value: 0 },
+        uMain: { value: mainTex },
+      uFlowMask: { value: (def.flow && def.flow.mask) ? foilLoad(def.flow.mask, true) : foilWhite() },
+      uFlowNoise: { value: (def.flow && def.flow.noise) ? foilLoad(def.flow.noise, false) : foilWhite() },
+      uFlowAmt: { value: (def.flow && def.flow.amt) ? def.flow.amt : 0.0 },
+      uFlowSpeed: { value: (def.flow && def.flow.speed) ? def.flow.speed : 1.0 },
+        uSubject: { value: isSubj ? 1 : 0 },
+        uOpacity: { value: o.opacity == null ? 1 : o.opacity },
+        uMask: { value: def.mask ? foilLoad(def.mask, true) : foilWhite() },
+        uDist: { value: (d.tex ? foilLoad(d.tex, false) : foilWhite()) },
+        uInteriorMap: { value: interior },
+        uBgOn: { value: (bgMesh && !isSubj) ? 1 : 0 },
+        uBgHasTex: { value: bgTex ? 1 : 0 },
+        uBgTex: { value: bgTex || foilWhite() },
+        uBgAspect: (bgU && bgU.uTexAspect) ? bgU.uTexAspect : { value: 1 },
+        uBgColor: (bgU && bgU.uColor) ? bgU.uColor : { value: new THREE.Color(0x0e0b09) },
+        // 卡面窗口（边框内沿 contain）：直接共享 cardMaterial 的 uniform 对象，
+        // 这样边框加载后异步重算的 uFaceBox/uFaceContain/uFaceAspect/uContentScale 会同步生效，
+        // 特效层始终跟随主卡面的取景映射，不会与边框内的画面错位。
+        uMaskClip: isSubj ? { value: 0.0 } : ((cm && cm.uMaskClip) ? cm.uMaskClip : { value: 1.0 }),
+        uAspect: { value: CARD_WIDTH / CARD_HEIGHT },
+        uFaceContain: isSubj ? { value: 0.0 } : ((cm && cm.uFaceContain) ? cm.uFaceContain : { value: 0.0 }),
+        uFaceAspect: (cm && cm.uFaceAspect) ? cm.uFaceAspect : { value: 1.0 },
+        uContentScale: (cm && cm.uContentScale) ? cm.uContentScale : { value: 1.0 },
+        uFaceBox: (cm && cm.uFaceBox) ? cm.uFaceBox : { value: v4(0, 0, 1, 1) },
+        uMeshRect: { value: v4(0, 0, 1, 1) },
+        uDistCtl: { value: v4(d.su, d.sv, d.sa, (d.iu || 0) * (g.distPow == null ? 1 : g.distPow)) },
+        uDistCtl2: { value: v4((d.iv || 0) * (g.distPow == null ? 1 : g.distPow), d.mt || 0, 0, (g.maskPow == null ? 1 : g.maskPow)) },
+        uDistTile: { value: v4(d.tx == null ? 1 : d.tx, d.ty == null ? 1 : d.ty, d.ox, d.oy) },
+        uGlob: { value: v4(g.fxPow == null ? 0.6 : g.fxPow, g.flashPow == null ? 1 : g.flashPow, 0, 0) },
+        uGlob2: { value: v4(g.blink == null ? 1 : g.blink, g.motionDir == null ? 1 : g.motionDir, def.mask ? 1 : 0, d.maskCh == null ? 4 : d.maskCh) },
+        uTone: { value: v4(g.toneKnee == null ? 0.85 : g.toneKnee, g.toneOn === 0 ? 0 : 1, g.exposure == null ? 1 : g.exposure, 0) },
+        uSheen: { value: v4(1.2, 0, (g.sheenAng || 0) * PI_JS / 180, 0) },
+        uSheenA: { value: v4(1, 1, 1, 1) },
+        uSheenB: { value: v4(1, 1, 1, 1) },
+        uSheenC: { value: v4(1, 1, 1, 1) },
+        uSheenD: { value: v4(1, 1, 1, 1) }
+      };
+      var pal = FOIL_SHEEN[g.sheen] || FOIL_SHEEN.rainbow;
+      U.uSheen.value.y = (g.sheen && g.sheen !== 'off') ? (g.sheenPow == null ? 0.25 : g.sheenPow) : 0;
+      U.uSheen.value.w = (U.uSheen.value.y > 0.0) ? 1.0 : 0.0;
+      U.uSheenA.value.set(pal[0][0], pal[0][1], pal[0][2], 1);
+      U.uSheenB.value.set(pal[1][0], pal[1][1], pal[1][2], 1);
+      U.uSheenC.value.set(pal[2][0], pal[2][1], pal[2][2], 1);
+      U.uSheenD.value.set(pal[3][0], pal[3][1], pal[3][2], 1);
+      for (var i = 0; i < 5; i++) {
+        U['uTex' + i] = { value: foilWhite() };
+        U['uLut' + i] = { value: foilWhite() };
+        U['uSlot' + i] = { value: v4(0, 0, 0, 0) };
+        U['uTile' + i] = { value: v4(1, 1, 0, 0) };
+        U['uMove' + i] = { value: v4(0, 0, 0, 0) };
+        U['uFx' + i] = { value: v4(0, 0, 0, 1) };
+        U['uCtl' + i] = { value: v4(1, 1, 0, 0) };
+        U['uF' + i] = { value: v4(1, 4, 0, 0) };
+        U['uPos' + i] = { value: v4(0, 0, 0, 0) };
+        U['uTint' + i] = { value: v4(1, 1, 1, 1) };
+        U['uLx' + i] = { value: v4(0, 0, 0, 0) };
+        U['uBlink' + i] = { value: v4(0, 0, 0, 0) };
+      }
+      ord.forEach(function (o, i) {
+        var s = o.s;
+        var c = s.color || [1, 1, 1, 1];
+        var tint = s.tint || [1, 1, 1];
+        U['uTex' + i].value = foilLoad(s.tex, s.slot === 'Middle');
+        U['uLut' + i].value = (s.lut && FOIL_LUT[s.lut]) ? foilLut(s.lut) : foilWhite();
+        U['uSlot' + i].value.set(c[0], c[1], c[2], c[3] == null ? 1 : c[3]);
+        U['uTile' + i].value.set(s.tx == null ? 1 : s.tx, s.ty == null ? 1 : s.ty, s.ox || 0, s.oy || 0);
+        U['uMove' + i].value.set(s.su || 0, s.sv || 0, s.sa || 0, (s.rot || 0) + (s.spin || 0) * PI_JS / 180);
+        U['uFx' + i].value.set(s.spiral || 0, s.fixrot || 0, s.fmin || 0, s.fmax == null ? 1 : s.fmax);
+        // 无贴图的槽位（如 tx_face_* 卡面差分在 cardforge 无对应素材）直接关闭，
+        // 否则会采样到 1×1 白贴图，加法混合会把整张卡面刷白。
+        U['uCtl' + i].value.set(s.mt == null ? 1 : s.mt, s.rt == null ? 1 : s.rt, s.flash ? 1 : 0,
+          (s.tex && s.en ? 1 : 0));
+        U['uF' + i].value.set(s.fspd == null ? 1 : s.fspd, s.maskCh == null ? 4 : s.maskCh, s.maskStr == null ? 1 : s.maskStr, s.blink ? (s.bpeak == null ? 1 : s.bpeak) : 0);
+        U['uPos' + i].value.set(0, 0, (s.slot === 'Middle') ? 1 : 0, s.foff || 0);
+        U['uLx' + i].value.set((s.lut && FOIL_LUT[s.lut]) ? 1 : 0, s.area || 0, 0, 0);
+        U['uBlink' + i].value.set(s.blink ? 1 : 0, s.bper == null ? 3.2 : s.bper, s.bdur == null ? 0.12 : s.bdur, s.bphase || 0);
+        U['uTint' + i].value.set(tint[0], tint[1], tint[2], s.contrast == null ? 1 : s.contrast);
+        U['uTex' + i].value.wrapS = U['uTex' + i].value.wrapT =
+          (s.slot === 'Middle') ? THREE.ClampToEdgeWrapping : THREE.RepeatWrapping;
+      });
+      var mat = new THREE.ShaderMaterial({
+        uniforms: U,
+        vertexShader: FOIL_VS,
+        fragmentShader: FOIL_FS,
+        transparent: true,
+        depthWrite: false,
+        side: THREE.FrontSide,
+        toneMapped: false
+      });
+      var mesh = new THREE.Mesh(new THREE.PlaneGeometry(CARD_WIDTH, CARD_HEIGHT), mat);
+      mesh.position.set(0, 0, o.z == null ? 0.004 : o.z);
+      mesh.renderOrder = o.renderOrder == null ? 1 : o.renderOrder;
+      var parent = o.parent || cardMesh;
+      parent.add(mesh);
+      return { mesh: mesh, uniforms: U, def: def, t: 0, speed: (g.speed == null ? 1 : g.speed), parent: parent };
+    }
+
+    function foilUpdate(fo, dt) {
+      fo.t += dt * (fo.speed || 1);
+      fo.uniforms.uTime.value = fo.t;
+      var g = fo.def.globals || {};
+      if (fo.uniforms.uSheen.value.w > 0.5) {
+        // 虹光扫光：每周期前 55% 扫过（1.2 → -0.2），其余时间停在起点外
+        var per = Math.max(1, g.sheenSpd == null ? 4.5 : g.sheenSpd);
+        var ph = (fo.t % per) / per;
+        var f = ph < 0.55 ? ph / 0.55 : 1;
+        var e = f * f * (3 - 2 * f);
+        fo.uniforms.uSheen.value.x = 1.2 - 1.4 * e;
+      }
+    }
+
+    // 前景主体（收集册成品卡的 foreground.png）浮在整卡特效层之上，不补这一层主体就没有特效。
+    // 主体纹理用 NoColorSpace 直通（与 frontTexture 一致），只按自身 alpha 绘制；
+    // mesh 挂在 foregroundGroup 内、紧跟 fgMesh 之后（低于描边层），随主体视差一起移动。
+    function foilBuildSubject(def) {
+      if (typeof foregroundGroup === 'undefined' || typeof fgMesh === 'undefined') return;
+      var img = foregroundTexture && foregroundTexture.image;
+      if (!img || !img.width) return;
+      if (foilSubj) { (foilSubj.parent || cardMesh).remove(foilSubj.mesh); foilSubj = null; }
+      var stex = new THREE.Texture();
+      stex.image = img;
+      stex.colorSpace = THREE.NoColorSpace;
+      stex.anisotropy = 8;
+      stex.needsUpdate = true;
+      foilSubj = foilBuild(def, {
+        main: stex,
+        parent: foregroundGroup,
+        subject: true,
+        z: fgMesh.position.z + 0.0002,
+        renderOrder: fgMesh.renderOrder + 0.02,
+        opacity: (fgMesh.material && fgMesh.material.opacity != null) ? fgMesh.material.opacity : 1
+      });
+      // 挂上 map 让文本型 contain 适配（_fg_adapt_js）能按源图比例同步缩放/定位本层
+      foilSubj.mesh.material.map = stex;
+      // 与整卡特效层保持同一动画相位
+      if (foilObj) foilSubj.t = foilObj.t;
+    }
+
+    function foilApply(list) {
+      if (typeof cardMesh === 'undefined' || typeof frontTexture === 'undefined') return;
+      if (foilObj) { (foilObj.parent || cardMesh).remove(foilObj.mesh); foilObj = null; }
+      if (foilSubj) { (foilSubj.parent || cardMesh).remove(foilSubj.mesh); foilSubj = null; }
+      foilSubjDef = null;
+      var item = null;
+      for (var i = 0; i < (list || []).length; i++) {
+        var dd = (list[i] || {}).def || {};
+        if (dd.engine === 'foil') { item = list[i]; break; }
+      }
+      if (item) {
+        foilObj = foilBuild(item.def);
+        if (typeof foregroundGroup !== 'undefined' && typeof fgMesh !== 'undefined') {
+          if (foregroundTexture && foregroundTexture.image && foregroundTexture.image.width) {
+            foilBuildSubject(item.def);
+          } else {
+            foilSubjDef = item.def;   // 纹理异步加载中：tick 里等就绪再建
+          }
+        }
+      }
     }
 
     return { init: init, tick: tick };
@@ -397,7 +895,7 @@ __THREE_JS__
 </script>
 <script>
 (function () {
-  const CARD_WIDTH = 2.25;
+  const CARD_WIDTH = __CARD_WIDTH__;
   const CARD_HEIGHT = 3;
   const MIN_DISTANCE = 2.7;
   const MAX_DISTANCE = 10.5;
@@ -447,6 +945,7 @@ __THREE_JS__
       uFaceContain: { value: 0.0 },
       uFaceBox: { value: new THREE.Vector4(0, 0, 1, 1) },
       uFaceAspect: { value: 1.0 },
+      __FLOW_UNIFORM_VALUES__
     },
     vertexShader: `
       varying vec2 vUv;
@@ -478,6 +977,7 @@ __THREE_JS__
       uniform float uFaceContain;
       uniform vec4 uFaceBox;
       uniform float uFaceAspect;
+      __FLOW_GLSL__
       varying vec2 vUv;
       varying vec3 vWorldNormal;
       varying vec3 vWorldPosition;
@@ -531,7 +1031,8 @@ __THREE_JS__
             faceUv = (inBox - 0.5) / zc + 0.5;
             if (faceUv.x < 0.0 || faceUv.x > 1.0 || faceUv.y < 0.0 || faceUv.y > 1.0) discard;
           }
-          base = texture2D(uFrontTexture, faceUv);
+          __FLOW_WARP__
+          base = texture2D(uFrontTexture, flowUv);
           // 边框内区域蒙版：正面内容仅绘制在边框外围以内（含中空）；卡背不受蒙版限制。
           // 卡面随 content_scale 缩放时（网格在 cardContent 组内），UV 需反算回卡片坐标，
           // 否则蒙版随卡面一起缩放导致边缘错位（采样点偏离真实卡片位置）
@@ -860,10 +1361,11 @@ __GLOW_INIT__
   tiltGroup.add(flipGroup);
 
   // 卡牌内容组：卡面/主体/特效锚点随 content_scale 缩放（背景/层1卡封/边框/文字/层2卡封整卡尺寸），
-  // 由界面"缩放"输入控制，默认 1.0 不缩放；卡面网格仅在卡面素材时随缩放组（背景底图不缩放）
+  "// 由界面\"缩放\"输入控制，默认 1.0 不缩放；卡面网格仅在卡面素材时随缩放组（背景底图不缩放）\n"
   const cardContent = new THREE.Group();
   flipGroup.add(cardContent);
 
+  window.__cardMat = cardMaterial;
   const cardMesh = new THREE.Mesh(new THREE.PlaneGeometry(CARD_WIDTH, CARD_HEIGHT), cardMaterial);
   flipGroup.add(cardMesh);
   const hitMeshes = [cardMesh];
@@ -1178,7 +1680,7 @@ __THREE_JS__
 </script>
 <script>
 (function () {
-  var CARD_WIDTH = 2.25;
+  var CARD_WIDTH = __CARD_WIDTH__;
   var CARD_HEIGHT = 3;
   var stage = document.getElementById('stage');
   var scene = new THREE.Scene();
@@ -2090,10 +2592,96 @@ def _seal_layer_js(effect: dict, front_strength: float = 0.945, back_strength: f
     )
 
 
+def _flow_layer_js(rel: str | None, strength: float = 0.62, speed: float = 1.0,
+                   warp: float = 1.0, z: float = 0.013, order: float = 5.05,
+                   parent: str = "flipGroup") -> str:
+    """卡面「流动背景」层：只有印刷背景在缓慢流动，立绘/文字/图标不动。
+
+    贴图是 `flow_bg.make_plate()` 生成的整卡尺寸 RGBA：
+        RGB = 只有印刷背景（底色 + 元素烟雾 + 版本图案 + 纸纹，无立绘/UI）
+        A   = 该像素**属于背景**的掩码（立绘/UI 处为 0）
+
+    采样方式决定了「静止时像素级不变」：
+        RGB 按**漂移后**的 UV 采样 → 内容在动；
+        A   按**原位** UV 采样     → 覆盖范围固定，不会绕着立绘漏色。
+    不漂移时覆盖层 = 底层逐像素相同，正常混合后画面完全不变（不会糊一层雾）。
+    慢速多正弦（周期 20~70s）+ 轻微缩放呼吸 + 涡流扰动 = 纸面下的雾在走。
+    """
+    if not rel:
+        return ""
+    vertex = (
+        "varying vec2 vUv;\n"
+        "void main() {\n"
+        "  vUv = uv;\n"
+        "  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);\n"
+        "}\n"
+    )
+    frag = (
+        "uniform sampler2D uMap;\n"
+        "uniform float uTime, uStrength, uSpeed, uWarp, uAspect;\n"
+        "varying vec2 vUv;\n"
+        "float flowRound(vec2 uv, float radius) {\n"
+        "  vec2 scaled = vec2((uv.x - 0.5) * uAspect, uv.y - 0.5);\n"
+        "  vec2 halfSize = vec2(0.5 * uAspect, 0.5);\n"
+        "  vec2 edge = abs(scaled) - (halfSize - vec2(radius));\n"
+        "  return length(max(edge, 0.0)) + min(max(edge.x, edge.y), 0.0) - radius;\n"
+        "}\n"
+        "void main() {\n"
+        "  if (flowRound(vUv, 0.032) > 0.0) discard;\n"
+        "  float t = uTime * uSpeed;\n"
+        "  vec2 p = vUv - 0.5;\n"
+        "  vec2 off = vec2(\n"
+        "    sin(t * 0.131) * 0.0165 + sin(t * 0.057 + 1.7) * 0.0085,\n"
+        "    cos(t * 0.113) * 0.0135 + sin(t * 0.041 + 0.4) * 0.0070);\n"
+        "  vec2 wob = vec2(sin(vUv.y * 4.2 + t * 0.29),\n"
+        "                  cos(vUv.x * 3.6 - t * 0.24)) * (0.0035 * uWarp);\n"
+        "  float sc = 1.0 + 0.008 * sin(t * 0.087);\n"
+        "  vec2 uv = p * sc + 0.5 + off + wob;\n"
+        "  vec3 c = texture2D(uMap, uv).rgb;\n"
+        "  float m = texture2D(uMap, vUv).a;\n"
+        "  gl_FragColor = vec4(c, m * uStrength);\n"
+        "}\n"
+    )
+    return (
+        "  (function () {\n"
+        "    var t = loader.load(" + json.dumps(rel) + ");\n"
+        "    t.colorSpace = THREE.NoColorSpace;\n"
+        "    t.anisotropy = 8;\n"
+        "    t.wrapS = THREE.MirroredRepeatWrapping;\n"
+        "    t.wrapT = THREE.MirroredRepeatWrapping;\n"
+        "    var flowMat = new THREE.ShaderMaterial({\n"
+        "      transparent: true,\n"
+        "      depthWrite: false,\n"
+        "      side: THREE.FrontSide,\n"
+        "      toneMapped: false,\n"
+        "      uniforms: {\n"
+        "        uMap: { value: t },\n"
+        "        uTime: { value: 0 },\n"
+        "        uStrength: { value: " + str(strength) + " },\n"
+        "        uSpeed: { value: " + str(speed) + " },\n"
+        "        uWarp: { value: " + str(warp) + " },\n"
+        "        uAspect: { value: CARD_WIDTH / CARD_HEIGHT },\n"
+        "      },\n"
+        "      vertexShader: " + json.dumps(vertex) + ",\n"
+        "      fragmentShader: " + json.dumps(frag) + ",\n"
+        "    });\n"
+        "    var flowMesh = new THREE.Mesh(new THREE.PlaneGeometry(CARD_WIDTH, CARD_HEIGHT), flowMat);\n"
+        "    flowMesh.position.set(0, 0, " + str(z) + ");\n"
+        "    flowMesh.renderOrder = " + str(order) + ";\n"
+        "    " + parent + ".add(flowMesh);\n"
+        "    (window.__flowMats = window.__flowMats || []).push(flowMat);\n"
+        "  })();\n"
+    )
+
+
 def _custom_seal_layer_js(rel: str | None, front_strength: float = 0.945, back_strength: float = 0.5775,
                           parent: str = "flipGroup", z: float = 0.02, order: float = 5.2,
                           mask_rel: str | None = None, front_only: bool = False,
-                          mask_canvas: str | None = None, mask_clip: bool = True) -> str:
+                          mask_canvas: str | None = None, mask_clip: bool = True,
+                          base: float = 0.55, amp: float = 0.45,
+                          tilt_gain: float = 0.045, blend_add: bool = False,
+                          tilt_lo: float = 0.12, tilt_hi: float = 0.6,
+                          sheen_base: float = 0.03, band_power: float = 4.0) -> str:
     """自定义 PNG 卡封动态光效层：整张贴图 + 随视角扫动的箔光带 + 彩虹色相迁移，正反双面显示。
 
     与内置膜（_seal_layer_js）相同的视角光效架构（sheen 基面 / edge 边缘菲涅尔 /
@@ -2115,9 +2703,10 @@ def _custom_seal_layer_js(rel: str | None, front_strength: float = 0.945, back_s
         "    vec4 tex = texture2D(uMap, vUv);\n"
         "    float pat = tex.a;\n"
         "    vec3 base = max(tex.rgb, vec3(0.03));\n"
-        "    float glow = min(sheen * 0.6 + edge * 0.9 + bandLight * (0.4 + 0.6 * pat), 1.0);\n"
+        "    float glow = min(sheen * (0.5 + 0.5 * pat) + edge * 0.9\n"
+        "                     + bandLight * (0.5 + 0.9 * pat), 1.0);\n"
         "    vec3 effColor = mix(base, sealHueColor(base, uRainbow * (along * 0.7 + vUv.x * 0.5 + vUv.y * 0.35)), min(1.0, uRainbow * 1.2));\n"
-        "    vec3 rgb = effColor * (0.55 + 0.45 * glow) * uStrength;\n"
+        "    vec3 rgb = effColor * (uBase + uAmp * glow) * uStrength;\n"
         "    float a = pat * (gl_FrontFacing ? uFrontStrength : uBackStrength);\n"
         "    gl_FragColor = vec4(rgb, a);\n"
     )
@@ -2156,6 +2745,8 @@ def _custom_seal_layer_js(rel: str | None, front_strength: float = 0.945, back_s
         "uniform float uRainbow;\n"
         "uniform float uFrontStrength;\n"
         "uniform float uBackStrength;\n"
+        "uniform float uBase;\n"
+        "uniform float uAmp;\n"
         "uniform sampler2D uMap;\n"
         "varying vec2 vUv;\n"
         "varying vec3 vWorldNormal;\n"
@@ -2201,8 +2792,9 @@ def _custom_seal_layer_js(rel: str | None, front_strength: float = 0.945, back_s
         "  float along = dot(refl2, brush);\n"
         "  float across = dot(refl2, vec2(-brush.y, brush.x));\n"
         "  float tiltAmt = 1.0 - facing;\n"
-        "  float bandLight = pow(max(0.0, along), uPower) * smoothstep(0.12, 0.6, tiltAmt);\n"
-        "  float sheen = 0.03 + 0.045 * smoothstep(0.1, 0.7, tiltAmt);\n"
+        "  float tiltG = smoothstep(" + str(tilt_lo) + ", " + str(tilt_hi) + ", tiltAmt);\n"
+        "  float bandLight = pow(max(0.0, along), uPower) * tiltG;\n"
+        "  float sheen = " + str(sheen_base) + " + " + str(tilt_gain) + " * tiltG;\n"
         "  float edge = fres * 0.18;\n"
         + frag + mask_frag
         + "  }\n"
@@ -2232,15 +2824,18 @@ def _custom_seal_layer_js(rel: str | None, front_strength: float = 0.945, back_s
         "      transparent: true,\n"
         "      depthWrite: false,\n"
         + ("      side: THREE.FrontSide,\n" if front_only else "      side: THREE.DoubleSide,\n")
+        + ("      blending: THREE.AdditiveBlending,\n" if blend_add else "")
         + "      toneMapped: false,\n"
         "      uniforms: {\n"
         "        uAspect: { value: CARD_WIDTH / CARD_HEIGHT },\n"
         "        uStrength: { value: " + str(strength) + " },\n"
-        "        uPower: { value: " + str(power) + " },\n"
+        "        uPower: { value: " + str(band_power) + " },\n"
         "        uDir: { value: new THREE.Vector2(" + str(d0) + ", " + str(d1) + ") },\n"
         "        uRainbow: { value: " + str(rainbow) + " },\n"
         "        uFrontStrength: { value: " + str(front_strength) + " },\n"
         "        uBackStrength: { value: " + str(back_strength) + " },\n"
+        "        uBase: { value: " + str(base) + " },\n"
+        "        uAmp: { value: " + str(amp) + " },\n"
         "        uMap: { value: t },\n"
         + ("        uFrameMap: { value: sealFrameTex },\n" if (mask_rel or mask_canvas) else "")
         + ("        uInteriorMap: { value: interiorTexture },\n" if (mask_rel or mask_canvas) else "")
@@ -2258,8 +2853,60 @@ def _custom_seal_layer_js(rel: str | None, front_strength: float = 0.945, back_s
     )
 
 
+
+def _detail_layer_js(rel: str | None, z: float = 0.030, order: float = 6.0) -> str:
+    """主体层：立绘 + 三圆图标 + 边框 + 文字，叠在**所有卡封之上**。
+
+    卡封因此不再需要抠主体轮廓/图标洞（那要逐卡掩码，1800 张不可能维护）。
+    用 raw ShaderMaterial + NoColorSpace 直通采样，和卡面贴图（front.png）
+    完全同一条色彩路径，颜色与 2D 卡面逐像素一致。
+    """
+    if not rel:
+        return ""
+    vert = (
+        "varying vec2 vUv;\n"
+        "void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }\n"
+    )
+    frag = (
+        "uniform sampler2D uMap;\n"
+        "varying vec2 vUv;\n"
+        "void main() { gl_FragColor = texture2D(uMap, vUv); }\n"
+    )
+    return (
+        "(function () {\n"
+        "  var t = new THREE.TextureLoader().load(" + json.dumps(rel) + ");\n"
+        "  t.colorSpace = THREE.NoColorSpace;\n"
+        "  t.anisotropy = 8;\n"
+        "  t.minFilter = THREE.LinearMipmapLinearFilter;\n"
+        "  var m = new THREE.ShaderMaterial({\n"
+        "    uniforms: { uMap: { value: t } },\n"
+        "    vertexShader: " + json.dumps(vert) + ",\n"
+        "    fragmentShader: " + json.dumps(frag) + ",\n"
+        "    transparent: true, depthWrite: false, depthTest: true,\n"
+        "    blending: THREE.NormalBlending\n"
+        "  });\n"
+        "  var mesh = new THREE.Mesh(new THREE.PlaneGeometry(CARD_WIDTH, CARD_HEIGHT), m);\n"
+        "  mesh.position.set(0, 0, " + str(z) + ");\n"
+        "  mesh.renderOrder = " + str(order) + ";\n"
+        "  flipGroup.add(mesh);\n"
+        "  window.__detailMesh = mesh;\n"
+        "})();\n"
+    )
+
+
 _SEAL_TICK_JS = (
     "  // 膜光效完全由视角驱动（拖动旋转触发）：无时间动画、无指针光球，杜绝频闪\n"
+    "  // 例外：流动背景层只让**印刷背景**随时间漂移（立绘/UI 由掩码固定），\n"
+    "  // 慢速多正弦、无亮度脉动，不会自闪。\n"
+    "  if (typeof cardMaterial !== 'undefined' && cardMaterial.uniforms.uFlowTime) {\n"
+    "    cardMaterial.uniforms.uFlowTime.value += dt;\n"
+    "  }\n"
+    "  if (window.__flowMats) {\n"
+    "    for (var _fi = 0; _fi < window.__flowMats.length; _fi++) {\n"
+    "      var _fm = window.__flowMats[_fi];\n"
+    "      if (_fm && _fm.uniforms && _fm.uniforms.uTime) _fm.uniforms.uTime.value += dt;\n"
+    "    }\n"
+    "  }\n"
 )
 
 # 辉光每帧更新：动画时间推进 + 卡面朝向（1=正对视角，供菲涅尔描边使用）
@@ -2695,7 +3342,7 @@ FG_ROUND_JS = r"""
       ctx.arcTo(0, 0, r, 0, r);
       ctx.closePath();
       ctx.fill();
-      // three.js 对"创建纹理后再改画布尺寸"的重传不可靠，故加载完成后新建画布再挂载
+      "// three.js 对\"创建纹理后再改画布尺寸\"的重传不可靠，故加载完成后新建画布再挂载\n"
       t.image = nv;
       t.needsUpdate = true;
     }
@@ -2737,6 +3384,7 @@ def _bg_layer_js(rel: str | None, face_scales: bool) -> str:
             "    loader.load(" + json.dumps(rel) + ", function (t) { bgMat.uniforms.uTexAspect.value = t.image.width / t.image.height; });\n"
             "    var bgMesh = new THREE.Mesh(new THREE.PlaneGeometry(CARD_WIDTH, CARD_HEIGHT), bgMat);\n"
             "    bgMesh.position.z = -0.004; bgMesh.renderOrder = -2; flipGroup.add(bgMesh);\n"
+            "    window.__BG_LAYER__ = bgMesh;\n"
             "  })();\n"
         )
     return (
@@ -2757,6 +3405,7 @@ def _bg_layer_js(rel: str | None, face_scales: bool) -> str:
         "    });\n"
         "    var bgMesh = new THREE.Mesh(new THREE.PlaneGeometry(CARD_WIDTH, CARD_HEIGHT), bgMat);\n"
         "    bgMesh.position.z = -0.004; bgMesh.renderOrder = -2; flipGroup.add(bgMesh);\n"
+        "    window.__BG_LAYER__ = bgMesh;\n"
         "  })();\n"
     )
 
@@ -2822,6 +3471,20 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
                     outline_rel: str | None = None,
                     seal_strength_front: float = 0.945,
                     seal_strength_back: float = 0.5775,
+                    seal_base: float = 0.55,
+                    seal_amp: float = 0.45,
+                    seal_tilt: float = 0.045,
+                    seal_add: bool = False,
+                    seal_tilt_lo: float = 0.12,
+                    seal_tilt_hi: float = 0.6,
+                    seal_sheen_base: float = 0.03,
+                    seal_band_power: float = 4.0,
+                    seal_extra: list | None = None,
+    detail_rel: str | None = None,
+                    flow_mask_rel: str | None = None,
+                    flow_noise_rel: str | None = None,
+                    flow_amt: float = 0.0,
+                    flow_speed: float = 1.0,
                     seal_frame_strength_front: float = 0.8,
                     seal_frame_strength_back: float = 0.5,
                     content_scale: float = 1.0,
@@ -2833,7 +3496,8 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
                     glow_strength: float = 1.0,
                     glow_boost: float = 1.0,
                     follow_bg: bool = False,
-                    bg_follow_rel: str | None = None) -> str:
+                    bg_follow_rel: str | None = None,
+                    card_width: float = 2.25) -> str:
     """生成自包含 3D 卡网页 HTML。
 
     effects: 特效实例列表 [{"name":..., "def": {...}, "pos": {...}}]，def 为完整特效参数。
@@ -2862,6 +3526,8 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
     主体精确遮盖背景原主体；另垫虚化整卡底填充文本区留白（与 2D follow_bg 一致）。
     bg_follow_rel: 预适配的背景跟随图相对路径（与前景主体同尺寸同几何，任意源图比例下
     主体都能像素级遮盖背景原主体）。
+    card_width: 3D 卡体的宽（卡高恒为 3），默认 2.25（3:4）。卡面比例不同
+    （如 Rip It! 游戏的 1465×2048 ≈ 5:7 → 2.25）时传入对应值，避免卡面被拉伸。
     """
     three_js = THREE_JS.read_text(encoding="utf-8")
     fg_js = (
@@ -2898,7 +3564,12 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
         seal_layer = _custom_seal_layer_js(seal_rel, seal_strength_front, seal_strength_back,
                                            parent="flipGroup", z=0.008, order=3.5,
                                            front_only=bool(frame_rel), mask_canvas=seal1_mask,
-                                           mask_clip=mask_clip)
+                                           mask_clip=mask_clip,
+                                           base=seal_base, amp=seal_amp,
+                                           tilt_gain=seal_tilt, blend_add=seal_add,
+                                           tilt_lo=seal_tilt_lo, tilt_hi=seal_tilt_hi,
+                                           sheen_base=seal_sheen_base,
+                                           band_power=seal_band_power)
     if seal_layer:
         # 亚光膜（matte）几乎无箔光高光（更哑光），其余卡封默认箔光弱化一半
         seal_u = 0.12 if (effect and effect.get("mode") == "matte") else 0.5
@@ -2954,9 +3625,87 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
         "  bgFollowTexture.anisotropy = 8;\n"
     ) if bg_follow_rel else ""
     offset_js = _subject_offset_js(subject_offset_x, subject_offset_y)
+    # 多层卡封叠加（seal_extra）：每层独立着色器，各有自己的倾角窗口/强度。
+    # 用途：官方的卡面光是「边光 + 扫光 + 细闪」几层叠出来的，不是单层。
+    # 流动背景：卡面 shader 采样 UV 时只在**纯背景**区域做位移（掩码来自 2D 背景图），
+    # 所以立绘/文字/图标原地不动，同一张贴图被「揉动」——没有第二层，不会重影。
+    flow_glsl = ""
+    flow_warp = "vec2 flowUv = faceUv;\n"
+    flow_uniform_values = ""
+    if flow_mask_rel and flow_amt > 0.0:
+        flow_glsl = (
+            "      uniform sampler2D uFlowMask;\n"
+            "      uniform sampler2D uFlowNoise;\n"
+            "      uniform float uFlowAmt;\n"
+            "      uniform float uFlowSpeed;\n"
+            "      uniform float uFlowTime;\n"
+        )
+        flow_warp = (
+            "          vec2 flowUv = faceUv;\n"
+            "          {\n"
+            "            float fm = texture2D(uFlowMask, faceUv).a;\n"
+            "            if (fm > 0.002) {\n"
+            "              float ft = uFlowTime * uFlowSpeed;\n"
+            "// 噪声当角速度旋转 90° → 纯旋涡，无整体平移（否则像整张纸在滑）\n"
+            "              vec2 n1 = texture2D(uFlowNoise, faceUv * vec2(0.62, 0.82)\n"
+            "                                   + vec2(ft * 0.052, -ft * 0.040)).rg - 0.5;\n"
+            "              vec2 n2 = texture2D(uFlowNoise, faceUv * vec2(2.10, 2.70)\n"
+            "                                   + vec2(-ft * 0.095, ft * 0.072)).rg - 0.5;\n"
+            "              vec2 sw = vec2(-n1.y, n1.x) * 0.0215 + vec2(-n2.y, n2.x) * 0.0062;\n"
+            "              flowUv = faceUv + sw * fm * uFlowAmt;\n"
+            "            }\n"
+            "          }\n"
+        )
+        flow_uniform_values = (
+            "      uFlowMask: { value: loader.load(" + json.dumps(flow_mask_rel) + ") },\n"
+            "      uFlowNoise: { value: (function () {\n"
+            "        var nt = loader.load(" + json.dumps(flow_noise_rel or "") + ");\n"
+            "        nt.wrapS = THREE.RepeatWrapping; nt.wrapT = THREE.RepeatWrapping;\n"
+            "        nt.colorSpace = THREE.NoColorSpace;\n"
+            "        return nt;\n"
+            "      })() },\n"
+            "      uFlowAmt: { value: " + str(flow_amt) + " },\n"
+            "      uFlowSpeed: { value: " + str(flow_speed) + " },\n"
+            "      uFlowTime: { value: 0 },\n"
+        )
+
+    detail_layer = _detail_layer_js(detail_rel)
+
+    seal_extra_layer = ""
+    for _i, _ex in enumerate(seal_extra or []):
+        if not _ex or not _ex.get("rel"):
+            continue
+        if _ex.get("kind") == "flow":
+            seal_extra_layer += _flow_layer_js(
+                _ex["rel"],
+                float(_ex.get("strength", 0.62)),
+                float(_ex.get("speed", 1.0)),
+                float(_ex.get("warp", 1.0)),
+                z=float(_ex.get("z", 0.013)),
+                order=float(_ex.get("order", 5.05)),
+            )
+            continue
+        seal_extra_layer += _custom_seal_layer_js(
+            _ex["rel"],
+            float(_ex.get("front_strength", 1.0)),
+            float(_ex.get("back_strength", 0.0)),
+            parent="flipGroup",
+            z=float(_ex.get("z", 0.010 + 0.0015 * _i)),
+            order=float(_ex.get("order", 4.0 + 0.2 * _i)),
+            front_only=bool(_ex.get("front_only", True)),
+            base=float(_ex.get("base", 0.1)),
+            amp=float(_ex.get("amp", 1.0)),
+            tilt_gain=float(_ex.get("tilt", 0.5)),
+            blend_add=bool(_ex.get("add", True)),
+            tilt_lo=float(_ex.get("tilt_lo", 0.004)),
+            tilt_hi=float(_ex.get("tilt_hi", 0.06)),
+            sheen_base=float(_ex.get("sheen_base", 0.02)),
+            band_power=float(_ex.get("band_power", 2.0)),
+        )
     return (
         CARD_HTML_TEMPLATE
         .replace("__THREE_JS__", three_js)
+        .replace("__CARD_WIDTH__", ("%g" % round(card_width, 6)))
         .replace("__CARD_NAME__", name)
         .replace("__FRONT__", front_rel)
         .replace("__FOREGROUND__", foreground_rel)
@@ -2970,7 +3719,11 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
         .replace("__FG_ROUND_JS__", FG_ROUND_JS if round_foreground else "")
         .replace("__OUTLINE_LAYER__", outline_layer)
         .replace("__FRAME_LAYER__", frame_layer)
-        .replace("__SEAL_LAYER__", seal_layer + seal_frame_layer + scale_js + mask_js + offset_js)
+        .replace("__FLOW_GLSL__", flow_glsl)
+        .replace("__FLOW_WARP__", flow_warp)
+        .replace("__FLOW_UNIFORM_VALUES__", flow_uniform_values)
+        .replace("__SEAL_LAYER__", seal_layer + seal_frame_layer + seal_extra_layer
+                 + detail_layer + scale_js + mask_js + offset_js)
         .replace("__SEAL_TICK__", _SEAL_TICK_JS)
         .replace("__GLOW_TICK__", _GLOW_TICK_JS)
         .replace("__GLOW_INIT__", _glow_init_js(glow_name, glow_strength, glow_boost))

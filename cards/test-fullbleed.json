@@ -1,0 +1,23 @@
+{
+  "id": "test-fullbleed",
+  "name": "测试-整幅卡面",
+  "description": "",
+  "style": "full-bleed",
+  "engine": "local(birefnet-massive)",
+  "source": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\test-fullbleed\\source.png",
+  "front": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\test-fullbleed\\front.png",
+  "foreground": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\test-fullbleed\\foreground.png",
+  "back": "assets/backs/three-kingdoms-back.png",
+  "layers": {
+    "background": null,
+    "face": null,
+    "frame": null,
+    "effect": null
+  },
+  "text": {
+    "title": null,
+    "description": null
+  },
+  "card_size": "900x1200",
+  "composed": true
+}

@@ -1,0 +1,60 @@
+{
+  "id": "卡封多层测试",
+  "name": "卡封多层测试",
+  "description": "",
+  "style": "transparent",
+  "engine": "assembly",
+  "source": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\卡封多层测试\\front.png",
+  "front": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\卡封多层测试\\front.png",
+  "foreground": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\卡封多层测试\\foreground.png",
+  "back": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\backs\\ripit-card-back.png",
+  "layers": {
+    "background": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\卡封多层测试\\front.png",
+    "face": null,
+    "frame": null,
+    "seal": null
+  },
+  "text": {
+    "title": "卡封多层测试",
+    "description": "",
+    "type": "none",
+    "pos": null
+  },
+  "composed": false,
+  "assembly": true,
+  "subject_over_frame": false,
+  "subject_outline": false,
+  "mask_clip": false,
+  "card_scale": 1.0,
+  "background_scale": 1.0,
+  "frame_scale": 1.0,
+  "subject_name": null,
+  "subject_offset_x": 0.0,
+  "subject_offset_y": 0.0,
+  "seal_strength_front": 0.945,
+  "seal_strength_back": 0.5775,
+  "seal_frame_strength_front": 0.8,
+  "seal_frame_strength_back": 0.5,
+  "seal_name": null,
+  "seal_frame_name": null,
+  "seal_frame_same": false,
+  "frame_name": null,
+  "back_name": "ripit-card-back.png",
+  "face_name": null,
+  "background_name": null,
+  "glow_name": "none",
+  "glow_strength": 0.0,
+  "effects": [],
+  "seal_extra": [
+    {
+      "seal": "ripit-rarity-rare.png",
+      "front": 0.85,
+      "back": 0.0
+    },
+    {
+      "seal": "ripit-rarity-mythic.png",
+      "front": 0.45,
+      "back": 0.3
+    }
+  ]
+}

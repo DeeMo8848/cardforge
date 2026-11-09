@@ -84,5 +84,10 @@
       "add": true,
       "front_only": true
     }
-  ]
+  ],
+  "smoke": {
+    "amt": 0.0,
+    "speed": 1.0,
+    "flow": false
+  }
 }

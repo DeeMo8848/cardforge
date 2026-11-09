@@ -2894,6 +2894,112 @@ def _detail_layer_js(rel: str | None, z: float = 0.030, order: float = 6.0) -> s
     )
 
 
+def _pattern_layer_js(rel: str | None, z: float = 0.014, order: float = 4.6) -> str:
+    """版本图案层（闪卡星点 / αβΩ 字样 / Promo 花纹）。
+
+    以前这些图案印在卡面底图里，3D 上又叠了一份卡封 → αβΩ 出现两份。
+    现在单独成层：加色混合（RGB 已经是「该加多少光」，黑底合成出来的），
+    位置在烟雾之上、主体层之下 —— 立绘照样把它遮住，与游戏一致。
+    """
+    if not rel:
+        return ""
+    vert = (
+        "varying vec2 vUv;\n"
+        "void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }\n"
+    )
+    frag = (
+        "uniform sampler2D uMap;\n"
+        "varying vec2 vUv;\n"
+        "void main() { vec4 c = texture2D(uMap, vUv); gl_FragColor = vec4(c.rgb, 1.0); }\n"
+    )
+    return (
+        "(function () {\n"
+        "  var t = new THREE.TextureLoader().load(" + json.dumps(rel) + ");\n"
+        "  t.colorSpace = THREE.NoColorSpace;\n"
+        "  t.anisotropy = 8;\n"
+        "  t.minFilter = THREE.LinearMipmapLinearFilter;\n"
+        "  var m = new THREE.ShaderMaterial({\n"
+        "    uniforms: { uMap: { value: t } },\n"
+        "    vertexShader: " + json.dumps(vert) + ",\n"
+        "    fragmentShader: " + json.dumps(frag) + ",\n"
+        "    transparent: true, depthWrite: false, depthTest: true,\n"
+        "    blending: THREE.AdditiveBlending\n"
+        "  });\n"
+        "  var mesh = new THREE.Mesh(new THREE.PlaneGeometry(CARD_WIDTH, CARD_HEIGHT), m);\n"
+        "  mesh.position.set(0, 0, " + str(z) + ");\n"
+        "  mesh.renderOrder = " + str(order) + ";\n"
+        "  flipGroup.add(mesh);\n"
+        "})();\n"
+    )
+
+
+def _smoke_layer_js(rel: str | None, noise_rel: str | None = None,
+                    strength: float = 1.0, speed: float = 1.0, amt: float = 1.0,
+                    z: float = 0.008, order: float = 3.0) -> str:
+    """元素烟雾层（元素底纹）。amt>0 时做「无净平移的旋涡位移」。
+
+    位移用噪声梯度旋转 90° 当角速度（curl），净位移为 0 —— 是原地翻涌，
+    不是整块平面平移，所以底座与图案不会跟着走。amt=0 时原样直通（普通版不流动）。
+    """
+    if not rel:
+        return ""
+    moving = bool(noise_rel) and amt > 0.0
+    if not moving:
+        return _detail_layer_js(rel, z=z, order=order)
+    vert = (
+        "varying vec2 vUv;\n"
+        "void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }\n"
+    )
+    frag = (
+        "uniform sampler2D uMap;\n"
+        "uniform sampler2D uNoise;\n"
+        "uniform float uTime, uSpeed, uAmt, uAspect;\n"
+        "varying vec2 vUv;\n"
+        "float smokeRound(vec2 uv, float radius) {\n"
+        "  vec2 scaled = vec2((uv.x - 0.5) * uAspect, uv.y - 0.5);\n"
+        "  vec2 halfSize = vec2(0.5 * uAspect, 0.5);\n"
+        "  vec2 edge = abs(scaled) - (halfSize - vec2(radius));\n"
+        "  return length(max(edge, 0.0)) + min(max(edge.x, edge.y), 0.0) - radius;\n"
+        "}\n"
+        "void main() {\n"
+        "  if (smokeRound(vUv, 0.032) > 0.0) discard;\n"
+        "  float ft = uTime * uSpeed;\n"
+        "  vec2 n1 = texture2D(uNoise, vUv * vec2(0.62, 0.82) + vec2(ft * 0.052, -ft * 0.040)).rg - 0.5;\n"
+        "  vec2 n2 = texture2D(uNoise, vUv * vec2(2.10, 2.70) + vec2(-ft * 0.095, ft * 0.072)).rg - 0.5;\n"
+        "  vec2 sw = vec2(-n1.y, n1.x) * 0.0215 + vec2(-n2.y, n2.x) * 0.0062;\n"
+        "  vec2 uv = clamp(vUv + sw * uAmt, 0.0, 1.0);\n"
+        "  vec4 c = texture2D(uMap, uv);\n"
+        "  gl_FragColor = vec4(c.rgb, c.a * " + str(float(strength)) + ");\n"
+        "}\n"
+    )
+    return (
+        "(function () {\n"
+        "  var t = new THREE.TextureLoader().load(" + json.dumps(rel) + ");\n"
+        "  t.colorSpace = THREE.NoColorSpace;\n"
+        "  t.anisotropy = 8;\n"
+        "  t.minFilter = THREE.LinearMipmapLinearFilter;\n"
+        "  var nt = new THREE.TextureLoader().load(" + json.dumps(noise_rel) + ");\n"
+        "  nt.wrapS = THREE.RepeatWrapping; nt.wrapT = THREE.RepeatWrapping;\n"
+        "  nt.colorSpace = THREE.NoColorSpace;\n"
+        "  var m = new THREE.ShaderMaterial({\n"
+        "    uniforms: { uMap: { value: t }, uNoise: { value: nt },\n"
+        "      uTime: { value: 0 }, uSpeed: { value: " + str(float(speed)) + " },\n"
+        "      uAmt: { value: " + str(float(amt)) + " },\n"
+        "      uAspect: { value: CARD_WIDTH / CARD_HEIGHT } },\n"
+        "    vertexShader: " + json.dumps(vert) + ",\n"
+        "    fragmentShader: " + json.dumps(frag) + ",\n"
+        "    transparent: true, depthWrite: false, depthTest: true,\n"
+        "    blending: THREE.NormalBlending\n"
+        "  });\n"
+        "  var mesh = new THREE.Mesh(new THREE.PlaneGeometry(CARD_WIDTH, CARD_HEIGHT), m);\n"
+        "  mesh.position.set(0, 0, " + str(z) + ");\n"
+        "  mesh.renderOrder = " + str(order) + ";\n"
+        "  flipGroup.add(mesh);\n"
+        "  (window.__flowMats = window.__flowMats || []).push(m);\n"
+        "})();\n"
+    )
+
+
 _SEAL_TICK_JS = (
     "  // 膜光效完全由视角驱动（拖动旋转触发）：无时间动画、无指针光球，杜绝频闪\n"
     "  // 例外：流动背景层只让**印刷背景**随时间漂移（立绘/UI 由掩码固定），\n"
@@ -3480,7 +3586,14 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
                     seal_sheen_base: float = 0.03,
                     seal_band_power: float = 4.0,
                     seal_extra: list | None = None,
-    detail_rel: str | None = None,
+                    detail_rel: str | None = None,
+                    smoke_rel: str | None = None,
+                    smoke_noise_rel: str | None = None,
+                    smoke_amt: float = 0.0,
+                    smoke_speed: float = 1.0,
+                    smoke_strength: float = 1.0,
+                    pattern_rel: str | None = None,
+                    text_rel: str | None = None,
                     flow_mask_rel: str | None = None,
                     flow_noise_rel: str | None = None,
                     flow_amt: float = 0.0,
@@ -3669,7 +3782,16 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
             "      uFlowTime: { value: 0 },\n"
         )
 
+    # 图层叠放（从纸到人眼）：
+    #   底图(z0) → 烟雾(z0.008) → 版本图案(z0.014) → 卡封1(z0.010~) → 主体(z0.030)
+    #   → 卡封2 稀有度框(z0.034) → 文字(z0.036)
+    smoke_layer = _smoke_layer_js(smoke_rel, smoke_noise_rel,
+                                  strength=float(smoke_strength),
+                                  speed=float(smoke_speed),
+                                  amt=float(smoke_amt))
+    pattern_layer = _pattern_layer_js(pattern_rel)
     detail_layer = _detail_layer_js(detail_rel)
+    text_layer = _detail_layer_js(text_rel, z=0.036, order=7.5)
 
     seal_extra_layer = ""
     for _i, _ex in enumerate(seal_extra or []):
@@ -3723,7 +3845,8 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
         .replace("__FLOW_WARP__", flow_warp)
         .replace("__FLOW_UNIFORM_VALUES__", flow_uniform_values)
         .replace("__SEAL_LAYER__", seal_layer + seal_frame_layer + seal_extra_layer
-                 + detail_layer + scale_js + mask_js + offset_js)
+                 + detail_layer + text_layer + smoke_layer + pattern_layer
+                 + scale_js + mask_js + offset_js)
         .replace("__SEAL_TICK__", _SEAL_TICK_JS)
         .replace("__GLOW_TICK__", _GLOW_TICK_JS)
         .replace("__GLOW_INIT__", _glow_init_js(glow_name, glow_strength, glow_boost))

@@ -33,7 +33,7 @@
   "slots": [
     {
       "slot": "Front1",
-      "tex": "ri_air-cat-01a-foil_Stars_Mask",
+      "tex": null,
       "color": [
         0.62,
         0.66,
@@ -76,7 +76,8 @@
       "bper": 3.2,
       "bdur": 0.12,
       "bpeak": 1,
-      "bphase": 0
+      "bphase": 0,
+      "on": 0
     },
     {
       "slot": "Front2",
@@ -125,11 +126,5 @@
       "bpeak": 0.85,
       "bphase": 0
     }
-  ],
-  "flow": {
-    "mask": "flow_air-cat-01a-foil_mask.png",
-    "noise": "flow_noise.png",
-    "amt": 1.7,
-    "speed": 3.2
-  }
+  ]
 }

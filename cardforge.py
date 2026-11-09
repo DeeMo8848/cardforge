@@ -439,6 +439,13 @@ def make_card(
     seal_band_power: float = 4.0,
     seal_extra: list | None = None,
     detail: str | None = None,
+    smoke: str | None = None,
+    smoke_amt: float = 0.0,
+    smoke_speed: float = 1.0,
+    smoke_strength: float = 1.0,
+    smoke_noise: str | None = None,
+    pattern: str | None = None,
+    text_layer: str | None = None,
     flow_mask_rel: str | None = None,
     flow_noise_rel: str | None = None,
     flow_amt: float = 1.0,
@@ -724,6 +731,31 @@ def make_card(
         if _dp.exists():
             shutil.copy(_dp, out_dir / "detail.png")
             detail_rel = "detail.png"
+    # 分层素材：烟雾（可流动，静止在主体之下）、版本图案（归卡封组）、文字（最上层）
+    smoke_rel = None
+    if smoke:
+        _sp = Path(smoke)
+        if _sp.exists():
+            shutil.copy(_sp, out_dir / "smoke.png")
+            smoke_rel = "smoke.png"
+    smoke_noise_rel = None
+    if smoke_noise:
+        _np = Path(smoke_noise)
+        if _np.exists():
+            shutil.copy(_np, out_dir / "smoke_noise.png")
+            smoke_noise_rel = "smoke_noise.png"
+    pattern_rel = None
+    if pattern:
+        _pp = Path(pattern)
+        if _pp.exists() and _pp.stat().st_size > 0:
+            shutil.copy(_pp, out_dir / "pattern.png")
+            pattern_rel = "pattern.png"
+    text_rel = None
+    if text_layer:
+        _tp = Path(text_layer)
+        if _tp.exists():
+            shutil.copy(_tp, out_dir / "text.png")
+            text_rel = "text.png"
     # 边框内区域蒙版：整卡内容仅绘制在边框外围以内（3D shader 裁剪，与 2D 一致）
     interior_rel = None
     if frame_path:
@@ -752,6 +784,13 @@ def make_card(
                         seal_band_power=seal_band_power,
                         seal_extra=seal_extra_resolved,
                         detail_rel=detail_rel,
+                        smoke_rel=smoke_rel,
+                        smoke_noise_rel=smoke_noise_rel,
+                        smoke_amt=float(smoke_amt),
+                        smoke_speed=float(smoke_speed),
+                        smoke_strength=float(smoke_strength),
+                        pattern_rel=pattern_rel,
+                        text_rel=text_rel,
                         flow_mask_rel=flow_mask_out,
                         flow_noise_rel=flow_noise_out,
                         flow_amt=float(flow_amt),

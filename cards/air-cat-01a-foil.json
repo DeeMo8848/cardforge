@@ -85,10 +85,9 @@
       "front_only": true
     }
   ],
-  "flow_bg": {
-    "mask": "flow_air-cat-01a-foil_mask.png",
-    "noise": "flow_noise.png",
+  "smoke": {
     "amt": 1.7,
-    "speed": 3.2
+    "speed": 3.2,
+    "flow": true
   }
 }

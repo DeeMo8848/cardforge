@@ -30,11 +30,5 @@
     "oy": 0.0,
     "maskCh": 4
   },
-  "slots": [],
-  "flow": {
-    "mask": "flow_air-cat-01a-promo_mask.png",
-    "noise": "flow_noise.png",
-    "amt": 1.5,
-    "speed": 3.0
-  }
+  "slots": []
 }

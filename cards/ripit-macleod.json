@@ -1,7 +1,7 @@
 {
   "id": "ripit-macleod",
-  "name": "喵祥云 Macleod",
-  "description": "Air / Rare / No.081-140　听说每片云里都藏着这样一只喵。",
+  "name": "喵祥云 Macleod · 普通",
+  "description": "Air / Rare / 普通版 / No.081　听说每片云里都藏着这样一只喵。",
   "style": "full-bleed",
   "engine": "不使用抠图",
   "source": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\ripit-macleod\\source.png",
@@ -42,5 +42,6 @@
   "seal_frame_same": false,
   "card_scale": 1.0,
   "glow_name": "none",
-  "glow_strength": 0.0
+  "glow_strength": 0.0,
+  "edition": "Normal"
 }

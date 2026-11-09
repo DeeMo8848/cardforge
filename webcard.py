@@ -568,7 +568,7 @@ EFFECT_ENGINE_JS = r"""
       // 掩码为 0（立绘/UI）处 fuv 不变 → 立绘/文字/图标原地不动；
       // 只有一张贴图被揉，没有第二层覆盖，所以不会重影、也不会整体变亮。
       '  if (uFlowAmt > 0.0) {\n' +
-      '    float fmask = texture2D(uFlowMask, faceUv).a;\n' +
+      '    float fmask = smoothstep(0.02, 0.55, texture2D(uFlowMask, faceUv).a);\n' +
       '    if (fmask > 0.002) {\n' +
       '      float ft = uTime * uFlowSpeed;\n' +
       // 噪声当「角速度」，旋转 90° 得到旋涡：整卡净位移为 0，
@@ -578,7 +578,8 @@ EFFECT_ENGINE_JS = r"""
       '      vec2 n2 = texture2D(uFlowNoise, faceUv * vec2(2.10, 2.70)\n' +
       '                             + vec2(-ft * 0.095, ft * 0.072)).rg - 0.5;\n' +
       '      vec2 sw = vec2(-n1.y, n1.x) * 0.0215 + vec2(-n2.y, n2.x) * 0.0062;\n' +
-      '      fuv += sw * fmask * uFlowAmt;\n' +
+      '      float ef = smoothstep(0.0, 0.055, min(min(faceUv.x, 1.0 - faceUv.x), min(faceUv.y, 1.0 - faceUv.y)));\n' +
+      '      fuv += sw * fmask * ef * uFlowAmt;\n' +
       '    }\n' +
       '  }\n' +
       '  vec2 euv = (uSubject > 0.5) ? uv : faceUv;\n' +
@@ -626,6 +627,9 @@ EFFECT_ENGINE_JS = r"""
       '    a = mix(1.0, texture2D(uInteriorMap, cardUv).a, uMaskClip);\n' +
       // 没有独立背景层时跟随卡面自身 alpha（透明抠图卡不再被整块黑色特效层遮住）
       '    if (uBgOn < 0.5) a *= mainTex.a;\n' +
+      // 卡体圆角：整卡网格是矩形，底图也是满幅矩形，不裁就会在圆角外露出直角小方块。
+      // 与 cardMaterial 同一个函数、同一个半径（0.032），两条渲染路径轮廓才一致。
+      '    a *= mix(1.0, clamp(-roundedCard(vUv, 0.032) / 0.004, 0.0, 1.0), uMaskClip);\n' +
       '    a *= uOpacity;\n' +
       '  }\n' +
       '  gl_FragColor = vec4(clamp(c, 0.0, 1.0), a);\n' +
@@ -1357,6 +1361,7 @@ __GLOW_INIT__
   const floatGroup = new THREE.Group();
   const tiltGroup = new THREE.Group();
   const flipGroup = new THREE.Group();
+  window.__flipGroup = flipGroup;
   floatGroup.add(tiltGroup);
   tiltGroup.add(flipGroup);
 
@@ -2869,8 +2874,13 @@ def _detail_layer_js(rel: str | None, z: float = 0.030, order: float = 6.0) -> s
     )
     frag = (
         "uniform sampler2D uMap;\n"
+        "uniform float uAspect;\n"
         "varying vec2 vUv;\n"
-        "void main() { gl_FragColor = texture2D(uMap, vUv); }\n"
+        "float cardRound(vec2 uv, float r) {\n  vec2 sc = vec2((uv.x - 0.5) * uAspect, uv.y - 0.5);\n  vec2 hs = vec2(0.5 * uAspect, 0.5) - vec2(r);\n  vec2 e = abs(sc) - hs;\n  return length(max(e, 0.0)) + min(max(e.x, e.y), 0.0) - r;\n}\n"
+        "void main() {\n"
+"  if (cardRound(vUv, 0.032) > 0.0) discard;\n"
+        "  gl_FragColor = texture2D(uMap, vUv);\n"
+        "}\n"
     )
     return (
         "(function () {\n"
@@ -2879,7 +2889,7 @@ def _detail_layer_js(rel: str | None, z: float = 0.030, order: float = 6.0) -> s
         "  t.anisotropy = 8;\n"
         "  t.minFilter = THREE.LinearMipmapLinearFilter;\n"
         "  var m = new THREE.ShaderMaterial({\n"
-        "    uniforms: { uMap: { value: t } },\n"
+        "    uniforms: { uMap: { value: t }, uAspect: { value: CARD_WIDTH / CARD_HEIGHT } },\n"
         "    vertexShader: " + json.dumps(vert) + ",\n"
         "    fragmentShader: " + json.dumps(frag) + ",\n"
         "    transparent: true, depthWrite: false, depthTest: true,\n"
@@ -2909,8 +2919,13 @@ def _pattern_layer_js(rel: str | None, z: float = 0.014, order: float = 4.6) -> 
     )
     frag = (
         "uniform sampler2D uMap;\n"
+        "uniform float uAspect;\n"
         "varying vec2 vUv;\n"
-        "void main() { vec4 c = texture2D(uMap, vUv); gl_FragColor = vec4(c.rgb, 1.0); }\n"
+        "float cardRound(vec2 uv, float r) {\n  vec2 sc = vec2((uv.x - 0.5) * uAspect, uv.y - 0.5);\n  vec2 hs = vec2(0.5 * uAspect, 0.5) - vec2(r);\n  vec2 e = abs(sc) - hs;\n  return length(max(e, 0.0)) + min(max(e.x, e.y), 0.0) - r;\n}\n"
+        "void main() {\n"
+        "  if (cardRound(vUv, 0.032) > 0.0) discard;\n"
+        "  vec4 c = texture2D(uMap, vUv); gl_FragColor = vec4(c.rgb, 1.0);\n"
+        "}\n"
     )
     return (
         "(function () {\n"
@@ -2967,7 +2982,8 @@ def _smoke_layer_js(rel: str | None, noise_rel: str | None = None,
         "  vec2 n1 = texture2D(uNoise, vUv * vec2(0.62, 0.82) + vec2(ft * 0.052, -ft * 0.040)).rg - 0.5;\n"
         "  vec2 n2 = texture2D(uNoise, vUv * vec2(2.10, 2.70) + vec2(-ft * 0.095, ft * 0.072)).rg - 0.5;\n"
         "  vec2 sw = vec2(-n1.y, n1.x) * 0.0215 + vec2(-n2.y, n2.x) * 0.0062;\n"
-        "  vec2 uv = clamp(vUv + sw * uAmt, 0.0, 1.0);\n"
+        "  float ef = smoothstep(0.0, 0.06, min(min(vUv.x, 1.0 - vUv.x), min(vUv.y, 1.0 - vUv.y)));\n"
+        "  vec2 uv = clamp(vUv + sw * uAmt * ef, 0.0, 1.0);\n"
         "  vec4 c = texture2D(uMap, uv);\n"
         "  gl_FragColor = vec4(c.rgb, c.a * " + str(float(strength)) + ");\n"
         "}\n"
@@ -3756,7 +3772,7 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
         flow_warp = (
             "          vec2 flowUv = faceUv;\n"
             "          {\n"
-            "            float fm = texture2D(uFlowMask, faceUv).a;\n"
+            "            float fm = smoothstep(0.02, 0.55, texture2D(uFlowMask, faceUv).a);\n"
             "            if (fm > 0.002) {\n"
             "              float ft = uFlowTime * uFlowSpeed;\n"
             "// 噪声当角速度旋转 90° → 纯旋涡，无整体平移（否则像整张纸在滑）\n"
@@ -3765,7 +3781,8 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
             "              vec2 n2 = texture2D(uFlowNoise, faceUv * vec2(2.10, 2.70)\n"
             "                                   + vec2(-ft * 0.095, ft * 0.072)).rg - 0.5;\n"
             "              vec2 sw = vec2(-n1.y, n1.x) * 0.0215 + vec2(-n2.y, n2.x) * 0.0062;\n"
-            "              flowUv = faceUv + sw * fm * uFlowAmt;\n"
+            "              float ef = smoothstep(0.0, 0.055, min(min(faceUv.x, 1.0 - faceUv.x), min(faceUv.y, 1.0 - faceUv.y)));\n"
+            "              flowUv = faceUv + sw * fm * ef * uFlowAmt;\n"
             "            }\n"
             "          }\n"
         )

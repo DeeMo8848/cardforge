@@ -2267,7 +2267,7 @@ def _seal_layer_js(effect: dict, front_strength: float = 0.945, back_strength: f
         frag = (
             tile_code
             + twinkle_code
-            + "    glow = min(glow, 1.0);\n"
+            + "    glow = 1.0 - exp(-1.25 * max(glow, 0.0));\n"
             + "    vec3 effColor = mix(uColor, sealHueColor(uColor, uRainbow * (along * 0.7 + vUv.x * 0.5 + vUv.y * 0.35)), min(1.0, uRainbow * 1.2));\n"
             + "    gl_FragColor = vec4(effColor * glow * uStrength, 1.0);\n"
         )
@@ -2340,7 +2340,7 @@ def _seal_layer_js(effect: dict, front_strength: float = 0.945, back_strength: f
             + "    float osc = 0.5 + 0.5 * sin(along * 8.0 + rnd2 * 6.2831);\n"
             + "    float twinkle = step(0.90, rnd) * (0.08 + 0.5 * osc + 0.5 * smoothstep(0.12, 0.6, tiltAmt)) * " + kk + ";\n"
             + "    float glow = sheen + edge * 0.9 + bandLight * 0.55 + pat * (0.12 + 1.15 * bandLight) + twinkle;\n"
-            + "    glow = min(glow, 1.0);\n"
+            + "    glow = 1.0 - exp(-1.25 * max(glow, 0.0));\n"
             + "    vec3 effColor = mix(uColor, sealHueColor(uColor, uRainbow * (along * 0.7 + vUv.x * 0.5 + vUv.y * 0.35)), min(1.0, uRainbow * 1.2));\n"
             + "    gl_FragColor = vec4(effColor * glow * uStrength, 1.0);\n"
         )
@@ -2369,7 +2369,7 @@ def _seal_layer_js(effect: dict, front_strength: float = 0.945, back_strength: f
             "    float fill = 0.3 + 0.7 * smoothstep(0.12, 0.6, tiltAmt) * (0.5 + 0.5 * sin(along * 6.0 + h2 * 6.2831));\n"
             "    float seam = 1.0 - smoothstep(0.0, 2.2 / uScale, edgeD);\n"
             "    float glow = (sheen + edge * 0.9 + bandLight * 0.55 + fill * 0.85) * (1.0 - 0.9 * seam);\n"
-            "    glow = min(glow, 1.0);\n"
+            "    glow = 1.0 - exp(-1.25 * max(glow, 0.0));\n"
             "    vec3 effColor = mix(uColor, sealHueColor(uColor, uRainbow * (along * 0.7 + h)), min(1.0, uRainbow * 1.2));\n"
             "    gl_FragColor = vec4(effColor * glow * uStrength, 1.0);\n"
         )
@@ -2379,7 +2379,7 @@ def _seal_layer_js(effect: dict, front_strength: float = 0.945, back_strength: f
             "    float lobe = pow(max(0.0, abs(dot(refl2, perp))), uPower);\n"
             "    float stripe = pow(max(0.0, 0.5 + 0.5 * sin(dot(vUv, perp) * uScale * 4.0 + along * 4.0)), 3.5);\n"
             "    float glow = sheen + edge * 0.9 + bandLight * (0.45 + 0.55 * stripe) + lobe * bandLight * 0.4;\n"
-            "    glow = min(glow, 1.0);\n"
+            "    glow = 1.0 - exp(-1.25 * max(glow, 0.0));\n"
             "    vec3 effColor = mix(uColor, sealHueColor(uColor, uRainbow * (along * 0.8 + dot(vUv, perp) * 0.6)), uRainbow);\n"
             "    gl_FragColor = vec4(effColor * glow * uStrength, 1.0);\n"
         )
@@ -2390,7 +2390,7 @@ def _seal_layer_js(effect: dict, front_strength: float = 0.945, back_strength: f
             "    float hue = fract(sweep * 1.7 + fres * 0.3);\n"
             "    vec3 col = sealHsv2rgb(vec3(hue, 0.85, 1.0));\n"
             "    float glow = sheen * 1.2 + edge * 1.1 + (0.2 + 1.15 * bandLight) * (0.42 + 0.58 * sweepBand);\n"
-            "    glow = min(glow, 1.0);\n"
+            "    glow = 1.0 - exp(-1.25 * max(glow, 0.0));\n"
             "    gl_FragColor = vec4(col * glow * uStrength, 1.0);\n"
         )
     elif mode == "matte":
@@ -2398,7 +2398,7 @@ def _seal_layer_js(effect: dict, front_strength: float = 0.945, back_strength: f
         frag = (
             "    float matteN = 0.5 + 0.5 * sin(vUv.x * 80.0 * uGrain + vUv.y * 97.0 * uGrain + along * 1.8);\n"
             "    float glow = 0.10 + 0.20 * facing + matteN * 0.07 + fres * 0.08;\n"
-            "    glow = min(glow, 1.0);\n"
+            "    glow = 1.0 - exp(-1.25 * max(glow, 0.0));\n"
             "    gl_FragColor = vec4(uColor * glow * uStrength, 1.0);\n"
         )
     else:  # glow
@@ -2409,7 +2409,7 @@ def _seal_layer_js(effect: dict, front_strength: float = 0.945, back_strength: f
             "    n += sin((vUv.x + vUv.y) * 150.0 * uGrain) * 0.5;\n"
             "    n = n / 3.0 + 0.5;\n"
             "    float glow = sheen + edge * 0.9 + bandLight * (0.4 + 0.35 * n);\n"
-            "    glow = min(glow, 1.0);\n"
+            "    glow = 1.0 - exp(-1.25 * max(glow, 0.0));\n"
             "    vec3 effColor = mix(uColor, sealHueColor(uColor, uRainbow * (along * 0.6 + vUv.x * 0.5 + vUv.y * 0.4)), min(1.0, uRainbow * 1.2));\n"
             "    gl_FragColor = vec4(effColor * glow * uStrength, 1.0);\n"
         )
@@ -2708,8 +2708,10 @@ def _custom_seal_layer_js(rel: str | None, front_strength: float = 0.945, back_s
         "    vec4 tex = texture2D(uMap, vUv);\n"
         "    float pat = tex.a;\n"
         "    vec3 base = max(tex.rgb, vec3(0.03));\n"
-        "    float glow = min(sheen * (0.5 + 0.5 * pat) + edge * 0.9\n"
-        "                     + bandLight * (0.5 + 0.9 * pat), 1.0);\n"
+        # 平滑饱和：min(...,1.0) 的硬截断会在卡面拉出一条随视角扫动的直线
+        "    float glowRaw = sheen * (0.5 + 0.5 * pat) + edge * 0.9\n"
+        "                     + bandLight * (0.5 + 0.9 * pat);\n"
+        "    float glow = 1.0 - exp(-1.25 * max(glowRaw, 0.0));\n"
         "    vec3 effColor = mix(base, sealHueColor(base, uRainbow * (along * 0.7 + vUv.x * 0.5 + vUv.y * 0.35)), min(1.0, uRainbow * 1.2));\n"
         "    vec3 rgb = effColor * (uBase + uAmp * glow) * uStrength;\n"
         "    float a = pat * (gl_FrontFacing ? uFrontStrength : uBackStrength);\n"
@@ -2950,70 +2952,93 @@ def _pattern_layer_js(rel: str | None, z: float = 0.014, order: float = 4.6) -> 
 
 def _smoke_layer_js(rel: str | None, noise_rel: str | None = None,
                     strength: float = 1.0, speed: float = 1.0, amt: float = 1.0,
-                    z: float = 0.008, order: float = 3.0) -> str:
-    """元素烟雾层（元素底纹）。amt>0 时做「无净平移的旋涡位移」。
+                    z: float = 0.008, order: float = 3.0,
+                    veil_rel: str | None = None, veil_strength: float = 0.26,
+                    veil_tint=(0.62, 0.80, 1.0), veil_tile: float = 1.7) -> str:
+    """元素烟雾层 = **静止**底纹 + **滚动**流云（官方 slotUV 的做法）。
 
-    位移用噪声梯度旋转 90° 当角速度（curl），净位移为 0 —— 是原地翻涌，
-    不是整块平面平移，所以底座与图案不会跟着走。amt=0 时原样直通（普通版不流动）。
+    底纹不动：它是元素背景印刷，四边 alpha 只有中部的 1/4，不可平铺；
+    任何位移都只能在卡边 clamp 采样，拉出「从右往左 / 从下往上」的扫描线。
+
+    流动交给上面那层 `tx_foil_smoke.png`：官方箔贴图本来就是无缝的，
+    RepeatWrapping + fract 滚动 → 真流动，且永远不越界、不会有边界线。
+    amt=0（普通版）时只出静止底纹。
     """
     if not rel:
         return ""
-    moving = bool(noise_rel) and amt > 0.0
-    if not moving:
-        return _detail_layer_js(rel, z=z, order=order)
+    out = _detail_layer_js(rel, z=z, order=order)
+    if not (veil_rel and amt > 0.0):
+        return out
+
     vert = (
         "varying vec2 vUv;\n"
         "void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }\n"
     )
     frag = (
-        "uniform sampler2D uMap;\n"
+        "uniform sampler2D uVeil;\n"
         "uniform sampler2D uNoise;\n"
-        "uniform float uTime, uSpeed, uAmt, uAspect;\n"
+        "uniform vec3 uTint;\n"
+        "uniform float uTime, uSpeed, uAmt, uStrength, uAspect, uTile;\n"
         "varying vec2 vUv;\n"
-        "float smokeRound(vec2 uv, float radius) {\n"
+        "float veilRound(vec2 uv, float radius) {\n"
         "  vec2 scaled = vec2((uv.x - 0.5) * uAspect, uv.y - 0.5);\n"
         "  vec2 halfSize = vec2(0.5 * uAspect, 0.5);\n"
         "  vec2 edge = abs(scaled) - (halfSize - vec2(radius));\n"
         "  return length(max(edge, 0.0)) + min(max(edge.x, edge.y), 0.0) - radius;\n"
         "}\n"
         "void main() {\n"
-        "  if (smokeRound(vUv, 0.032) > 0.0) discard;\n"
-        "  float ft = uTime * uSpeed;\n"
-        "  vec2 n1 = texture2D(uNoise, vUv * vec2(0.62, 0.82) + vec2(ft * 0.052, -ft * 0.040)).rg - 0.5;\n"
-        "  vec2 n2 = texture2D(uNoise, vUv * vec2(2.10, 2.70) + vec2(-ft * 0.095, ft * 0.072)).rg - 0.5;\n"
-        "  vec2 sw = vec2(-n1.y, n1.x) * 0.0215 + vec2(-n2.y, n2.x) * 0.0062;\n"
-        "  float ef = smoothstep(0.0, 0.06, min(min(vUv.x, 1.0 - vUv.x), min(vUv.y, 1.0 - vUv.y)));\n"
-        "  vec2 uv = clamp(vUv + sw * uAmt * ef, 0.0, 1.0);\n"
-        "  vec4 c = texture2D(uMap, uv);\n"
-        "  gl_FragColor = vec4(c.rgb, c.a * " + str(float(strength)) + ");\n"
+        "  if (veilRound(vUv, 0.032) > 0.0) discard;\n"
+        "  float ft = uTime * uSpeed * uAmt;\n"
+        # 两组平铺尺度 + 反向滚动：任何时刻都有两层错位的云在走，看不出重复
+        "  vec2 uv1 = vUv * vec2(uTile, uTile * 1.34) + vec2(ft * 0.058, -ft * 0.031);\n"
+        "  vec2 uv2 = vUv * vec2(uTile * 0.73, uTile * 0.95) + vec2(-ft * 0.041, ft * 0.026);\n"
+        # 官方 `blend()` 里箔层的强度取的是 RGB 亮度（贴图 alpha 全是 255），
+        # 这里照做：黑色处不加，白色处加，形状才跟游戏一致
+        "  vec3 c1 = texture2D(uVeil, uv1).rgb;\n"
+        "  vec3 c2 = texture2D(uVeil, uv2).rgb;\n"
+        "  float l1 = dot(c1, vec3(0.2126, 0.7152, 0.0722));\n"
+        "  float l2 = dot(c2, vec3(0.2126, 0.7152, 0.0722));\n"
+        "  float a = l1 * 0.62 + l2 * 0.38;\n"
+        # 噪声只调制浓度（翻涌），不调制亮度 → 不会整体忽明忽暗
+        "  float n = texture2D(uNoise, vUv * 0.9 + vec2(ft * 0.045, -ft * 0.034)).r;\n"
+        "  a *= uStrength * (0.55 + 0.70 * n);\n"
+        # 乘法输出：没雾的地方是纯白（不动），有雾的地方朝阴影色压一点
+        "  gl_FragColor = vec4(mix(vec3(1.0), uTint, clamp(a, 0.0, 1.0)), 1.0);\n"
         "}\n"
     )
-    return (
+    tint = tuple(float(x) for x in veil_tint)
+    out += (
         "(function () {\n"
-        "  var t = new THREE.TextureLoader().load(" + json.dumps(rel) + ");\n"
-        "  t.colorSpace = THREE.NoColorSpace;\n"
-        "  t.anisotropy = 8;\n"
-        "  t.minFilter = THREE.LinearMipmapLinearFilter;\n"
-        "  var nt = new THREE.TextureLoader().load(" + json.dumps(noise_rel) + ");\n"
-        "  nt.wrapS = THREE.RepeatWrapping; nt.wrapT = THREE.RepeatWrapping;\n"
+        "  var vt = new THREE.TextureLoader().load(" + json.dumps(veil_rel) + ");\n"
+        "  vt.wrapS = THREE.RepeatWrapping; vt.wrapT = THREE.RepeatWrapping;\n"
+        "  vt.colorSpace = THREE.NoColorSpace;\n"
+        "  vt.anisotropy = 8;\n"
+        "  vt.minFilter = THREE.LinearMipmapLinearFilter;\n"
+        "  var nt = new THREE.TextureLoader().load(" + json.dumps(noise_rel or veil_rel) + ");\n"
+        # 噪声是我们自己生成的，四边不连续 → 用镜像包裹，避免接缝变成一条硬边
+        "  nt.wrapS = THREE.MirroredRepeatWrapping; nt.wrapT = THREE.MirroredRepeatWrapping;\n"
         "  nt.colorSpace = THREE.NoColorSpace;\n"
         "  var m = new THREE.ShaderMaterial({\n"
-        "    uniforms: { uMap: { value: t }, uNoise: { value: nt },\n"
-        "      uTime: { value: 0 }, uSpeed: { value: " + str(float(speed)) + " },\n"
-        "      uAmt: { value: " + str(float(amt)) + " },\n"
+        "    uniforms: { uVeil: { value: vt }, uNoise: { value: nt },\n"
+        "      uTint: { value: new THREE.Vector3(%f, %f, %f) },\n"
+        "      uTime: { value: 0 }, uSpeed: { value: %f },\n"
+        "      uAmt: { value: %f }, uStrength: { value: %f },\n"
+        "      uTile: { value: %f },\n"
         "      uAspect: { value: CARD_WIDTH / CARD_HEIGHT } },\n"
         "    vertexShader: " + json.dumps(vert) + ",\n"
         "    fragmentShader: " + json.dumps(frag) + ",\n"
         "    transparent: true, depthWrite: false, depthTest: true,\n"
-        "    blending: THREE.NormalBlending\n"
+        "    blending: THREE.MultiplyBlending\n"
         "  });\n"
         "  var mesh = new THREE.Mesh(new THREE.PlaneGeometry(CARD_WIDTH, CARD_HEIGHT), m);\n"
-        "  mesh.position.set(0, 0, " + str(z) + ");\n"
-        "  mesh.renderOrder = " + str(order) + ";\n"
+        "  mesh.position.set(0, 0, " + str(z + 0.002) + ");\n"
+        "  mesh.renderOrder = " + str(order + 0.1) + ";\n"
         "  flipGroup.add(mesh);\n"
         "  (window.__flowMats = window.__flowMats || []).push(m);\n"
         "})();\n"
-    )
+    ) % (tint[0], tint[1], tint[2], float(speed), float(amt),
+         float(veil_strength), float(veil_tile))
+    return out
 
 
 _SEAL_TICK_JS = (
@@ -3604,6 +3629,10 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
                     seal_extra: list | None = None,
                     detail_rel: str | None = None,
                     smoke_rel: str | None = None,
+                    smoke_veil_rel: str | None = None,
+                    smoke_veil_strength: float = 0.26,
+                    smoke_veil_tint=(0.62, 0.80, 1.0),
+                    smoke_veil_tile: float = 1.7,
                     smoke_noise_rel: str | None = None,
                     smoke_amt: float = 0.0,
                     smoke_speed: float = 1.0,
@@ -3805,7 +3834,11 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
     smoke_layer = _smoke_layer_js(smoke_rel, smoke_noise_rel,
                                   strength=float(smoke_strength),
                                   speed=float(smoke_speed),
-                                  amt=float(smoke_amt))
+                                  amt=float(smoke_amt),
+                                  veil_rel=smoke_veil_rel,
+                                  veil_strength=float(smoke_veil_strength),
+                                  veil_tint=smoke_veil_tint,
+                                  veil_tile=float(smoke_veil_tile))
     pattern_layer = _pattern_layer_js(pattern_rel)
     detail_layer = _detail_layer_js(detail_rel)
     text_layer = _detail_layer_js(text_rel, z=0.036, order=7.5)

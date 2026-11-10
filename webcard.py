@@ -571,13 +571,17 @@ EFFECT_ENGINE_JS = r"""
       '    float fmask = smoothstep(0.02, 0.55, texture2D(uFlowMask, faceUv).a);\n' +
       '    if (fmask > 0.002) {\n' +
       '      float ft = uTime * uFlowSpeed;\n' +
-      // 噪声当「角速度」，旋转 90° 得到旋涡：整卡净位移为 0，
-      // 所以背景是「原地翻涌」而不是「整张纸在平移」，冻结点也不会出现贴纸边。
-      '      vec2 n1 = texture2D(uFlowNoise, faceUv * vec2(0.62, 0.82)\n' +
-      '                             + vec2(ft * 0.052, -ft * 0.040)).rg - 0.5;\n' +
-      '      vec2 n2 = texture2D(uFlowNoise, faceUv * vec2(2.10, 2.70)\n' +
-      '                             + vec2(-ft * 0.095, ft * 0.072)).rg - 0.5;\n' +
-      '      vec2 sw = vec2(-n1.y, n1.x) * 0.0215 + vec2(-n2.y, n2.x) * 0.0062;\n' +
+      // 低频噪声旋涡（原来的手法）单看几乎看不出：整幅印刷画是平滑的大色块，
+      // 揉动只让像素差 4/255，眼睛当成「本来就长这样」。
+      // 所以再加两组**行波**：正弦相位随时间推进，位移场的波峰在卡面上跑，
+      // 明暗交界被推着走 → 一眼看出在流。正弦净积分为 0，整幅图不会被推偏。
+      '      vec2 q = vec2(faceUv.x * uAspect, faceUv.y);\n' +
+      '      vec2 w1 = vec2(sin(q.y * 13.0 + ft * 2.20), cos(q.x * 10.5 - ft * 1.90));\n' +
+      '      vec2 w2 = vec2(sin((q.x + q.y) * 21.0 - ft * 3.40),\n' +
+      '                     cos((q.x - q.y) * 17.0 + ft * 3.00));\n' +
+      '      vec2 n1 = texture2D(uFlowNoise, faceUv * vec2(1.25, 1.60)\n' +
+      '                             + vec2(ft * 0.140, -ft * 0.115)).rg - 0.5;\n' +
+      '      vec2 sw = w1 * 0.0210 + w2 * 0.0090 + n1 * 0.0130;\n' +
       '      float ef = smoothstep(0.0, 0.055, min(min(faceUv.x, 1.0 - faceUv.x), min(faceUv.y, 1.0 - faceUv.y)));\n' +
       '      fuv += sw * fmask * ef * uFlowAmt;\n' +
       '    }\n' +

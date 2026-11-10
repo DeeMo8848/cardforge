@@ -2989,19 +2989,21 @@ def _smoke_layer_js(rel: str | None, noise_rel: str | None = None,
         "void main() {\n"
         "  if (veilRound(vUv, 0.032) > 0.0) discard;\n"
         "  float ft = uTime * uSpeed * uAmt;\n"
-        # 两组平铺尺度 + 反向滚动：任何时刻都有两层错位的云在走，看不出重复
-        "  vec2 uv1 = vUv * vec2(uTile, uTile * 1.34) + vec2(ft * 0.058, -ft * 0.031);\n"
-        "  vec2 uv2 = vUv * vec2(uTile * 0.73, uTile * 0.95) + vec2(-ft * 0.041, ft * 0.026);\n"
+        # 沿流动方向**拉丝**：x 缩、y 放大 → 长条云带沿 x 平移时位移最明显。
+        # 两层**同向异速**（视差）：反向滚动会互相抵消，只剩原地翻涌。
+        "  vec2 uv1 = vUv * vec2(uTile * 0.78, uTile * 2.35) + vec2(ft * 0.060, ft * 0.014);\n"
+        "  vec2 uv2 = vUv * vec2(uTile * 0.52, uTile * 1.62) + vec2(ft * 0.031, ft * 0.007);\n"
         # 官方 `blend()` 里箔层的强度取的是 RGB 亮度（贴图 alpha 全是 255），
         # 这里照做：黑色处不加，白色处加，形状才跟游戏一致
         "  vec3 c1 = texture2D(uVeil, uv1).rgb;\n"
         "  vec3 c2 = texture2D(uVeil, uv2).rgb;\n"
         "  float l1 = dot(c1, vec3(0.2126, 0.7152, 0.0722));\n"
         "  float l2 = dot(c2, vec3(0.2126, 0.7152, 0.0722));\n"
-        "  float a = l1 * 0.62 + l2 * 0.38;\n"
+        # 压成有明确边界的云团：均匀灰雾看不出在动，成团才看得出
+        "  float a = smoothstep(0.15, 0.80, l1) * 0.66 + smoothstep(0.20, 0.85, l2) * 0.34;\n"
         # 噪声只调制浓度（翻涌），不调制亮度 → 不会整体忽明忽暗
-        "  float n = texture2D(uNoise, vUv * 0.9 + vec2(ft * 0.045, -ft * 0.034)).r;\n"
-        "  a *= uStrength * (0.55 + 0.70 * n);\n"
+        "  float n = texture2D(uNoise, vUv * 0.9 + vec2(ft * 0.030, ft * 0.008)).r;\n"
+        "  a *= uStrength * (0.45 + 0.85 * n);\n"
         # 乘法输出：没雾的地方是纯白（不动），有雾的地方朝阴影色压一点
         "  gl_FragColor = vec4(mix(vec3(1.0), uTint, clamp(a, 0.0, 1.0)), 1.0);\n"
         "}\n"

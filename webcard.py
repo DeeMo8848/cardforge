@@ -2873,7 +2873,8 @@ def _custom_seal_layer_js(rel: str | None, front_strength: float = 0.945, back_s
 
 
 
-def _detail_layer_js(rel: str | None, z: float = 0.030, order: float = 6.0) -> str:
+def _detail_layer_js(rel: str | None, z: float = 0.030, order: float = 6.0,
+                     invert: bool = False) -> str:
     """主体层：立绘 + 三圆图标 + 边框 + 文字，叠在**所有卡封之上**。
 
     卡封因此不再需要抠主体轮廓/图标洞（那要逐卡掩码，1800 张不可能维护）。
@@ -2886,14 +2887,17 @@ def _detail_layer_js(rel: str | None, z: float = 0.030, order: float = 6.0) -> s
         "varying vec2 vUv;\n"
         "void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }\n"
     )
+    _inv = "  c.rgb = 1.0 - c.rgb;\n" if invert else ""
     frag = (
         "uniform sampler2D uMap;\n"
         "uniform float uAspect;\n"
         "varying vec2 vUv;\n"
         "float cardRound(vec2 uv, float r) {\n  vec2 sc = vec2((uv.x - 0.5) * uAspect, uv.y - 0.5);\n  vec2 hs = vec2(0.5 * uAspect, 0.5) - vec2(r);\n  vec2 e = abs(sc) - hs;\n  return length(max(e, 0.0)) + min(max(e.x, e.y), 0.0) - r;\n}\n"
         "void main() {\n"
-"  if (cardRound(vUv, 0.032) > 0.0) discard;\n"
-        "  gl_FragColor = texture2D(uMap, vUv);\n"
+        "  if (cardRound(vUv, 0.032) > 0.0) discard;\n"
+        "  vec4 c = texture2D(uMap, vUv);\n"
+        + _inv +
+        "  gl_FragColor = c;\n"
         "}\n"
     )
     return (
@@ -2914,6 +2918,57 @@ def _detail_layer_js(rel: str | None, z: float = 0.030, order: float = 6.0) -> s
         "  mesh.renderOrder = " + str(order) + ";\n"
         "  flipGroup.add(mesh);\n"
         "  window.__detailMesh = mesh;\n"
+        "})();\n"
+    )
+
+
+def _sprite_layer_js(rel: str | None, z: float, order: float,
+                     cx: float, cy: float, w: float, h: float,
+                     card_w: float = 1465.0, card_h: float = 2048.0) -> str:
+    """按整卡像素坐标摆一张小图（三个圆图标用）。
+
+    cx/cy = 图标中心在卡面上的像素坐标（render_ripit 的 SOCKET_C / BIG_C / SMALL_C），
+    w/h  = 图标在卡面上的像素尺寸。
+    卡面 plane 是 CARD_WIDTH × CARD_HEIGHT，uv(0,0) 在左下角。
+    """
+    if not rel:
+        return ""
+    # 卡宽/卡高在生成期只是模板占位符 __CARD_WIDTH__ / __CARD_HEIGHT__，
+    # 所以这里输出「比例 × 占位符」的 JS 表达式，不能预先算成常数。
+    fx = w / card_w
+    fy = h / card_h
+    ox = cx / card_w - 0.5
+    oy = 0.5 - cy / card_h
+    vert = (
+        "varying vec2 vUv;\n"
+        "void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }\n"
+    )
+    frag = (
+        "uniform sampler2D uMap;\n"
+        "varying vec2 vUv;\n"
+        "void main() {\n"
+        "  vec4 c = texture2D(uMap, vUv);\n"
+        "  if (c.a < 0.004) discard;\n"
+        "  gl_FragColor = c;\n"
+        "}\n"
+    )
+    return (
+        "(function () {\n"
+        "  var t = new THREE.TextureLoader().load(" + json.dumps(rel) + ");\n"
+        "  t.colorSpace = THREE.NoColorSpace;\n"
+        "  t.anisotropy = 8;\n"
+        "  t.minFilter = THREE.LinearMipmapLinearFilter;\n"
+        "  var m = new THREE.ShaderMaterial({\n"
+        "    uniforms: { uMap: { value: t } },\n"
+        "    vertexShader: " + json.dumps(vert) + ",\n"
+        "    fragmentShader: " + json.dumps(frag) + ",\n"
+        "    transparent: true, depthWrite: false, depthTest: true,\n"
+        "    blending: THREE.NormalBlending\n"
+        "  });\n"
+        "  var mesh = new THREE.Mesh(new THREE.PlaneGeometry(CARD_WIDTH * " + repr(fx) + ", CARD_HEIGHT * " + repr(fy) + "), m);\n"
+        "  mesh.position.set(CARD_WIDTH * " + repr(ox) + ", CARD_HEIGHT * " + repr(oy) + ", " + str(z) + ");\n"
+        "  mesh.renderOrder = " + str(order) + ";\n"
+        "  flipGroup.add(mesh);\n"
         "})();\n"
     )
 
@@ -3565,6 +3620,9 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
                     detail_rel: str | None = None,
                     deco_under_rel: str | None = None,
                     deco_over_rel: str | None = None,
+                    deco_border_rel: str | None = None,
+                    badges: list | None = None,
+                    art_invert: bool = False,
                     smoke_rel: str | None = None,
                     smoke_noise_rel: str | None = None,
                     smoke_amt: float = 0.0,
@@ -3769,11 +3827,21 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
                                   speed=float(smoke_speed),
                                   amt=float(smoke_amt))
     pattern_layer = _pattern_layer_js(pattern_rel)
-    detail_layer = _detail_layer_js(detail_rel)
+    detail_layer = _detail_layer_js(detail_rel, invert=art_invert)
     # 共享装饰层：每张卡只有立绘是独有的，稀有度底板/条纹（under）与
     # 徽章/边框/属性图标（over）按「版本+属性+稀有度」复用同一份文件。
     deco_under_layer = _detail_layer_js(deco_under_rel, z=0.026, order=5.8)
     deco_over_layer = _detail_layer_js(deco_over_rel, z=0.033, order=6.6)
+    # 边框：整卡描边件。属性色 / 金色由渲染阶段染色，这里只贴图。
+    deco_border_layer = _detail_layer_js(deco_border_rel, z=0.031, order=6.2)
+    # 三个小图标（版本徽章 / 稀有度晶体 / 属性图标）：按整卡像素坐标摆放，
+    # 素材全局共用一份 —— 不再把「边框+图标」合成一张按版本存的 over 层。
+    badge_layers = ""
+    for _b in (badges or []):
+        badge_layers += _sprite_layer_js(
+            _b.get("rel"), z=0.032, order=6.4,
+            cx=_b.get("cx", 0.0), cy=_b.get("cy", 0.0),
+            w=_b.get("w", 100.0), h=_b.get("h", 100.0))
     text_layer = _detail_layer_js(text_rel, z=0.036, order=7.5)
 
     seal_extra_layer = ""
@@ -3831,6 +3899,7 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
         .replace("__FLOW_UNIFORM_VALUES__", flow_uniform_values)
         .replace("__SEAL_LAYER__", seal_layer + seal_frame_layer + seal_extra_layer
                  + deco_under_layer + detail_layer + deco_over_layer
+                 + deco_border_layer + badge_layers
                  + text_layer + smoke_layer + pattern_layer
                  + scale_js + mask_js + offset_js)
         .replace("__SEAL_TICK__", _SEAL_TICK_JS)

@@ -441,6 +441,9 @@ def make_card(
     detail: str | None = None,
     deco_under_rel: str | None = None,
     deco_over_rel: str | None = None,
+    deco_border_rel: str | None = None,
+    badges: list | None = None,
+    art_invert: bool = False,
     smoke: str | None = None,
     smoke_amt: float = 0.0,
     smoke_speed: float = 1.0,
@@ -730,7 +733,11 @@ def make_card(
     detail_rel = None
     if detail:
         _dp = Path(detail)
-        if _dp.exists():
+        if str(detail).startswith("../"):
+            # 已经是相对 out_dir 的共享层路径（如 ../../shared/art/x/art.png）：
+            # 直接引用，不复制一份到卡目录 —— 1800 张卡共用同一份立绘。
+            detail_rel = str(detail)
+        elif _dp.exists():
             shutil.copy(_dp, out_dir / "detail.png")
             detail_rel = "detail.png"
     # 分层素材：烟雾（可流动，静止在主体之下）、版本图案（归卡封组）、文字（最上层）
@@ -788,6 +795,9 @@ def make_card(
                         detail_rel=detail_rel,
                         deco_under_rel=deco_under_rel,
                         deco_over_rel=deco_over_rel,
+                        deco_border_rel=deco_border_rel,
+                        badges=badges,
+                        art_invert=art_invert,
                         smoke_rel=smoke_rel,
                         smoke_noise_rel=smoke_noise_rel,
                         smoke_amt=float(smoke_amt),

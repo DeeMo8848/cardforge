@@ -568,23 +568,18 @@ EFFECT_ENGINE_JS = r"""
       // 掩码为 0（立绘/UI）处 fuv 不变 → 立绘/文字/图标原地不动；
       // 只有一张贴图被揉，没有第二层覆盖，所以不会重影、也不会整体变亮。
       '  if (uFlowAmt > 0.0) {\n' +
-      '    float fmask = smoothstep(0.02, 0.55, texture2D(uFlowMask, faceUv).a);\n' +
-      '    if (fmask > 0.002) {\n' +
-      '      float ft = uTime * uFlowSpeed;\n' +
-      // 低频噪声旋涡（原来的手法）单看几乎看不出：整幅印刷画是平滑的大色块，
-      // 揉动只让像素差 4/255，眼睛当成「本来就长这样」。
-      // 所以再加两组**行波**：正弦相位随时间推进，位移场的波峰在卡面上跑，
-      // 明暗交界被推着走 → 一眼看出在流。正弦净积分为 0，整幅图不会被推偏。
-      '      vec2 q = vec2(faceUv.x * uAspect, faceUv.y);\n' +
-      '      vec2 w1 = vec2(sin(q.y * 7.5 + ft * 1.05), cos(q.x * 6.0 - ft * 0.90));\n' +
-      '      vec2 w2 = vec2(sin((q.x + q.y) * 15.0 - ft * 2.10),\n' +
-      '                     cos((q.x - q.y) * 12.0 + ft * 1.80));\n' +
-      '      vec2 n1 = texture2D(uFlowNoise, faceUv * vec2(1.25, 1.60)\n' +
-      '                             + vec2(ft * 0.120, -ft * 0.100)).rg - 0.5;\n' +
-      '      vec2 sw = w1 * 0.0340 + w2 * 0.0130 + n1 * 0.0170;\n' +
-      '      float ef = smoothstep(0.0, 0.055, min(min(faceUv.x, 1.0 - faceUv.x), min(faceUv.y, 1.0 - faceUv.y)));\n' +
-      '      fuv += sw * fmask * ef * uFlowAmt;\n' +
-      '    }\n' +
+'    float fmask = smoothstep(0.02, 0.55, texture2D(uFlowMask, faceUv).a);\n' +
+'    vec2 efv = vec2(min(faceUv.x, 1.0 - faceUv.x), min(faceUv.y, 1.0 - faceUv.y));\n' +
+'    float ef = smoothstep(0.0, 0.055, min(efv.x, efv.y));\n' +
+'    float ft = uTime * uFlowSpeed;\n' +
+'    // 推进波：两层不同速度的云团沿同一方向走，叠一个轻微涡流。\n' +
+'    // 位移是行波（相位随时间推进），平滑底色上也能看出有东西在走。\n' +
+'    vec2 dir = normalize(vec2(1.0, 0.32));\n' +
+'    float p1 = dot(faceUv, vec2(3.10, 2.20)) - ft * 1.55;\n' +
+'    float p2 = dot(faceUv, vec2(5.30, -3.70)) - ft * 2.85;\n' +
+'    vec2 sw = dir * (sin(p1) * 0.55 + sin(p2) * 0.30) * 0.020\n' +
+'            + vec2(cos(p2), sin(p1)) * 0.0060;\n' +
+'    fuv += sw * fmask * ef * uFlowAmt;\n' +
       '  }\n' +
       '  vec2 euv = (uSubject > 0.5) ? uv : faceUv;\n' +
       '  vec4 mainTex = texture2D(uMain, fuv);\n' +
@@ -808,6 +803,7 @@ EFFECT_ENGINE_JS = r"""
       }
       if (item) {
         foilObj = foilBuild(item.def);
+      window.__foilObj = foilObj;
         if (typeof foregroundGroup !== 'undefined' && typeof fgMesh !== 'undefined') {
           if (foregroundTexture && foregroundTexture.image && foregroundTexture.image.width) {
             foilBuildSubject(item.def);
@@ -1651,6 +1647,15 @@ __GLOW_TICK__
     },
     flipCard: function () {
       doFlip();
+    },
+    // 调试用：把流动时间钉到指定秒数，便于逐帧比对（不影响正常播放）
+    setFlowTime: function (t) {
+      var fo = window.__foilObj;
+      if (fo && fo.uniforms && fo.uniforms.uTime) { fo.uniforms.uTime.value = t; fo.t = t; }
+      if (window.__foilSubj && window.__foilSubj.uniforms) window.__foilSubj.uniforms.uTime.value = t;
+      if (cardMaterial && cardMaterial.uniforms && cardMaterial.uniforms.uFlowTime)
+        cardMaterial.uniforms.uFlowTime.value = t;
+      return t;
     },
   };
 
@@ -2603,7 +2608,7 @@ def _seal_layer_js(effect: dict, front_strength: float = 0.945, back_strength: f
 
 def _flow_layer_js(rel: str | None, strength: float = 0.62, speed: float = 1.0,
                    warp: float = 1.0, z: float = 0.013, order: float = 5.05,
-                   parent: str = "flipGroup") -> str:
+                   parent: str = "flipGroup", drift: float = 1.0) -> str:
     """卡面「流动背景」层：只有印刷背景在缓慢流动，立绘/文字/图标不动。
 
     贴图是 `flow_bg.make_plate()` 生成的整卡尺寸 RGBA：
@@ -2627,7 +2632,7 @@ def _flow_layer_js(rel: str | None, strength: float = 0.62, speed: float = 1.0,
     )
     frag = (
         "uniform sampler2D uMap;\n"
-        "uniform float uTime, uStrength, uSpeed, uWarp, uAspect;\n"
+        "uniform float uTime, uStrength, uSpeed, uWarp, uAspect, uDrift;\n"
         "varying vec2 vUv;\n"
         "float flowRound(vec2 uv, float radius) {\n"
         "  vec2 scaled = vec2((uv.x - 0.5) * uAspect, uv.y - 0.5);\n"
@@ -2641,9 +2646,9 @@ def _flow_layer_js(rel: str | None, strength: float = 0.62, speed: float = 1.0,
         "  vec2 p = vUv - 0.5;\n"
         "  vec2 off = vec2(\n"
         "    sin(t * 0.131) * 0.0165 + sin(t * 0.057 + 1.7) * 0.0085,\n"
-        "    cos(t * 0.113) * 0.0135 + sin(t * 0.041 + 0.4) * 0.0070);\n"
+        "    cos(t * 0.113) * 0.0135 + sin(t * 0.041 + 0.4) * 0.0070) * uDrift;\n"
         "  vec2 wob = vec2(sin(vUv.y * 4.2 + t * 0.29),\n"
-        "                  cos(vUv.x * 3.6 - t * 0.24)) * (0.0035 * uWarp);\n"
+        "                  cos(vUv.x * 3.6 - t * 0.24)) * (0.0035 * uWarp * uDrift);\n"
         "  float sc = 1.0 + 0.008 * sin(t * 0.087);\n"
         "  vec2 uv = p * sc + 0.5 + off + wob;\n"
         "  vec3 c = texture2D(uMap, uv).rgb;\n"
@@ -2670,6 +2675,7 @@ def _flow_layer_js(rel: str | None, strength: float = 0.62, speed: float = 1.0,
         "        uSpeed: { value: " + str(speed) + " },\n"
         "        uWarp: { value: " + str(warp) + " },\n"
         "        uAspect: { value: CARD_WIDTH / CARD_HEIGHT },\n"
+        "        uDrift: { value: " + str(drift) + " },\n"
         "      },\n"
         "      vertexShader: " + json.dumps(vertex) + ",\n"
         "      fragmentShader: " + json.dumps(frag) + ",\n"
@@ -3776,6 +3782,7 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
                 float(_ex.get("warp", 1.0)),
                 z=float(_ex.get("z", 0.013)),
                 order=float(_ex.get("order", 5.05)),
+                drift=float(_ex.get("drift", 1.0)),
             )
             continue
         seal_extra_layer += _custom_seal_layer_js(

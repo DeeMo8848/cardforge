@@ -130,7 +130,7 @@
   "flow": {
     "mask": "flowmask.png",
     "noise": "flow_noise.png",
-    "amt": 2.4,
+    "amt": 12.0,
     "speed": 1.0
   }
 }

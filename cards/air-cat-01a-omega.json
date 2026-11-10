@@ -86,7 +86,7 @@
     }
   ],
   "smoke": {
-    "amt": 5.0,
+    "amt": 2.5,
     "speed": 1.0,
     "flow": true
   }

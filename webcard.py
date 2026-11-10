@@ -3563,6 +3563,8 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
                     seal_band_power: float = 4.0,
                     seal_extra: list | None = None,
                     detail_rel: str | None = None,
+                    deco_under_rel: str | None = None,
+                    deco_over_rel: str | None = None,
                     smoke_rel: str | None = None,
                     smoke_noise_rel: str | None = None,
                     smoke_amt: float = 0.0,
@@ -3768,6 +3770,10 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
                                   amt=float(smoke_amt))
     pattern_layer = _pattern_layer_js(pattern_rel)
     detail_layer = _detail_layer_js(detail_rel)
+    # 共享装饰层：每张卡只有立绘是独有的，稀有度底板/条纹（under）与
+    # 徽章/边框/属性图标（over）按「版本+属性+稀有度」复用同一份文件。
+    deco_under_layer = _detail_layer_js(deco_under_rel, z=0.026, order=5.8)
+    deco_over_layer = _detail_layer_js(deco_over_rel, z=0.033, order=6.6)
     text_layer = _detail_layer_js(text_rel, z=0.036, order=7.5)
 
     seal_extra_layer = ""
@@ -3824,7 +3830,8 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
         .replace("__FLOW_WARP__", flow_warp)
         .replace("__FLOW_UNIFORM_VALUES__", flow_uniform_values)
         .replace("__SEAL_LAYER__", seal_layer + seal_frame_layer + seal_extra_layer
-                 + detail_layer + text_layer + smoke_layer + pattern_layer
+                 + deco_under_layer + detail_layer + deco_over_layer
+                 + text_layer + smoke_layer + pattern_layer
                  + scale_js + mask_js + offset_js)
         .replace("__SEAL_TICK__", _SEAL_TICK_JS)
         .replace("__GLOW_TICK__", _GLOW_TICK_JS)

@@ -576,12 +576,12 @@ EFFECT_ENGINE_JS = r"""
       // 所以再加两组**行波**：正弦相位随时间推进，位移场的波峰在卡面上跑，
       // 明暗交界被推着走 → 一眼看出在流。正弦净积分为 0，整幅图不会被推偏。
       '      vec2 q = vec2(faceUv.x * uAspect, faceUv.y);\n' +
-      '      vec2 w1 = vec2(sin(q.y * 13.0 + ft * 2.20), cos(q.x * 10.5 - ft * 1.90));\n' +
-      '      vec2 w2 = vec2(sin((q.x + q.y) * 21.0 - ft * 3.40),\n' +
-      '                     cos((q.x - q.y) * 17.0 + ft * 3.00));\n' +
+      '      vec2 w1 = vec2(sin(q.y * 7.5 + ft * 1.05), cos(q.x * 6.0 - ft * 0.90));\n' +
+      '      vec2 w2 = vec2(sin((q.x + q.y) * 15.0 - ft * 2.10),\n' +
+      '                     cos((q.x - q.y) * 12.0 + ft * 1.80));\n' +
       '      vec2 n1 = texture2D(uFlowNoise, faceUv * vec2(1.25, 1.60)\n' +
-      '                             + vec2(ft * 0.140, -ft * 0.115)).rg - 0.5;\n' +
-      '      vec2 sw = w1 * 0.0210 + w2 * 0.0090 + n1 * 0.0130;\n' +
+      '                             + vec2(ft * 0.120, -ft * 0.100)).rg - 0.5;\n' +
+      '      vec2 sw = w1 * 0.0340 + w2 * 0.0130 + n1 * 0.0170;\n' +
       '      float ef = smoothstep(0.0, 0.055, min(min(faceUv.x, 1.0 - faceUv.x), min(faceUv.y, 1.0 - faceUv.y)));\n' +
       '      fuv += sw * fmask * ef * uFlowAmt;\n' +
       '    }\n' +
@@ -2690,7 +2690,8 @@ def _custom_seal_layer_js(rel: str | None, front_strength: float = 0.945, back_s
                           base: float = 0.55, amp: float = 0.45,
                           tilt_gain: float = 0.045, blend_add: bool = False,
                           tilt_lo: float = 0.12, tilt_hi: float = 0.6,
-                          sheen_base: float = 0.03, band_power: float = 4.0) -> str:
+                          sheen_base: float = 0.03, band_power: float = 4.0,
+                          rainbow: float = 0.7) -> str:
     """自定义 PNG 卡封动态光效层：整张贴图 + 随视角扫动的箔光带 + 彩虹色相迁移，正反双面显示。
 
     与内置膜（_seal_layer_js）相同的视角光效架构（sheen 基面 / edge 边缘菲涅尔 /
@@ -2706,7 +2707,8 @@ def _custom_seal_layer_js(rel: str | None, front_strength: float = 0.945, back_s
     """
     if not rel:
         return ""
-    strength, rainbow, power = 0.9, 0.7, 4.0
+    strength, power = 0.9, 4.0
+    rainbow = float(rainbow)
     d0, d1 = 0.87, 0.5
     frag = (
         "    vec4 tex = texture2D(uMap, vUv);\n"
@@ -3792,6 +3794,7 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
             tilt_hi=float(_ex.get("tilt_hi", 0.06)),
             sheen_base=float(_ex.get("sheen_base", 0.02)),
             band_power=float(_ex.get("band_power", 2.0)),
+            rainbow=float(_ex.get("rainbow", 0.7)),
         )
     return (
         CARD_HTML_TEMPLATE

@@ -1,6 +1,5 @@
 {
   "engine": "foil",
-  "mask": "artmask.png",
   "globals": {
     "sheen": "off",
     "sheenPow": 0.1,

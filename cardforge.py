@@ -353,6 +353,13 @@ def _load_layer(path: str | None, kind: str | None = None) -> str | None:
         for candidate in candidates:
             if candidate.exists():
                 return str(candidate)
+        # 素材包目录：第二十二轮把 RipIt 本体素材挪到了 cardforge/packs/ripit/，
+        # 这里必须一起找，否则卡封/边光整层会被静默丢掉（html 里根本没有那一层）。
+        _pk = PROJECT_ROOT / "packs"
+        if _pk.is_dir():
+            for _pkg in _pk.iterdir():
+                if _pkg.is_dir() and (_pkg / Path(path).name).exists():
+                    return str(_pkg / Path(path).name)
         # 素材包：素材键形如 「包id/相对路径」（见 packs.py）
         if "/" in path:
             try:
@@ -719,11 +726,17 @@ def make_card(
     frame_path = _load_layer(frame, "frame")
     seal_path = _load_layer(seal, "seal")
     seal_frame_path = _load_layer(seal_frame, "seal")
-    frame_rel = seal_rel = seal_frame_rel = None
+    frame_rel = seal_frame_rel = None
+    # 第二十四轮：卡封可以是一条 **已存在的共享相对路径**（../../shared/seal/xxx.png）。
+    # 这时不复制进卡目录 —— 该图只跟版本/属性有关，1800 张卡重复一份毫无意义。
+    if isinstance(seal, str) and seal.startswith("../"):
+        seal_rel = seal
+    else:
+        seal_rel = None
     if frame_path:
         shutil.copy(frame_path, out_dir / "frame.png")
         frame_rel = "frame.png"
-    if seal_path:
+    if seal_path and not seal_rel:
         shutil.copy(seal_path, out_dir / "seal.png")
         seal_rel = "seal.png"
     if seal_frame_path:

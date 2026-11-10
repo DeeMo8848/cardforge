@@ -179,7 +179,9 @@ def list_cards() -> list[dict]:
                 continue
             if d.name in _exclude or _is_hex_id(d.name):
                 continue
-            if not (d / "front.png").exists():
+            # 第二十四轮：front.png 已提到 shared/front/（按版本复用），卡目录只剩 card.html + card.png
+            # → 只要还有卡面或 3D 页，就算成品卡，别再拿 front.png 当存在性判据。
+            if not any((d / n).exists() for n in ("front.png", "card.png", "card.html")):
                 continue
             name, desc, text_type = d.name, "", "none"
             text_pos = None
@@ -203,7 +205,8 @@ def list_cards() -> list[dict]:
                 "description": desc,
                 "text_type": text_type,
                 "text_pos": text_pos,
-                "card_png": f"/preview/{d.name}/card.png" if (d / "card.png").exists() else f"/preview/{d.name}/front.png",
+                "card_png": (f"/preview/{d.name}/card.png" if (d / "card.png").exists()
+                             else f"/preview/{d.name}/front.png"),
                 "card_html": f"/preview/{d.name}/card.html" if (d / "card.html").exists() else "",
                 "frame": inherit.get("frame"),
                 "seal": inherit.get("seal"),

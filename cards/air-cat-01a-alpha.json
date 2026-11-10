@@ -12,7 +12,7 @@
     "background": null,
     "face": null,
     "frame": null,
-    "seal": "ripit_alpha_pattern.png"
+    "seal": "../../shared/seal/seal_alpha.png"
   },
   "text": {
     "title": null,
@@ -33,7 +33,7 @@
   "subject_over_frame": false,
   "subject_outline": false,
   "mask_clip": true,
-  "seal_name": "ripit_alpha_pattern.png",
+  "seal_name": "../../shared/seal/seal_alpha.png",
   "seal_strength_front": 1.35,
   "seal_strength_back": 0.0,
   "seal_frame_name": null,

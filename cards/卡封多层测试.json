@@ -47,12 +47,12 @@
   "effects": [],
   "seal_extra": [
     {
-      "seal": "ripit-rarity-rare.png",
+      "seal": "ripit/ripit-rarity-rare.png",
       "front": 0.85,
       "back": 0.0
     },
     {
-      "seal": "ripit-rarity-mythic.png",
+      "seal": "ripit/ripit-rarity-mythic.png",
       "front": 0.45,
       "back": 0.3
     }

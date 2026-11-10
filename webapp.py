@@ -1320,6 +1320,20 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
 
+        if path.startswith("/shared/"):
+            # /shared/<role>/<file> —— 卡牌公共素材（back / fx / seal）。
+            # file:// 打开时 card.html 用 ../../shared/ 直接命中 assets/shared，
+            # http 下 ../../shared 会规范化成 /shared/...，这里映射回同一目录。
+            parts = path.strip("/").split("/")
+            if len(parts) >= 3 and all(p and p != ".." for p in parts[1:]):
+                rel = ASSETS / "shared"
+                for p in parts[1:]:
+                    rel = rel / unquote(p)
+                if self._send_file(rel):
+                    return
+            self._send_json({"ok": False, "error": "not found"}, 404)
+            return
+
         if path.startswith("/preview/"):
             # /preview/<dir>/.../<file>（可嵌套，如 output/_preview/<token>/preview.html）
             parts = path.strip("/").split("/")

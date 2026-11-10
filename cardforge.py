@@ -444,10 +444,6 @@ def make_card(
     smoke_speed: float = 1.0,
     smoke_strength: float = 1.0,
     smoke_noise: str | None = None,
-    smoke_veil: str | None = None,
-    smoke_veil_strength: float = 0.26,
-    smoke_veil_tint=(0.62, 0.80, 1.0),
-    smoke_veil_tile: float = 1.7,
     pattern: str | None = None,
     text_layer: str | None = None,
     flow_mask_rel: str | None = None,
@@ -742,12 +738,6 @@ def make_card(
         if _sp.exists():
             shutil.copy(_sp, out_dir / "smoke.png")
             smoke_rel = "smoke.png"
-    smoke_veil_rel = None
-    if smoke_veil:
-        _vp = Path(smoke_veil)
-        if _vp.exists():
-            shutil.copy(_vp, out_dir / "veil.png")
-            smoke_veil_rel = "veil.png"
     smoke_noise_rel = None
     if smoke_noise:
         _np = Path(smoke_noise)
@@ -796,10 +786,6 @@ def make_card(
                         detail_rel=detail_rel,
                         smoke_rel=smoke_rel,
                         smoke_noise_rel=smoke_noise_rel,
-                        smoke_veil_rel=smoke_veil_rel,
-                        smoke_veil_strength=float(smoke_veil_strength),
-                        smoke_veil_tint=smoke_veil_tint,
-                        smoke_veil_tile=float(smoke_veil_tile),
                         smoke_amt=float(smoke_amt),
                         smoke_speed=float(smoke_speed),
                         smoke_strength=float(smoke_strength),

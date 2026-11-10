@@ -2952,95 +2952,16 @@ def _pattern_layer_js(rel: str | None, z: float = 0.014, order: float = 4.6) -> 
 
 def _smoke_layer_js(rel: str | None, noise_rel: str | None = None,
                     strength: float = 1.0, speed: float = 1.0, amt: float = 1.0,
-                    z: float = 0.008, order: float = 3.0,
-                    veil_rel: str | None = None, veil_strength: float = 0.26,
-                    veil_tint=(0.62, 0.80, 1.0), veil_tile: float = 1.7) -> str:
-    """元素烟雾层 = **静止**底纹 + **滚动**流云（官方 slotUV 的做法）。
+                    z: float = 0.008, order: float = 3.0) -> str:
+    """元素烟雾层：**完全静止**的云纹底纹。
 
-    底纹不动：它是元素背景印刷，四边 alpha 只有中部的 1/4，不可平铺；
-    任何位移都只能在卡边 clamp 采样，拉出「从右往左 / 从下往上」的扫描线。
-
-    流动交给上面那层 `tx_foil_smoke.png`：官方箔贴图本来就是无缝的，
-    RepeatWrapping + fract 滚动 → 真流动，且永远不越界、不会有边界线。
-    amt=0（普通版）时只出静止底纹。
+    烟雾图不可平铺，任何位移只能在卡边 clamp 采样、拉出扫描线；
+    所以这一层只提供静止质感，真正的「动」交给卡面 shader 对
+    **印刷背景**做的原地 UV 扭曲（预设里的 flow 字段 / uFlowAmt）。
     """
     if not rel:
         return ""
-    out = _detail_layer_js(rel, z=z, order=order)
-    if not (veil_rel and amt > 0.0):
-        return out
-
-    vert = (
-        "varying vec2 vUv;\n"
-        "void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }\n"
-    )
-    frag = (
-        "uniform sampler2D uVeil;\n"
-        "uniform sampler2D uNoise;\n"
-        "uniform vec3 uTint;\n"
-        "uniform float uTime, uSpeed, uAmt, uStrength, uAspect, uTile;\n"
-        "varying vec2 vUv;\n"
-        "float veilRound(vec2 uv, float radius) {\n"
-        "  vec2 scaled = vec2((uv.x - 0.5) * uAspect, uv.y - 0.5);\n"
-        "  vec2 halfSize = vec2(0.5 * uAspect, 0.5);\n"
-        "  vec2 edge = abs(scaled) - (halfSize - vec2(radius));\n"
-        "  return length(max(edge, 0.0)) + min(max(edge.x, edge.y), 0.0) - radius;\n"
-        "}\n"
-        "void main() {\n"
-        "  if (veilRound(vUv, 0.032) > 0.0) discard;\n"
-        "  float ft = uTime * uSpeed * uAmt;\n"
-        # 沿流动方向**拉丝**：x 缩、y 放大 → 长条云带沿 x 平移时位移最明显。
-        # 两层**同向异速**（视差）：反向滚动会互相抵消，只剩原地翻涌。
-        "  vec2 uv1 = vUv * vec2(uTile * 0.78, uTile * 2.35) + vec2(ft * 0.060, ft * 0.014);\n"
-        "  vec2 uv2 = vUv * vec2(uTile * 0.52, uTile * 1.62) + vec2(ft * 0.031, ft * 0.007);\n"
-        # 官方 `blend()` 里箔层的强度取的是 RGB 亮度（贴图 alpha 全是 255），
-        # 这里照做：黑色处不加，白色处加，形状才跟游戏一致
-        "  vec3 c1 = texture2D(uVeil, uv1).rgb;\n"
-        "  vec3 c2 = texture2D(uVeil, uv2).rgb;\n"
-        "  float l1 = dot(c1, vec3(0.2126, 0.7152, 0.0722));\n"
-        "  float l2 = dot(c2, vec3(0.2126, 0.7152, 0.0722));\n"
-        # 压成有明确边界的云团：均匀灰雾看不出在动，成团才看得出
-        "  float a = smoothstep(0.15, 0.80, l1) * 0.66 + smoothstep(0.20, 0.85, l2) * 0.34;\n"
-        # 噪声只调制浓度（翻涌），不调制亮度 → 不会整体忽明忽暗
-        "  float n = texture2D(uNoise, vUv * 0.9 + vec2(ft * 0.030, ft * 0.008)).r;\n"
-        "  a *= uStrength * (0.45 + 0.85 * n);\n"
-        # 乘法输出：没雾的地方是纯白（不动），有雾的地方朝阴影色压一点
-        "  gl_FragColor = vec4(mix(vec3(1.0), uTint, clamp(a, 0.0, 1.0)), 1.0);\n"
-        "}\n"
-    )
-    tint = tuple(float(x) for x in veil_tint)
-    out += (
-        "(function () {\n"
-        "  var vt = new THREE.TextureLoader().load(" + json.dumps(veil_rel) + ");\n"
-        "  vt.wrapS = THREE.RepeatWrapping; vt.wrapT = THREE.RepeatWrapping;\n"
-        "  vt.colorSpace = THREE.NoColorSpace;\n"
-        "  vt.anisotropy = 8;\n"
-        "  vt.minFilter = THREE.LinearMipmapLinearFilter;\n"
-        "  var nt = new THREE.TextureLoader().load(" + json.dumps(noise_rel or veil_rel) + ");\n"
-        # 噪声是我们自己生成的，四边不连续 → 用镜像包裹，避免接缝变成一条硬边
-        "  nt.wrapS = THREE.MirroredRepeatWrapping; nt.wrapT = THREE.MirroredRepeatWrapping;\n"
-        "  nt.colorSpace = THREE.NoColorSpace;\n"
-        "  var m = new THREE.ShaderMaterial({\n"
-        "    uniforms: { uVeil: { value: vt }, uNoise: { value: nt },\n"
-        "      uTint: { value: new THREE.Vector3(%f, %f, %f) },\n"
-        "      uTime: { value: 0 }, uSpeed: { value: %f },\n"
-        "      uAmt: { value: %f }, uStrength: { value: %f },\n"
-        "      uTile: { value: %f },\n"
-        "      uAspect: { value: CARD_WIDTH / CARD_HEIGHT } },\n"
-        "    vertexShader: " + json.dumps(vert) + ",\n"
-        "    fragmentShader: " + json.dumps(frag) + ",\n"
-        "    transparent: true, depthWrite: false, depthTest: true,\n"
-        "    blending: THREE.MultiplyBlending\n"
-        "  });\n"
-        "  var mesh = new THREE.Mesh(new THREE.PlaneGeometry(CARD_WIDTH, CARD_HEIGHT), m);\n"
-        "  mesh.position.set(0, 0, " + str(z + 0.002) + ");\n"
-        "  mesh.renderOrder = " + str(order + 0.1) + ";\n"
-        "  flipGroup.add(mesh);\n"
-        "  (window.__flowMats = window.__flowMats || []).push(m);\n"
-        "})();\n"
-    ) % (tint[0], tint[1], tint[2], float(speed), float(amt),
-         float(veil_strength), float(veil_tile))
-    return out
+    return _detail_layer_js(rel, z=z, order=order)
 
 
 _SEAL_TICK_JS = (
@@ -3631,10 +3552,6 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
                     seal_extra: list | None = None,
                     detail_rel: str | None = None,
                     smoke_rel: str | None = None,
-                    smoke_veil_rel: str | None = None,
-                    smoke_veil_strength: float = 0.26,
-                    smoke_veil_tint=(0.62, 0.80, 1.0),
-                    smoke_veil_tile: float = 1.7,
                     smoke_noise_rel: str | None = None,
                     smoke_amt: float = 0.0,
                     smoke_speed: float = 1.0,
@@ -3836,11 +3753,7 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
     smoke_layer = _smoke_layer_js(smoke_rel, smoke_noise_rel,
                                   strength=float(smoke_strength),
                                   speed=float(smoke_speed),
-                                  amt=float(smoke_amt),
-                                  veil_rel=smoke_veil_rel,
-                                  veil_strength=float(smoke_veil_strength),
-                                  veil_tint=smoke_veil_tint,
-                                  veil_tile=float(smoke_veil_tile))
+                                  amt=float(smoke_amt))
     pattern_layer = _pattern_layer_js(pattern_rel)
     detail_layer = _detail_layer_js(detail_rel)
     text_layer = _detail_layer_js(text_rel, z=0.036, order=7.5)

@@ -126,5 +126,11 @@
       "bpeak": 0.85,
       "bphase": 0
     }
-  ]
+  ],
+  "flow": {
+    "mask": "flowmask.png",
+    "noise": "flow_noise.png",
+    "amt": 4.0,
+    "speed": 3.2
+  }
 }

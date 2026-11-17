@@ -22,6 +22,7 @@ models/
 assets/output/
 cards.zip
 album.html
+albums.json
 demo-all-layers.png
 
 # 素材包（大素材不入仓库，按需导入到 packs/ 下；packs.json 是本地启用/禁用状态）

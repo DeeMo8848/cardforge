@@ -8,6 +8,7 @@
   :root {
     --bg:#14100c; --panel:#221b16; --line:#3d2f24;
     --gold:#e3b95c; --gold2:#f3d48a; --text:#ece4d6; --muted:#a99b86;
+    --danger:#ff6b5e;
   }
   * { box-sizing:border-box; margin:0; padding:0; }
   body {
@@ -28,7 +29,50 @@
     border:1px solid var(--line); padding:7px 14px; border-radius:999px; transition:all .15s;
   }
   header .back:hover { color:var(--gold2); border-color:var(--gold); }
-  main { max-width:1240px; margin:0 auto; padding:28px 24px 60px; }
+  header .ghostbtn {
+    color:var(--muted); font-size:13px; background:none;
+    border:1px solid var(--line); padding:7px 14px; border-radius:999px; cursor:pointer;
+    transition:all .15s;
+  }
+  header .ghostbtn:hover { color:var(--gold2); border-color:var(--gold); }
+  header .ghostbtn.on {
+    background:linear-gradient(135deg,var(--gold2),var(--gold)); color:#2b1d08; border-color:var(--gold);
+  }
+
+  /* 收集册筛选条 */
+  .albumbar {
+    position: sticky; top:57px; z-index:19;
+    display:flex; flex-wrap:wrap; gap:8px; align-items:center;
+    padding:12px 24px; background:rgba(20,16,12,.72); backdrop-filter: blur(8px);
+    border-bottom:1px solid var(--line);
+  }
+  .achip {
+    display:inline-flex; align-items:center; gap:8px;
+    padding:7px 13px; border-radius:999px; font-size:13px; cursor:pointer;
+    background:var(--panel); border:1px solid var(--line); color:var(--muted);
+    transition:all .15s; user-select:none; position:relative;
+  }
+  .achip:hover { color:var(--gold2); border-color:var(--gold); }
+  .achip.on {
+    background:linear-gradient(135deg,var(--gold2),var(--gold)); color:#2b1d08;
+    border-color:var(--gold); font-weight:700;
+  }
+  .achip .acount { font-size:11px; opacity:.75; }
+  .achip .aact {
+    display:none; background:none; border:none; cursor:pointer; padding:0 2px;
+    font-size:12px; color:inherit; opacity:.8; line-height:1;
+  }
+  .achip:hover .aact { display:inline-block; }
+  .achip .aact:hover { opacity:1; color:var(--danger); }
+  .achip.on .aact:hover { color:#7a1f14; }
+  .albumbar .newalbum {
+    padding:7px 14px; border-radius:999px; font-size:13px; cursor:pointer;
+    background:none; border:1px dashed var(--line); color:var(--muted); transition:all .15s;
+  }
+  .albumbar .newalbum:hover { color:var(--gold2); border-color:var(--gold); }
+  .albumbar .barhint { margin-left:auto; font-size:12px; color:var(--muted); }
+
+  main { max-width:1240px; margin:0 auto; padding:28px 24px 100px; }
 
   /* 侧边信息框 */
   .info {
@@ -61,15 +105,30 @@
     gap:22px;
   }
   .card { perspective:900px; cursor:pointer; position:relative; }
-  .card .del {
-    position:absolute; top:8px; right:8px; z-index:5;
+  .card .del, .card .mv {
+    position:absolute; top:8px; z-index:5;
     width:26px; height:26px; border-radius:50%;
     background:rgba(20,12,8,.72); color:var(--muted);
     border:1px solid var(--line); font-size:13px; line-height:1;
     cursor:pointer; opacity:0; transition:opacity .18s, color .18s, border-color .18s;
   }
-  .card:hover .del { opacity:1; }
-  .card .del:hover { color:#ff6b5e; border-color:#ff6b5e; background:rgba(40,16,12,.85); }
+  .card .del { right:8px; }
+  .card .mv { right:40px; font-size:12px; }
+  .card:hover .del, .card:hover .mv { opacity:1; }
+  .card .del:hover { color:var(--danger); border-color:var(--danger); background:rgba(40,16,12,.85); }
+  .card .mv:hover { color:var(--gold2); border-color:var(--gold); background:rgba(40,30,14,.9); }
+  .card .sel {
+    position:absolute; top:8px; left:8px; z-index:5;
+    width:24px; height:24px; border-radius:7px; line-height:1;
+    background:rgba(20,12,8,.75); color:transparent;
+    border:1px solid var(--line); font-size:13px; cursor:pointer;
+    display:none; transition:all .15s;
+  }
+  body.selecting .card .sel { display:block; }
+  .card.picked .sel {
+    background:linear-gradient(135deg,var(--gold2),var(--gold)); color:#2b1d08; border-color:var(--gold);
+  }
+  .card.picked img { border-color:var(--gold); box-shadow:0 0 0 2px var(--gold2), 0 12px 34px rgba(227,185,92,.28); }
   .card .inner {
     transform-style: preserve-3d;
     transition: transform .18s ease-out;
@@ -87,6 +146,10 @@
     overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
   }
   .card:hover .name { color:var(--gold2); }
+  .card .alabel {
+    margin-top:3px; text-align:center; font-size:11px; color:#7d6f5c;
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  }
   .empty { text-align:center; color:var(--muted); padding:80px 0; font-size:15px; }
 
   /* 放大弹窗（完整 3D 交互） */
@@ -130,6 +193,55 @@
   }
   .modal .hintbar { bottom:52px; }
 
+  /* 移动对话框 */
+  .dlgwrap {
+    position:fixed; inset:0; z-index:50; display:none;
+    background: rgba(8,6,4,.72); backdrop-filter: blur(4px);
+    align-items:center; justify-content:center; padding:24px;
+  }
+  .dlgwrap.show { display:flex; }
+  .dlg {
+    width:min(420px, 94vw); background:var(--panel); border:1px solid var(--line);
+    border-radius:16px; padding:22px; box-shadow:0 20px 70px rgba(0,0,0,.6);
+  }
+  .dlg h3 { font-size:15px; color:var(--gold2); margin-bottom:4px; }
+  .dlg .sub { font-size:12px; color:var(--muted); margin-bottom:14px; word-break:break-all; }
+  .dlg .movelist { display:flex; flex-direction:column; gap:8px; max-height:46vh; overflow-y:auto; }
+  .dlg .movelist button {
+    text-align:left; padding:10px 14px; border-radius:10px; cursor:pointer; font-size:13px;
+    background:rgba(20,16,12,.6); color:var(--text); border:1px solid var(--line);
+    transition:all .15s;
+  }
+  .dlg .movelist button:hover { border-color:var(--gold); color:var(--gold2); }
+  .dlg .movelist button.cur { border-color:var(--gold); color:var(--gold2); }
+  .dlg .movelist .cnt { float:right; font-size:11px; color:var(--muted); }
+  .dlg .foot { display:flex; justify-content:flex-end; gap:10px; margin-top:16px; }
+  .dlg .foot button {
+    padding:8px 16px; border-radius:999px; cursor:pointer; font-size:13px;
+    background:none; color:var(--muted); border:1px solid var(--line);
+  }
+  .dlg .foot button:hover { color:var(--gold2); border-color:var(--gold); }
+
+  /* 多选操作条 */
+  .batchbar {
+    position:fixed; left:50%; bottom:24px; transform:translateX(-50%);
+    z-index:35; display:none; align-items:center; gap:10px;
+    background:rgba(34,27,22,.96); border:1px solid var(--gold);
+    border-radius:999px; padding:10px 16px; box-shadow:0 12px 40px rgba(0,0,0,.55);
+  }
+  .batchbar.show { display:flex; }
+  .batchbar .btxt { font-size:13px; color:var(--gold2); }
+  .batchbar select, .batchbar button {
+    font-size:13px; padding:7px 12px; border-radius:999px;
+    background:rgba(20,16,12,.8); color:var(--text);
+    border:1px solid var(--line); cursor:pointer;
+  }
+  .batchbar button.primary {
+    background:linear-gradient(135deg,var(--gold2),var(--gold)); color:#2b1d08;
+    border-color:var(--gold); font-weight:700;
+  }
+  .batchbar button:disabled { opacity:.45; cursor:default; }
+
   /* 翻页 */
   .pager {
     display:flex; gap:8px; align-items:center; justify-content:center; margin-top:28px; flex-wrap:wrap;
@@ -147,8 +259,10 @@
 <header>
   <h1>📖 卡牌收集册</h1>
   <span class="count" id="count"></span>
+  <button class="ghostbtn" id="selModeBtn" type="button">☑ 多选</button>
   <a class="back" href="/">← 返回工坊</a>
 </header>
+<div class="albumbar" id="albumBar" style="display:none"></div>
 <main>
   <div class="grid" id="grid"></div>
   <div class="empty" id="empty" style="display:none">还没有成品卡牌，先去工坊制作一张吧～</div>
@@ -178,6 +292,18 @@
   </div>
 </div>
 
+<div class="dlgwrap" id="moveDlg">
+  <div class="dlg">
+    <h3 id="moveTitle">移动到收集册</h3>
+    <div class="sub" id="moveSub"></div>
+    <div class="movelist" id="moveList"></div>
+    <div class="foot">
+      <button id="moveNew" type="button">＋ 新建收集册</button>
+      <button id="moveCancel" type="button">取消</button>
+    </div>
+  </div>
+</div>
+
 <script>
 const TYPE_BADGE = { none: '🚫 无文本型', transparent: '🪟 特殊文本型', boxed: '📜 文本型' };
 const grid = document.getElementById('grid');
@@ -185,20 +311,34 @@ const empty = document.getElementById('empty');
 const info = document.getElementById('info');
 const PER_PAGE = 12;
 let allCards = [];
+let ALBUMS = { albums: [], members: {}, total: 0, unclassified: 0 };
+let curAlbum = '';          // '' = 全部；'__none__' = 未分类；其余为收集册 id
 let page = 0;
 let hoverTimer = null;
 let hideTimer = null;
 let currentCard = null;
 let offline = false;
 let spinning = false;
+let selecting = false;
+const picked = new Set();   // 多选模式选中的卡牌 id
+let moveTargets = [];       // 移动对话框作用的卡牌 id 列表
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m]));
+}
 
 async function load() {
-  let cards = null;
+  let cards = null, albums = null;
   try {
     const r = await fetch('/api/cards');
     if (r.ok) {
       const d = await r.json();
       if (d.ok) cards = d.cards || [];
+    }
+    const ra = await fetch('/api/albums');
+    if (ra.ok) {
+      const da = await ra.json();
+      if (da.ok) albums = da;
     }
   } catch (e) {
     offline = true;
@@ -206,30 +346,296 @@ async function load() {
   if (cards === null) {
     // 离线模式：直接打开 album.html（file://）时无服务器，用内嵌数据 + 相对路径
     cards = (window.__ALBUM_DATA__ || []).slice();
+    albums = window.__ALBUM_META__ || null;
     if (cards.length) offline = true;
   }
-  cards = cards || [];
-  allCards = cards;
-  document.getElementById('count').textContent = '共 ' + cards.length + ' 张';
-  page = 0;
-  renderPage();
+  allCards = cards || [];
+  ALBUMS = albums || { albums: [], members: {}, total: allCards.length, unclassified: allCards.length };
   if (offline) {
     const back = document.querySelector('.back');
     if (back) back.style.display = 'none';
+    document.getElementById('selModeBtn').style.display = 'none';
   }
+  // 当前筛选的册可能已被删除
+  if (curAlbum && curAlbum !== '__none__' && !ALBUMS.albums.some(a => a.id === curAlbum)) curAlbum = '';
+  renderAlbumBar();
+  page = 0;
+  renderPage();
 }
 
+function applySummary(s) {
+  if (!s) return;
+  ALBUMS = s;
+  if (curAlbum && curAlbum !== '__none__' && !ALBUMS.albums.some(a => a.id === curAlbum)) curAlbum = '';
+  renderAlbumBar();
+  renderPage();
+}
+
+// ---------- 收集册筛选条 ----------
+function renderAlbumBar() {
+  const bar = document.getElementById('albumBar');
+  if (offline && !(ALBUMS.albums && ALBUMS.albums.length)) { bar.style.display = 'none'; return; }
+  bar.style.display = 'flex';
+  bar.innerHTML = '';
+  const items = [
+    { id: '', name: '全部', count: ALBUMS.total },
+    { id: '__none__', name: '未分类', count: ALBUMS.unclassified },
+    ...ALBUMS.albums.map(a => ({ id: a.id, name: a.name, count: a.count, real: true })),
+  ];
+  items.forEach(it => bar.appendChild(makeChip(it)));
+  if (!offline) {
+    const add = document.createElement('button');
+    add.type = 'button';
+    add.className = 'newalbum';
+    add.textContent = '＋ 新建收集册';
+    add.addEventListener('click', () => createAlbum());
+    bar.appendChild(add);
+  }
+  const hint = document.createElement('span');
+  hint.className = 'barhint';
+  hint.textContent = offline ? '离线查看（只读）' : '悬停卡片点 📁 可移动到收集册';
+  bar.appendChild(hint);
+}
+
+function makeChip(it) {
+  const c = document.createElement('div');
+  c.className = 'achip' + (curAlbum === it.id ? ' on' : '');
+  const label = document.createElement('span');
+  label.textContent = it.name;
+  const cnt = document.createElement('span');
+  cnt.className = 'acount';
+  cnt.textContent = it.count;
+  c.append(label, cnt);
+  if (it.real && !offline) {
+    const ren = document.createElement('button');
+    ren.type = 'button'; ren.className = 'aact'; ren.textContent = '✎'; ren.title = '重命名';
+    ren.addEventListener('click', e => { e.stopPropagation(); renameAlbum(it); });
+    const del = document.createElement('button');
+    del.type = 'button'; del.className = 'aact'; del.textContent = '✕'; del.title = '删除收集册';
+    del.addEventListener('click', e => { e.stopPropagation(); deleteAlbum(it); });
+    c.append(ren, del);
+  }
+  c.addEventListener('click', () => {
+    if (curAlbum === it.id) return;
+    curAlbum = it.id;
+    page = 0;
+    renderAlbumBar();
+    renderPage();
+  });
+  return c;
+}
+
+async function albumApi(path, body) {
+  const r = await fetch('/api/albums/' + path, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const d = await r.json();
+  if (!d.ok) throw new Error(d.error || '操作失败');
+  return d;
+}
+
+async function createAlbum() {
+  const name = prompt('新收集册名称：', '');
+  if (name === null) return;
+  if (!name.trim()) return;
+  try {
+    const d = await albumApi('create', { name: name.trim() });
+    applySummary(d.summary);
+  } catch (e) { alert('新建失败：' + e.message); }
+}
+
+async function renameAlbum(it) {
+  const name = prompt('重命名收集册「' + it.name + '」：', it.name);
+  if (name === null) return;
+  if (!name.trim() || name.trim() === it.name) return;
+  try {
+    const d = await albumApi('rename', { id: it.id, name: name.trim() });
+    applySummary(d.summary);
+  } catch (e) { alert('重命名失败：' + e.message); }
+}
+
+async function deleteAlbum(it) {
+  const msg = '删除收集册「' + it.name + '」？\n\n册里的 ' + it.count + ' 张卡牌会回到「未分类」，卡牌本身不会被删除。';
+  if (!confirm(msg)) return;
+  try {
+    const d = await albumApi('delete', { id: it.id });
+    applySummary(d.summary);
+  } catch (e) { alert('删除失败：' + e.message); }
+}
+
+// ---------- 卡牌移动 ----------
+function openMoveDialog(ids, title) {
+  if (offline) return;
+  moveTargets = ids.slice();
+  if (!moveTargets.length) return;
+  document.getElementById('moveTitle').textContent = title || '移动到收集册';
+  document.getElementById('moveSub').textContent =
+    moveTargets.length === 1 ? ('卡牌：' + cardName(moveTargets[0])) : ('共 ' + moveTargets.length + ' 张卡牌');
+  const list = document.getElementById('moveList');
+  list.innerHTML = '';
+  const cur = moveTargets.length === 1 ? (ALBUMS.members[moveTargets[0]] || '') : null;
+  const mk = (value, label, count) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    const t = document.createElement('span');
+    t.textContent = label;
+    b.appendChild(t);
+    if (count !== undefined && count !== null) {
+      const s = document.createElement('span');
+      s.className = 'cnt'; s.textContent = count;
+      b.appendChild(s);
+    }
+    if (cur !== null && (cur || '') === value) b.classList.add('cur');
+    b.addEventListener('click', () => doMove(value));
+    list.appendChild(b);
+  };
+  mk('', '🚫 移出收集册（未分类）', null);
+  ALBUMS.albums.forEach(a => mk(a.id, '📁 ' + a.name, a.count));
+  if (!ALBUMS.albums.length) {
+    const tip = document.createElement('div');
+    tip.className = 'sub';
+    tip.textContent = '还没有收集册，先用右下角「＋ 新建收集册」建一个。';
+    list.appendChild(tip);
+  }
+  document.getElementById('moveDlg').classList.add('show');
+}
+
+function cardName(id) {
+  const c = allCards.find(x => x.id === id);
+  return c ? c.name : id;
+}
+
+function closeMoveDialog() {
+  document.getElementById('moveDlg').classList.remove('show');
+  moveTargets = [];
+}
+
+async function doMove(albumId) {
+  const ids = moveTargets.slice();
+  if (!ids.length) return;
+  try {
+    const d = await albumApi('move', { ids, album: albumId });
+    closeMoveDialog();
+    if (selecting) { picked.clear(); syncBatchBar(); }
+    applySummary(d.summary);
+  } catch (e) { alert('移动失败：' + e.message); }
+}
+
+document.getElementById('moveCancel').addEventListener('click', closeMoveDialog);
+document.getElementById('moveNew').addEventListener('click', async () => {
+  const name = prompt('新收集册名称：', '');
+  if (name === null || !name.trim()) return;
+  try {
+    const d = await albumApi('create', { name: name.trim() });
+    ALBUMS = d.summary;
+    renderAlbumBar();
+    // 建完直接把当前这批准卡塞进去
+    const created = d.summary.albums.find(a => a.name === name.trim());
+    if (created) await doMove(created.id);
+    else applySummary(d.summary);
+  } catch (e) { alert('新建失败：' + e.message); }
+});
+document.getElementById('moveDlg').addEventListener('click', e => {
+  if (e.target === e.currentTarget) closeMoveDialog();
+});
+
+// ---------- 多选 ----------
+const selModeBtn = document.getElementById('selModeBtn');
+selModeBtn.addEventListener('click', () => {
+  selecting = !selecting;
+  if (!selecting) picked.clear();
+  document.body.classList.toggle('selecting', selecting);
+  selModeBtn.classList.toggle('on', selecting);
+  selModeBtn.textContent = selecting ? '☑ 多选中（点卡牌勾选）' : '☑ 多选';
+  syncBatchBar();
+  renderPage();
+});
+
+function syncBatchBar() {
+  const bar = document.getElementById('batchBar');
+  if (!selecting) { bar.classList.remove('show'); return; }
+  bar.classList.add('show');
+  document.getElementById('batchCount').textContent = '已选 ' + picked.size + ' 张';
+  const sel = document.getElementById('batchAlbum');
+  const prev = sel.value;
+  sel.innerHTML = '';
+  const o0 = document.createElement('option');
+  o0.value = ''; o0.textContent = '移出收集册（未分类）';
+  sel.appendChild(o0);
+  ALBUMS.albums.forEach(a => {
+    const o = document.createElement('option');
+    o.value = a.id; o.textContent = '📁 ' + a.name;
+    sel.appendChild(o);
+  });
+  if (prev && [...sel.options].some(o => o.value === prev)) sel.value = prev;
+  document.getElementById('batchMove').disabled = picked.size === 0;
+}
+
+function togglePick(id) {
+  if (picked.has(id)) picked.delete(id); else picked.add(id);
+  const el = grid.querySelector('.card[data-id="' + CSS.escape(id) + '"]');
+  if (el) el.classList.toggle('picked', picked.has(id));
+  syncBatchBar();
+}
+
+function ensureBatchBar() {
+  if (document.getElementById('batchBar')) return;
+  const bar = document.createElement('div');
+  bar.className = 'batchbar';
+  bar.id = 'batchBar';
+  bar.innerHTML =
+    '<span class="btxt" id="batchCount">已选 0 张</span>' +
+    '<select id="batchAlbum"></select>' +
+    '<button type="button" id="batchPickPage">全选本页</button>' +
+    '<button type="button" class="primary" id="batchMove">移动</button>' +
+    '<button type="button" id="batchCancel">取消</button>';
+  document.body.appendChild(bar);
+  document.getElementById('batchMove').addEventListener('click', () => {
+    if (!picked.size) return;
+    openMoveDialog([...picked], '把选中的卡牌移到…');
+  });
+  document.getElementById('batchPickPage').addEventListener('click', () => {
+    const slice = currentSlice();
+    const allOn = slice.every(c => picked.has(c.id));
+    slice.forEach(c => { if (allOn) picked.delete(c.id); else picked.add(c.id); });
+    renderPage();
+    syncBatchBar();
+  });
+  document.getElementById('batchCancel').addEventListener('click', () => selModeBtn.click());
+}
+ensureBatchBar();
+
+// ---------- 列表渲染 ----------
+function filteredCards() {
+  if (!curAlbum) return allCards;
+  if (curAlbum === '__none__') return allCards.filter(c => !ALBUMS.members[c.id]);
+  return allCards.filter(c => ALBUMS.members[c.id] === curAlbum);
+}
+
+let lastSlice = [];
+function currentSlice() { return lastSlice; }
+
 function renderPage() {
-  const total = allCards.length;
+  const list = filteredCards();
+  const total = list.length;
   const pages = Math.max(1, Math.ceil(total / PER_PAGE));
   if (page >= pages) page = pages - 1;
   if (page < 0) page = 0;
   const start = page * PER_PAGE;
-  const slice = allCards.slice(start, start + PER_PAGE);
+  const slice = list.slice(start, start + PER_PAGE);
+  lastSlice = slice;
   grid.innerHTML = '';
   empty.style.display = total ? 'none' : 'block';
+  if (!total) {
+    empty.textContent = curAlbum === '' ? '还没有成品卡牌，先去工坊制作一张吧～'
+      : (curAlbum === '__none__' ? '所有卡牌都已经分组了' : '这个收集册还是空的（悬停卡片点 📁 移进来）');
+  }
   slice.forEach(c => grid.appendChild(makeCard(c)));
   renderPager(pages);
+  const cntEl = document.getElementById('count');
+  const labelTotal = curAlbum === '' ? '' : ('（筛选后 ' + total + ' 张）');
+  cntEl.textContent = '共 ' + allCards.length + ' 张' + labelTotal;
 }
 
 function renderPager(pages) {
@@ -255,13 +661,26 @@ function renderPager(pages) {
 function makeCard(c) {
   const wrap = document.createElement('div');
   wrap.className = 'card';
-  wrap.innerHTML = '<button class="del" title="删除卡牌" aria-label="删除">✕</button><div class="inner"><img src="' + c.card_png + '" alt="" loading="lazy"><div class="name">' + esc(c.name) + '</div></div>';
+  wrap.dataset.id = c.id;
+  const albumName = albumNameOf(c.id);
+  wrap.innerHTML =
+    '<button class="sel" type="button" title="选择">✓</button>' +
+    '<button class="del" type="button" title="删除卡牌" aria-label="删除">✕</button>' +
+    '<button class="mv" type="button" title="移动到收集册" aria-label="移动">📁</button>' +
+    '<div class="inner"><img src="' + c.card_png + '" alt="" loading="lazy">' +
+    '<div class="name">' + esc(c.name) + '</div>' +
+    (albumName ? '<div class="alabel">📁 ' + esc(albumName) + '</div>' : '') +
+    '</div>';
   const inner = wrap.querySelector('.inner');
   const del = wrap.querySelector('.del');
-  if (offline) del.style.display = 'none';
+  const mv = wrap.querySelector('.mv');
+  const sel = wrap.querySelector('.sel');
+  if (offline) { del.style.display = 'none'; mv.style.display = 'none'; }
+  if (picked.has(c.id)) wrap.classList.add('picked');
 
   // 悬停微偏移（跟随鼠标的 3D 倾斜）
   wrap.addEventListener('mousemove', e => {
+    if (selecting) return;
     const r = wrap.getBoundingClientRect();
     const px = (e.clientX - r.left) / r.width - 0.5;
     const py = (e.clientY - r.top) / r.height - 0.5;
@@ -273,6 +692,7 @@ function makeCard(c) {
 
   // 侧边信息框：移入稍作延迟再显示，避免扫过时闪烁
   wrap.addEventListener('mouseenter', () => {
+    if (selecting) return;
     clearTimeout(hideTimer);
     clearTimeout(hoverTimer);
     hoverTimer = setTimeout(() => showInfo(c), 220);
@@ -282,15 +702,27 @@ function makeCard(c) {
     hideTimer = setTimeout(() => info.classList.remove('show'), 400);
   });
 
-  // 点击放大：完整 3D 交互
-  wrap.addEventListener('click', e => { if (e.target !== del) openModal(c); });
+  // 点击：多选模式勾选，否则放大
+  wrap.addEventListener('click', e => {
+    if (e.target === del || e.target === mv || e.target === sel) return;
+    if (selecting) togglePick(c.id);
+    else openModal(c);
+  });
 
-  // 删除
+  sel.addEventListener('click', e => { e.stopPropagation(); togglePick(c.id); });
+  mv.addEventListener('click', e => { e.stopPropagation(); openMoveDialog([c.id], '移动「' + c.name + '」到…'); });
   del.addEventListener('click', e => {
     e.stopPropagation();
     deleteCard(c);
   });
   return wrap;
+}
+
+function albumNameOf(id) {
+  const aid = ALBUMS.members[id];
+  if (!aid) return '';
+  const a = ALBUMS.albums.find(x => x.id === aid);
+  return a ? a.name : '';
 }
 
 async function deleteCard(c) {
@@ -304,6 +736,7 @@ async function deleteCard(c) {
   if (d.ok) {
     info.classList.remove('show');
     closeModal();
+    picked.delete(c.id);
     load();
   } else {
     alert('删除失败：' + (d.error || '未知错误'));
@@ -323,7 +756,9 @@ function showInfo(c) {
     desc.textContent = '（这张卡还没有描述文字）';
     desc.classList.add('empty');
   }
-  document.getElementById('infoMeta').innerHTML = '<b>卡片 ID</b>　' + esc(c.id);
+  const an = albumNameOf(c.id);
+  document.getElementById('infoMeta').innerHTML =
+    '<b>卡片 ID</b>　' + esc(c.id) + (an ? '<br><b>收集册</b>　📁 ' + esc(an) : '');
   info.classList.add('show');
 }
 
@@ -355,10 +790,6 @@ function closeModal() {
   document.getElementById('modalFrame').src = 'about:blank';
 }
 
-function esc(s) {
-  return String(s).replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m]));
-}
-
 document.getElementById('infoClose').addEventListener('click', () => info.classList.remove('show'));
 // 导出：保存为图片 / 保存为自包含网页（单文件，图片已内嵌）
 function exportCard(type) {
@@ -374,7 +805,12 @@ document.getElementById('modalSaveImg').addEventListener('click', () => exportCa
 document.getElementById('modalSaveHtml').addEventListener('click', () => exportCard('html'));
 document.getElementById('modalClose').addEventListener('click', closeModal);
 document.getElementById('modal').addEventListener('click', e => { if (e.target === e.currentTarget) closeModal(); });
-document.addEventListener('keydown', e => { if (e.key === 'Escape') { closeModal(); info.classList.remove('show'); } });
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Escape') return;
+  if (document.getElementById('moveDlg').classList.contains('show')) { closeMoveDialog(); return; }
+  closeModal();
+  info.classList.remove('show');
+});
 
 // 翻面：快速切换正反面（翻面后自动归正视角）
 document.getElementById('modalFlip').addEventListener('click', () => {
@@ -395,6 +831,7 @@ document.getElementById('modalSpin').addEventListener('click', () => {
 });
 /*__ALBUM_DATA_START__*/
 window.__ALBUM_DATA__ = [];
+window.__ALBUM_META__ = { albums: [], members: {} };
 /*__ALBUM_DATA_END__*/
 load();
 </script>

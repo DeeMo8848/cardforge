@@ -27,8 +27,9 @@
   }
   header h1 { font-size:20px; color:var(--gold2); letter-spacing:1px; }
   header .count { color:var(--muted); font-size:13px; }
+  header .navlinks { margin-left:auto; display:flex; gap:10px; }
   header .back {
-    margin-left:auto; color:var(--muted); text-decoration:none; font-size:13px;
+    color:var(--muted); text-decoration:none; font-size:13px;
     border:1px solid var(--line); padding:7px 14px; border-radius:999px; transition:all .15s;
   }
   header .back:hover { color:var(--gold2); border-color:var(--gold); }
@@ -262,7 +263,10 @@
     <h1>📖 卡牌收集册</h1>
     <span class="count" id="count"></span>
     <button class="ghostbtn" id="selModeBtn" type="button">☑ 多选</button>
-    <a class="back" href="/">← 返回工坊</a>
+    <div class="navlinks">
+      <a class="back" href="/codex.html">🐾 异兽牌</a>
+      <a class="back" href="/">← 返回工坊</a>
+    </div>
   </header>
   <div class="albumbar" id="albumBar" style="display:none"></div>
 </div>
@@ -355,8 +359,9 @@ async function load() {
   allCards = cards || [];
   ALBUMS = albums || { albums: [], members: {}, total: allCards.length, unclassified: allCards.length };
   if (offline) {
-    const back = document.querySelector('.back');
-    if (back) back.style.display = 'none';
+    // 离线（file://）时页内跳转与接口都不可用，整组按钮收起来
+    const nav = document.querySelector('.navlinks');
+    if (nav) nav.style.display = 'none';
     document.getElementById('selModeBtn').style.display = 'none';
   }
   // 当前筛选的册可能已被删除

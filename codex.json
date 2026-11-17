@@ -1,0 +1,35 @@
+{
+  "title": "异兽牌",
+  "subtitle": "RipIt · 异兽图鉴",
+  "edition_order": [
+    "Normal",
+    "Foil",
+    "Metallic",
+    "GoldBorder",
+    "Alpha",
+    "Beta",
+    "Omega",
+    "Negative",
+    "FirstEdition"
+  ],
+  "subjects": [
+    {
+      "slug": "air-cat-01a",
+      "name": "喵祥云",
+      "en": "Macleod",
+      "no": "081",
+      "element": "Air",
+      "element_cn": "风",
+      "rarity": "Rare"
+    },
+    {
+      "slug": "ice-cat-01a",
+      "name": "九命冰猫",
+      "en": "",
+      "no": "117",
+      "element": "Ice",
+      "element_cn": "冰",
+      "rarity": "Rare"
+    }
+  ]
+}

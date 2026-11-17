@@ -1,0 +1,543 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>异兽牌 · 图鉴</title>
+<style>
+  :root {
+    --bg:#100c09; --leather:#2a1f17; --leather2:#1a120d;
+    --paper:#1d1611; --paper2:#15100c;
+    --line:#3d2f24; --gold:#e3b95c; --gold2:#f3d48a; --golddim:#7a6438;
+    --text:#ece4d6; --muted:#a99b86; --void:#0b0806;
+  }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  html, body { height:100%; }
+  body {
+    background:
+      radial-gradient(1200px 620px at 50% -8%, #2b2118 0%, var(--bg) 62%),
+      var(--bg);
+    color:var(--text);
+    font-family:"Microsoft YaHei","PingFang SC",system-ui,sans-serif;
+    min-height:100vh; display:flex; flex-direction:column;
+  }
+
+  /* ---------- 顶栏 ---------- */
+  header {
+    display:flex; align-items:center; gap:16px; padding:18px 26px 12px;
+    flex-wrap:wrap;
+  }
+  header .brand { display:flex; align-items:baseline; gap:12px; }
+  header h1 {
+    font-size:24px; letter-spacing:5px; color:var(--gold2); font-weight:700;
+    text-shadow:0 2px 18px rgba(227,185,92,.28);
+  }
+  header .sub { font-size:12px; color:var(--muted); letter-spacing:2px; }
+  header .progress {
+    font-size:13px; color:var(--muted); border-left:1px solid var(--line); padding-left:16px;
+  }
+  header .progress b { color:var(--gold2); font-weight:700; }
+  header .spacer { margin-left:auto; }
+  header .lnk {
+    color:var(--muted); text-decoration:none; font-size:13px;
+    border:1px solid var(--line); padding:7px 14px; border-radius:999px;
+    transition:all .15s; white-space:nowrap;
+  }
+  header .lnk:hover { color:var(--gold2); border-color:var(--gold); }
+
+  /* 预览开关 */
+  .switch { display:inline-flex; align-items:center; gap:9px; cursor:pointer; user-select:none; }
+  .switch .track {
+    width:44px; height:24px; border-radius:999px; position:relative;
+    background:#241a13; border:1px solid var(--line); transition:all .2s;
+  }
+  .switch .knob {
+    position:absolute; top:2px; left:2px; width:18px; height:18px; border-radius:50%;
+    background:#6b5b45; transition:all .2s;
+  }
+  .switch.on .track {
+    background:linear-gradient(135deg, var(--gold2), var(--gold)); border-color:var(--gold);
+    box-shadow:0 0 16px rgba(227,185,92,.35);
+  }
+  .switch.on .knob { left:22px; background:#2b1d08; }
+  .switch .lab { font-size:13px; color:var(--muted); }
+  .switch.on .lab { color:var(--gold2); }
+
+  /* ---------- 书本 ---------- */
+  main { flex:1; display:flex; flex-direction:column; align-items:center; padding:6px 20px 26px; }
+  .book {
+    position:relative; width:min(1180px, 96vw);
+    display:grid; grid-template-columns:1fr 26px 1fr;
+    background:linear-gradient(135deg, #33261b 0%, #241a13 46%, #1b120d 100%);
+    border:1px solid #4a382a; border-radius:14px;
+    padding:16px; gap:0;
+    box-shadow:0 30px 80px rgba(0,0,0,.66), inset 0 0 0 1px rgba(227,185,92,.10);
+    perspective:2200px;
+  }
+  .gutter {
+    background:
+      linear-gradient(90deg, rgba(0,0,0,0) 0%, rgba(0,0,0,.55) 42%, rgba(0,0,0,.75) 50%, rgba(0,0,0,.55) 58%, rgba(0,0,0,0) 100%);
+    position:relative;
+  }
+  .gutter::before, .gutter::after {
+    content:""; position:absolute; left:50%; transform:translateX(-50%);
+    width:1px; background:linear-gradient(180deg, transparent, rgba(227,185,92,.35), transparent);
+    top:8%; bottom:8%;
+  }
+  .gutter::before { margin-left:-2px; }
+  .gutter::after { margin-left:2px; }
+
+  .page {
+    background:
+      radial-gradient(120% 90% at 50% 0%, rgba(255,240,210,.045), transparent 60%),
+      linear-gradient(160deg, var(--paper) 0%, var(--paper2) 100%);
+    border:1px solid rgba(227,185,92,.14);
+    border-radius:8px;
+    padding:16px 16px 38px;
+    min-height:520px;
+    display:flex; flex-direction:column;
+    position:relative;
+    box-shadow: inset 0 0 60px rgba(0,0,0,.55);
+    transition:transform .28s ease, opacity .28s ease;
+    transform-style:preserve-3d;
+  }
+  .page.left  { box-shadow: inset -22px 0 44px -30px #000, inset 0 0 60px rgba(0,0,0,.55); }
+  .page.right { box-shadow: inset 22px 0 44px -30px #000, inset 0 0 60px rgba(0,0,0,.55); }
+  .page.flip-next { transform:rotateY(-7deg) translateZ(-18px); opacity:.55; }
+  .page.flip-prev { transform:rotateY(7deg) translateZ(-18px); opacity:.55; }
+
+  .pagehead { display:flex; align-items:baseline; gap:10px; padding:0 4px 12px; }
+  .pagehead .no {
+    font-size:12px; color:var(--gold); letter-spacing:1px;
+    border:1px solid rgba(227,185,92,.35); border-radius:6px; padding:2px 7px;
+  }
+  .pagehead .nm { font-size:17px; color:var(--gold2); letter-spacing:2px; }
+  .pagehead .meta { margin-left:auto; font-size:12px; color:var(--muted); letter-spacing:1px; }
+  .pagehead .meta b { color:var(--gold2); }
+
+  .slots { display:grid; grid-template-columns:repeat(3, 1fr); gap:12px 10px; }
+  .slot { position:relative; cursor:pointer; }
+  .slot .plate {
+    position:relative; width:100%; aspect-ratio:1465 / 2048; border-radius:7px; overflow:hidden;
+    background:linear-gradient(160deg, #221a13, #14100c);
+    border:1px solid rgba(227,185,92,.16);
+    box-shadow:0 6px 18px rgba(0,0,0,.5);
+    transition:transform .18s ease, box-shadow .18s ease, border-color .18s ease;
+  }
+  .slot .plate img { width:100%; height:100%; object-fit:cover; display:block; }
+  .slot .cap {
+    margin-top:6px; text-align:center; font-size:11px; color:var(--muted);
+    letter-spacing:1px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+  }
+  .slot .cap .ed { color:#8d7c63; }
+
+  /* 已点亮 */
+  .slot.lit:hover .plate {
+    transform:translateY(-3px) scale(1.02);
+    border-color:var(--gold);
+    box-shadow:0 14px 34px rgba(227,185,92,.26), 0 0 0 1px rgba(243,212,138,.35);
+  }
+  .slot.lit:hover .cap { color:var(--gold2); }
+  .slot.lit::after {
+    content:""; position:absolute; inset:0 0 22px; border-radius:7px; pointer-events:none;
+    box-shadow: inset 0 0 22px rgba(255,214,140,.10);
+  }
+
+  /* 未点亮：压成暗影，只留轮廓 */
+  .slot.dim .plate img { filter:grayscale(1) brightness(.20) contrast(1.35); }
+  .slot.dim .plate::after {
+    content:""; position:absolute; inset:0;
+    background:
+      radial-gradient(circle at 50% 42%, rgba(255,214,140,.045), transparent 62%),
+      linear-gradient(160deg, rgba(10,8,6,.74), rgba(6,5,4,.86));
+  }
+  .slot.dim .lock {
+    position:absolute; left:50%; top:42%; transform:translate(-50%,-50%);
+    font-size:20px; color:rgba(227,185,92,.22); letter-spacing:2px; pointer-events:none;
+  }
+  .slot.dim .cap { color:#6b5e4e; }
+  .slot.dim:hover .plate { border-color:rgba(227,185,92,.32); }
+
+  /* 空槽（该版本还没做出来） */
+  .slot.void .plate {
+    background:
+      repeating-linear-gradient(45deg, rgba(255,255,255,.008) 0 7px, transparent 7px 14px),
+      linear-gradient(160deg, #171310, #0c0a08);
+    border:1px dashed rgba(227,185,92,.14);
+    box-shadow:none;
+  }
+  .slot.void .plate::after {
+    content:attr(data-q); position:absolute; inset:0;
+    display:flex; align-items:center; justify-content:center;
+    color:rgba(227,185,92,.16); font-size:26px; letter-spacing:4px;
+  }
+  .slot.void .cap { color:#4e4438; }
+
+  .pagenum {
+    position:absolute; left:0; right:0; bottom:9px; text-align:center;
+    font-size:11px; color:#6a5b46; letter-spacing:3px;
+  }
+
+  .blankpage {
+    flex:1; display:flex; align-items:center; justify-content:center;
+    color:#4a4036; font-size:13px; letter-spacing:6px;
+  }
+
+  /* ---------- 翻页 ---------- */
+  .bookfoot {
+    display:flex; align-items:center; gap:18px; margin-top:20px;
+  }
+  .bookfoot button {
+    display:inline-flex; align-items:center; gap:8px;
+    padding:9px 20px; border-radius:999px; cursor:pointer; font-size:13px;
+    background:linear-gradient(160deg, #2b2118, #1b1410); color:var(--muted);
+    border:1px solid var(--line); transition:all .15s;
+  }
+  .bookfoot button:hover:not(:disabled) { color:var(--gold2); border-color:var(--gold); }
+  .bookfoot button:disabled { opacity:.35; cursor:default; }
+  .bookfoot .idx { font-size:13px; color:var(--muted); letter-spacing:2px; min-width:110px; text-align:center; }
+  .bookfoot .idx b { color:var(--gold2); }
+  .hint { margin-top:10px; font-size:11px; color:#6a5b46; letter-spacing:1px; }
+
+  /* ---------- 详情弹窗 ---------- */
+  .modal {
+    position:fixed; inset:0; z-index:40; display:none;
+    background:rgba(8,6,4,.84); backdrop-filter:blur(6px);
+    align-items:center; justify-content:center; padding:30px;
+  }
+  .modal.show { display:flex; }
+  .modal .frame {
+    width:min(560px, 94vw); height:min(760px, 92vh);
+    background:#000; border-radius:16px; border:1px solid var(--gold);
+    overflow:hidden; box-shadow:0 20px 80px rgba(0,0,0,.7); position:relative;
+  }
+  .modal iframe { width:100%; height:100%; border:0; }
+  .modal .close {
+    position:absolute; top:-14px; right:-14px; z-index:3;
+    width:36px; height:36px; border-radius:50%;
+    background:var(--gold); color:#2b1d08; border:none; font-size:16px; cursor:pointer;
+    box-shadow:0 4px 16px rgba(0,0,0,.5);
+  }
+  .modal .modalbar {
+    position:absolute; left:0; right:0; bottom:0; z-index:3;
+    display:flex; gap:10px; justify-content:center; padding:12px;
+    background:linear-gradient(transparent, rgba(8,6,4,.92));
+  }
+  .modal .modalbar button {
+    padding:8px 18px; border-radius:999px; cursor:pointer; font-size:13px;
+    background:rgba(34,27,22,.9); color:var(--gold2); border:1px solid var(--line);
+    transition:all .15s;
+  }
+  .modal .modalbar button:hover { border-color:var(--gold); background:#32281c; }
+  .modal .modalbar button.on {
+    background:linear-gradient(135deg,var(--gold2),var(--gold)); color:#2b1d08; border-color:var(--gold);
+  }
+
+  .toast {
+    position:fixed; left:50%; bottom:44px; transform:translate(-50%, 16px);
+    background:rgba(34,27,22,.96); color:var(--gold2); font-size:13px;
+    border:1px solid var(--gold); border-radius:999px; padding:9px 20px;
+    opacity:0; pointer-events:none; transition:all .22s; z-index:60;
+  }
+  .toast.show { opacity:1; transform:translate(-50%, 0); }
+
+  @media (max-width: 900px) {
+    .book { grid-template-columns:1fr; padding:12px; }
+    .gutter { display:none; }
+    .page.right { margin-top:14px; }
+    .page { min-height:auto; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <h1 id="title">异兽牌</h1>
+    <span class="sub" id="subtitle">RipIt · 异兽图鉴</span>
+  </div>
+  <span class="progress" id="progress"></span>
+  <span class="spacer"></span>
+  <div class="switch on" id="litSwitch" role="switch" aria-checked="true" tabindex="0">
+    <span class="track"><span class="knob"></span></span>
+    <span class="lab" id="litLab">点亮</span>
+  </div>
+  <a class="lnk" href="/album.html">📖 收集册</a>
+  <a class="lnk" href="/">← 返回工坊</a>
+</header>
+
+<main>
+  <div class="book" id="book">
+    <div class="page left" id="pageL"></div>
+    <div class="gutter"></div>
+    <div class="page right" id="pageR"></div>
+  </div>
+
+  <div class="bookfoot">
+    <button id="prev" type="button">‹ 上一页</button>
+    <span class="idx" id="idx"></span>
+    <button id="next" type="button">下一页 ›</button>
+  </div>
+  <div class="hint" id="hint">点已点亮的卡牌可放大查看 3D 卡面 · ← → 翻页</div>
+</main>
+
+<div class="modal" id="modal">
+  <button class="close" id="modalClose">✕</button>
+  <div class="frame">
+    <iframe id="modalFrame" src="about:blank"></iframe>
+    <div class="modalbar">
+      <button id="modalFlip" type="button">🔄 翻面</button>
+      <button id="modalSpin" type="button">🌀 自动旋转</button>
+      <button id="modalSave" type="button">🖼️ 保存为图片</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+/*__CODEX_DATA_START__*/
+window.__CODEX__ = { title: '异兽牌', subtitle: 'RipIt · 异兽图鉴', entries: [] };
+/*__CODEX_DATA_END__*/
+const DATA = window.__CODEX__ || { title: '异兽牌', entries: [] };
+// 双击 codex.html（file://）时用本地相对路径；由服务器打开时用 /preview/
+const OFFLINE = location.protocol === 'file:';
+const pngOf = s => (OFFLINE ? (s.card_png_off || s.card_png) : s.card_png);
+const htmlOf = s => (OFFLINE ? (s.card_html_off || s.card_html) : s.card_html);
+const LEFT = document.getElementById('pageL');
+const RIGHT = document.getElementById('pageR');
+const PER_SPREAD = 2;          // 一册页 = 左右两页 = 2 个主体 × 9 版本
+let spread = 0;
+let lit = true;                // 预览开关：true = 按实际收录点亮；false = 全部熄灭
+let spinning = false;
+let current = null;
+
+const $ = id => document.getElementById(id);
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m]));
+}
+const spreads = () => Math.max(1, Math.ceil((DATA.entries || []).length / PER_SPREAD));
+
+function toast(msg) {
+  const t = $('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => t.classList.remove('show'), 1400);
+}
+
+function slotEl(slot, subj) {
+  const el = document.createElement('div');
+  const on = lit && slot.unlocked;
+  el.className = 'slot ' + (on ? 'lit' : (slot.unlocked ? 'dim' : 'void'));
+  el.dataset.id = slot.id;
+
+  if (slot.unlocked) {
+    const plate = document.createElement('div');
+    plate.className = 'plate';
+    const img = document.createElement('img');
+    img.src = pngOf(slot);
+    img.alt = slot.label;
+    img.loading = 'lazy';
+    plate.appendChild(img);
+    if (!on) {
+      const lk = document.createElement('div');
+      lk.className = 'lock';
+      lk.textContent = '✦';
+      plate.appendChild(lk);
+    }
+    el.appendChild(plate);
+  } else {
+    const plate = document.createElement('div');
+    plate.className = 'plate';
+    plate.dataset.q = '？';
+    el.appendChild(plate);
+  }
+
+  const cap = document.createElement('div');
+  cap.className = 'cap';
+  if (on) {
+    cap.innerHTML = '<span class="ed">' + esc(slot.edition_cn) + '</span>';
+  } else if (slot.unlocked) {
+    cap.textContent = '？？？';
+  } else {
+    cap.textContent = '未收录';
+  }
+  el.appendChild(cap);
+
+  el.addEventListener('click', () => {
+    if (!slot.unlocked) { toast('这一格还没有成品卡'); return; }
+    if (!on) { toast('这一格未点亮 · 打开顶栏开关可预览点亮效果'); return; }
+    openModal(slot);
+  });
+  return el;
+}
+
+function pageEl(subj, side) {
+  const box = document.createElement('div');
+  if (!subj) {
+    const b = document.createElement('div');
+    b.className = 'blankpage';
+    b.textContent = '· 此 页 留 白 ·';
+    box.appendChild(b);
+    return box;
+  }
+  const head = document.createElement('div');
+  head.className = 'pagehead';
+  head.innerHTML =
+    '<span class="no">No.' + esc(subj.no || '—') + '</span>' +
+    '<span class="nm">' + esc(subj.name) + '</span>' +
+    '<span class="meta">' + esc(subj.element_cn || subj.element || '') +
+    (subj.rarity ? ' · ' + esc(subj.rarity) : '') +
+    ' · 收录 <b>' + subj.owned + '</b>/' + subj.total + '</span>';
+  box.appendChild(head);
+
+  const grid = document.createElement('div');
+  grid.className = 'slots';
+  subj.slots.forEach(s => grid.appendChild(slotEl(s, subj)));
+  box.appendChild(grid);
+  return box;
+}
+
+function render(dir) {
+  const total = spreads();
+  if (spread >= total) spread = total - 1;
+  if (spread < 0) spread = 0;
+
+  const l = DATA.entries[spread * 2] || null;
+  const r = DATA.entries[spread * 2 + 1] || null;
+
+  LEFT.innerHTML = '';
+  RIGHT.innerHTML = '';
+  LEFT.appendChild(pageEl(l, 'left'));
+  RIGHT.appendChild(pageEl(r, 'right'));
+
+  if (l) {
+    const n = document.createElement('div');
+    n.className = 'pagenum';
+    n.textContent = '— ' + (spread * 2 + 1) + ' —';
+    LEFT.appendChild(n);
+  }
+  if (r) {
+    const n = document.createElement('div');
+    n.className = 'pagenum';
+    n.textContent = '— ' + (spread * 2 + 2) + ' —';
+    RIGHT.appendChild(n);
+  }
+
+  if (dir) {
+    const cls = dir > 0 ? 'flip-next' : 'flip-prev';
+    LEFT.classList.add(cls);
+    RIGHT.classList.add(cls);
+    requestAnimationFrame(() => {
+      setTimeout(() => { LEFT.classList.remove(cls); RIGHT.classList.remove(cls); }, 40);
+    });
+  }
+
+  const owned = DATA.owned || 0, tot = DATA.total || 0;
+  $('progress').innerHTML = '收录 <b>' + owned + '</b> / ' + tot + ' 格';
+  $('idx').innerHTML = '第 <b>' + (spread + 1) + '</b> / ' + total + ' 册页';
+  $('prev').disabled = spread <= 0;
+  $('next').disabled = spread >= total - 1;
+  $('hint').textContent = total > 1
+    ? '点已点亮的卡牌可放大查看 3D 卡面 · ← → 翻页'
+    : '点已点亮的卡牌可放大查看 3D 卡面 · 本册只有一册页（在 codex.json 里加主体会自动分页）';
+}
+
+function flip(d) {
+  const t = spreads();
+  const n = Math.min(t - 1, Math.max(0, spread + d));
+  if (n === spread) return;
+  spread = n;
+  render(d);
+}
+
+$('prev').addEventListener('click', () => flip(-1));
+$('next').addEventListener('click', () => flip(1));
+
+const sw = $('litSwitch');
+function setLit(v) {
+  lit = v;
+  sw.classList.toggle('on', lit);
+  sw.setAttribute('aria-checked', String(lit));
+  $('litLab').textContent = lit ? '点亮' : '熄灭';
+  render(0);
+}
+sw.addEventListener('click', () => setLit(!lit));
+sw.addEventListener('keydown', e => {
+  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setLit(!lit); }
+});
+
+// ---------- 详情弹窗 ----------
+function openModal(slot) {
+  current = slot;
+  const frame = $('modalFrame');
+  const flipBtn = $('modalFlip');
+  const spinBtn = $('modalSpin');
+  spinning = false;
+  spinBtn.classList.remove('on');
+  spinBtn.textContent = '🌀 自动旋转';
+  flipBtn.disabled = true;
+  spinBtn.disabled = true;
+  frame.onload = () => {
+    const api = frame.contentWindow && frame.contentWindow.__cardAPI;
+    flipBtn.disabled = !api;
+    spinBtn.disabled = !api;
+  };
+  frame.src = htmlOf(slot) || '';
+  $('modal').classList.add('show');
+}
+
+function closeModal() {
+  const frame = $('modalFrame');
+  if (spinning && frame.contentWindow && frame.contentWindow.__cardAPI) {
+    frame.contentWindow.__cardAPI.setAutoRotate(false);
+  }
+  spinning = false;
+  $('modal').classList.remove('show');
+  frame.src = 'about:blank';
+}
+
+$('modalClose').addEventListener('click', closeModal);
+$('modal').addEventListener('click', e => { if (e.target === e.currentTarget) closeModal(); });
+$('modalFlip').addEventListener('click', () => {
+  const f = $('modalFrame');
+  if (f.contentWindow && f.contentWindow.__cardAPI) f.contentWindow.__cardAPI.flipCard();
+});
+$('modalSpin').addEventListener('click', () => {
+  const f = $('modalFrame');
+  if (!f.contentWindow || !f.contentWindow.__cardAPI) return;
+  spinning = !spinning;
+  f.contentWindow.__cardAPI.setAutoRotate(spinning);
+  $('modalSpin').classList.toggle('on', spinning);
+  $('modalSpin').textContent = spinning ? '🌀 自动旋转中…' : '🌀 自动旋转';
+});
+$('modalSave').addEventListener('click', () => {
+  if (!current) return;
+  // 浏览器阻止跨文档下载时自动降级为「打开新标签」，交给用户自行保存
+  const a = document.createElement('a');
+  a.href = '/api/export?id=' + encodeURIComponent(current.id) + '&type=image';
+  a.download = '';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+});
+
+document.addEventListener('keydown', e => {
+  if ($('modal').classList.contains('show')) {
+    if (e.key === 'Escape') closeModal();
+    return;
+  }
+  if (e.key === 'ArrowLeft') { flip(-1); }
+  else if (e.key === 'ArrowRight') { flip(1); }
+});
+
+// 离线打开时页内链接失效，收起来（避免点了报错）
+if (OFFLINE) document.querySelectorAll('header .lnk').forEach(a => { a.style.display = 'none'; });
+
+// 标题来自目录配置
+$('title').textContent = DATA.title || '异兽牌';
+if (DATA.subtitle) $('subtitle').textContent = DATA.subtitle;
+render(0);
+</script>
+</body>
+</html>

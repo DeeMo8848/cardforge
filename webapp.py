@@ -45,6 +45,7 @@ EFFECTS_DIR = ASSETS / "effects"              # 自定义特效 JSON
 EFFECT_IMG_DIR = ASSETS / "effects-images"    # 特效图像/精灵帧图
 SETTINGS_FILE = PROJECT_ROOT / "settings.json"  # 界面参数持久化（如卡封强度）
 ALBUMS_FILE = PROJECT_ROOT / "albums.json"      # 收集册分组（册名 + 卡牌归属）
+CODEX_FILE = PROJECT_ROOT / "codex.json"        # 异兽牌图鉴目录（固定顺序的主体 + 版本槽位）
 
 _ASSET_TYPES = ("backgrounds", "faces", "frames", "frames-text", "seals", "backs",
                 "effects-images", "effects", "frame-effects")
@@ -431,6 +432,137 @@ def build_album_page() -> str:
         r"/\*__ALBUM_DATA_START__\*/.*?/\*__ALBUM_DATA_END__\*/",
         "/*__ALBUM_DATA_START__*/\nwindow.__ALBUM_DATA__ = " + data_json + ";\n"
         "window.__ALBUM_META__ = " + meta_json + ";\n/*__ALBUM_DATA_END__*/",
+        html,
+        flags=re.S,
+    )
+    p.write_text(html, encoding="utf-8")
+    return html
+
+
+# ---------- 异兽牌图鉴（codex） ----------
+# 与「收集册」是两件事：收集册是自由分组（可新建/删除/改名），图鉴是**固定顺序**的
+# 展册——一个主体（一只异兽）占一页 9 格（= 9 个版本），一册页左右两页共 18 格。
+# 有成品卡的槽位「点亮」，没有的留暗位（未收录）；顺序由 codex.json 定死，
+# 卡牌增删只影响点亮与否，不会让整本图鉴重新排页。
+
+_CODEX_EDITION_CN = {
+    "Normal": "普通", "Foil": "闪卡", "Metallic": "金属", "GoldBorder": "金边",
+    "Alpha": "阿尔法", "Beta": "贝塔", "Omega": "欧米伽", "Negative": "负片",
+    "FirstEdition": "初版", "Promo": "促销",
+}
+
+_CODEX_DEFAULT = {
+    "title": "异兽牌",
+    "subtitle": "RipIt · 异兽图鉴",
+    "edition_order": ["Normal", "Foil", "Metallic", "GoldBorder", "Alpha",
+                      "Beta", "Omega", "Negative", "FirstEdition"],
+    "subjects": [
+        {"slug": "air-cat-01a", "name": "喵祥云", "en": "Macleod", "no": "081",
+         "element": "Air", "element_cn": "风", "rarity": "Rare"},
+        {"slug": "ice-cat-01a", "name": "九命冰猫", "en": "", "no": "117",
+         "element": "Ice", "element_cn": "冰", "rarity": "Rare"},
+    ],
+}
+
+
+def _normalize_codex(d: dict) -> dict:
+    """把 codex.json 收敛成固定字段（缺项用默认补，坏条目直接丢）。"""
+    order = [str(x).strip() for x in (d.get("edition_order") or []) if str(x).strip()]
+    subjects = []
+    for s in (d.get("subjects") or []):
+        if not isinstance(s, dict):
+            continue
+        slug = str(s.get("slug") or "").strip()
+        if not slug:
+            continue
+        subjects.append({
+            "slug": slug,
+            "name": str(s.get("name") or slug).strip(),
+            "en": str(s.get("en") or "").strip(),
+            "no": str(s.get("no") or "").strip(),
+            "element": str(s.get("element") or "").strip(),
+            "element_cn": str(s.get("element_cn") or "").strip(),
+            "rarity": str(s.get("rarity") or "").strip(),
+        })
+    if not order or not subjects:
+        return _normalize_codex(_CODEX_DEFAULT)
+    return {
+        "title": str(d.get("title") or "异兽牌").strip() or "异兽牌",
+        "subtitle": str(d.get("subtitle") or "").strip(),
+        "edition_order": order,
+        "subjects": subjects,
+    }
+
+
+def _load_codex() -> dict:
+    """读 codex.json；缺失/损坏时回退内置默认（顺序固定）。"""
+    try:
+        if CODEX_FILE.exists():
+            d = json.loads(CODEX_FILE.read_text(encoding="utf-8"))
+            if isinstance(d, dict):
+                return _normalize_codex(d)
+    except (OSError, ValueError, TypeError):
+        pass
+    return _normalize_codex(_CODEX_DEFAULT)
+
+
+def codex_catalog(cards: list | None = None) -> dict:
+    """图鉴数据：每主体固定 9 个版本槽位 + 该槽位是否已有成品卡（点亮）。"""
+    cfg = _load_codex()
+    cards = list_cards() if cards is None else cards
+    by_id = {c["id"]: c for c in cards}
+    entries, total_slots, total_owned = [], 0, 0
+    for s in cfg["subjects"]:
+        slots = []
+        for ed in cfg["edition_order"]:
+            cid = f"{s['slug']}-{ed.lower()}"
+            c = by_id.get(cid)
+            cn = _CODEX_EDITION_CN.get(ed, ed)
+            slots.append({
+                "edition": ed,
+                "edition_cn": cn,
+                "id": cid,
+                "label": (c or {}).get("name") or f"{s['name']} · {cn}",
+                "card_png": (c or {}).get("card_png") or "",
+                "card_html": (c or {}).get("card_html") or "",
+                "unlocked": bool(c),
+            })
+        owned = sum(1 for x in slots if x["unlocked"])
+        total_slots += len(slots)
+        total_owned += owned
+        entries.append({**s, "slots": slots, "owned": owned, "total": len(slots),
+                        "complete": owned >= len(slots)})
+    return {
+        "title": cfg["title"],
+        "subtitle": cfg["subtitle"],
+        "total": total_slots,
+        "owned": total_owned,
+        "entries": entries,
+    }
+
+
+def build_codex_page() -> str:
+    """图鉴页面：模板 + 内嵌目录数据（同时写一份 codex.html 供离线双击查看）。"""
+    tpl = PROJECT_ROOT / "codex_template.html"
+    p = PROJECT_ROOT / "codex.html"
+    if tpl.exists():
+        html = tpl.read_text(encoding="utf-8")
+    elif p.exists():
+        html = p.read_text(encoding="utf-8")
+    else:
+        return ("<!DOCTYPE html><html lang='zh-CN'><head><meta charset='utf-8'>"
+                "<title>异兽牌</title></head><body><p>codex_template.html 缺失</p></body></html>")
+    data = codex_catalog()
+    for e in data["entries"]:
+        for s in e["slots"]:
+            # 同一份数据要同时喂给「HTTP」与「双击 file://」两种打开方式：
+            # 在线走 /preview/，离线必须改成相对文件路径，所以两个都存，前端按协议选。
+            s["card_png_off"] = s["card_png"].replace("/preview/", "assets/output/", 1)
+            s["card_html_off"] = s["card_html"].replace("/preview/", "assets/output/", 1)
+    data_json = json.dumps(data, ensure_ascii=False)
+    html = re.sub(
+        r"/\*__CODEX_DATA_START__\*/.*?/\*__CODEX_DATA_END__\*/",
+        "/*__CODEX_DATA_START__*/\nwindow.__CODEX__ = " + data_json + ";\n/*__CODEX_DATA_END__*/",
         html,
         flags=re.S,
     )
@@ -1436,6 +1568,16 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
 
+        if path == "/codex.html":
+            body = build_codex_page().encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
         if path == "/cutout.html":
             body = build_cutout_page().encode("utf-8")
             self.send_response(200)
@@ -2387,6 +2529,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
     <div class="tab" data-tab="assets">🗂️ 素材管理</div>
     <div class="tab" data-tab="packs">📦 素材包</div>
 <a class="tab" href="/album.html" target="_blank" style="text-decoration:none">📖 收集册</a>
+<a class="tab" href="/codex.html" target="_blank" style="text-decoration:none">🐾 异兽牌</a>
 <a class="tab" href="/cutout.html" target="_blank" style="text-decoration:none">✂️ 抠图工具</a>
   </nav>
 

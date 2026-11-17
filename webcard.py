@@ -13,7 +13,16 @@ import json
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-THREE_JS = PROJECT_ROOT / "assets" / "lib" / "three.min.js"
+THREE_JS = PROJECT_ROOT / "assets" / "shared" / "lib" / "three.min.js"
+# 卡页不再内联 three.js（每卡 633 KB，1800 版就是 1.1 GB）。
+# 【唯一一份】放在 assets/shared/lib/ 下：
+#   · file:// 打开 assets/output/<slug>/card.html → ../../shared/lib/ 直接命中；
+#   · http 下 /preview/<slug>/card.html 的 ../../shared/lib/ 会规范化成
+#     /shared/lib/...，webapp 的 /shared/ 路由再映射回 assets/shared/。
+# 只有 _preview/<token>/（比卡目录多一层）不适用，那种页面由 build_card_html
+# 的 three_rel 参数改传绝对路径 "/shared/lib/three.min.js"（预览页只在 http 下跑）。
+THREE_SRC_REL = "../../shared/lib/three.min.js"
+THREE_SRC_ABS = "/shared/lib/three.min.js"
 
 # ---- 粒子引擎 JS（卡片页与特效预览页共用） ----
 # 依赖全局：THREE、scene、CARD_WIDTH、CARD_HEIGHT、window.__EFFECT_ANCHOR__
@@ -902,9 +911,10 @@ CARD_HTML_TEMPLATE = r"""<!DOCTYPE html>
 <div class="hint">拖动旋转 · 滚轮缩放 · 双击翻面</div>
 <div id="stage"></div>
 <div class="loading" id="loading">加载中…</div>
-<script>
-__THREE_JS__
-</script>
+<!-- three.js 外链：内联的话每张卡要多背 633 KB（1800 版 ≈ 1.1 GB），
+     而且这份代码对所有卡完全相同。src 由 build_card_html(three_rel=...) 填入：
+     卡目录用 ../../shared/lib/，_preview/<token>/ 那种深一层用 /shared/lib/。 -->
+<script src="__THREE_SRC__"></script>
 <script>
 (function () {
   const CARD_WIDTH = __CARD_WIDTH__;
@@ -3678,8 +3688,14 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
                     glow_boost: float = 1.0,
                     follow_bg: bool = False,
                     bg_follow_rel: str | None = None,
-                    card_width: float = 2.25) -> str:
+                    card_width: float = 2.25,
+                    three_rel: str = THREE_SRC_REL) -> str:
     """生成自包含 3D 卡网页 HTML。
+
+    three_rel: three.js 的 script src。默认是"上两级"的 ../../shared/lib/，
+               适配 assets/output/<slug>/card.html；写到 assets/output/_preview/
+               <token>/preview.html（深一层、且只在 http 下打开）时传
+               THREE_SRC_ABS，否则会解析成 /preview/shared/... 而 404。
 
     effects: 特效实例列表 [{"name":..., "def": {...}, "pos": {...}}]，def 为完整特效参数。
     frame_rel/seal_rel: 可选的边框/卡封图片相对路径（叠加在卡面之上）。
@@ -3710,7 +3726,6 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
     card_width: 3D 卡体的宽（卡高恒为 3），默认 2.25（3:4）。卡面比例不同
     （如 Rip It! 游戏的 1465×2048 ≈ 5:7 → 2.25）时传入对应值，避免卡面被拉伸。
     """
-    three_js = THREE_JS.read_text(encoding="utf-8")
     fg_js = (
         # 浮于边框之上：前景组整体提升到边框层之上、卡封之下
         CARD_HTML_TEMPLATE_FG_FLOAT
@@ -3911,7 +3926,7 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
         )
     return (
         CARD_HTML_TEMPLATE
-        .replace("__THREE_JS__", three_js)
+        .replace("__THREE_SRC__", three_rel)
         .replace("__CARD_WIDTH__", ("%g" % round(card_width, 6)))
         .replace("__CARD_NAME__", name)
         .replace("__FRONT__", front_rel)

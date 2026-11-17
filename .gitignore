@@ -32,6 +32,9 @@ assets/shared/seal/
 assets/shared/deco/
 assets/shared/badges/
 assets/shared/fx/
+# 逐卡光效中间图：ri_<卡>-<版本>_<Gradient名>.png，每渲一版就重生成一份，
+# 全量 1800 版会堆出上千张 → 纯副产物，不入库。
+fx2/assets/foil/ri_*.png
 cards.zip
 album.html
 albums.json
@@ -43,7 +46,8 @@ packs/
 packs.json
 
 # ⚠️ 注意：assets/ 下的**素材**（backgrounds / frames / seals / backs / faces /
-#    frames-text / effects / effects-images / lib）是【必须入库】的项目资产 ——
+#    frames-text / effects / effects-images）与 assets/shared/lib/（three.min.js，
+#    卡页外链引用，全仓库唯一一份）是【必须入库】的项目资产 ——
 #    它们是卡牌制作的基础素材，不随 bot 仓库分发，缺了就会"素材清单为空"。
 #    别给 assets/ 整体加忽略规则，只忽略 assets/output/（生成产物）即可。
 

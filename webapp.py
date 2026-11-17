@@ -2194,7 +2194,11 @@ class Handler(BaseHTTPRequestHandler):
                                            glow_boost=frame_glow_boost(frame_path) if frame_path else 1.0,
                                            subject_offset_x=subject_offset_x,
                                            subject_offset_y=subject_offset_y,
-                                detail_rel=detail_url)
+                                detail_rel=detail_url,
+                                # 预览页写在 assets/output/_preview/<token>/，比卡目录深一层，
+                                # "../../shared/lib/" 会解析成 /preview/shared/... 而 404；
+                                # 预览页只在 http 下打开，直接用 /shared/ 路由的绝对路径。
+                                three_rel=webcard.THREE_SRC_ABS)
         return _write_preview_html(html)
 
     def _tmp_upload(self, data: dict) -> dict:

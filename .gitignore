@@ -20,6 +20,18 @@ models/
 
 # 生成产物（每张卡一个目录 + 临时缓存）
 assets/output/
+# 批量还原 200 张 × 9 版时，每张卡还会各生成一份「特效定义」与「共享立绘」，
+# 加起来上千个文件，全部是 assets/output 的副产物 → 不入库。
+# （已跟踪的少量示例文件不受影响，git 只在新增时看这些规则。）
+assets/effects/*-*.json
+assets/effects-images/artmask.png
+assets/shared/cards/
+cards/
+# 共享层（边光/底板/徽章/特效贴图）由渲染自动 ensure，缺了会重建 → 新生成的不入库
+assets/shared/seal/
+assets/shared/deco/
+assets/shared/badges/
+assets/shared/fx/
 cards.zip
 album.html
 albums.json

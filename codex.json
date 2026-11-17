@@ -12,24 +12,7 @@
     "Negative",
     "FirstEdition"
   ],
-  "subjects": [
-    {
-      "slug": "air-cat-01a",
-      "name": "喵祥云",
-      "en": "Macleod",
-      "no": "081",
-      "element": "Air",
-      "element_cn": "风",
-      "rarity": "Rare"
-    },
-    {
-      "slug": "ice-cat-01a",
-      "name": "九命冰猫",
-      "en": "",
-      "no": "117",
-      "element": "Ice",
-      "element_cn": "冰",
-      "rarity": "Rare"
-    }
-  ]
+  "include_promo": false,
+  "_note": "主体清单来自 codex_cards.json（209 张全量，按卡号排序，由 cardrip/_gen_codex_cards.py 生成）。想手工指定条目/顺序时，在本文件加 subjects 数组即可覆盖。include_promo=true 会把 No.201-209 特典卡也列进来。",
+  "subjects": []
 }

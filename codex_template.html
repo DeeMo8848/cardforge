@@ -185,19 +185,73 @@
 
   /* ---------- 翻页 ---------- */
   .bookfoot {
-    display:flex; align-items:center; gap:18px; margin-top:20px;
+    display:flex; align-items:center; gap:14px; margin-top:20px;
+    width:min(1180px, 96vw);
   }
   .bookfoot button {
-    display:inline-flex; align-items:center; gap:8px;
-    padding:9px 20px; border-radius:999px; cursor:pointer; font-size:13px;
+    display:inline-flex; align-items:center; gap:8px; flex:none;
+    padding:9px 18px; border-radius:999px; cursor:pointer; font-size:13px;
     background:linear-gradient(160deg, #2b2118, #1b1410); color:var(--muted);
     border:1px solid var(--line); transition:all .15s;
   }
   .bookfoot button:hover:not(:disabled) { color:var(--gold2); border-color:var(--gold); }
   .bookfoot button:disabled { opacity:.35; cursor:default; }
-  .bookfoot .idx { font-size:13px; color:var(--muted); letter-spacing:2px; min-width:110px; text-align:center; }
-  .bookfoot .idx b { color:var(--gold2); }
+
+  /* 滑块：拖动快速翻册页 */
+  .seekwrap { flex:1; display:flex; align-items:center; min-width:90px; }
+  #seek {
+    -webkit-appearance:none; appearance:none; width:100%; height:6px; border-radius:3px;
+    background:linear-gradient(90deg, var(--gold) var(--p,0%), #4a3826 var(--p,0%));
+    box-shadow:inset 0 0 0 1px rgba(0,0,0,.35);
+    outline:none; cursor:pointer;
+  }
+  #seek::-webkit-slider-thumb {
+    -webkit-appearance:none; width:15px; height:15px; border-radius:50%;
+    background:radial-gradient(circle at 35% 32%, var(--gold2), var(--gold));
+    border:none; box-shadow:0 0 10px rgba(227,185,92,.55); cursor:grab;
+  }
+  #seek::-webkit-slider-thumb:active { cursor:grabbing; }
+  #seek::-moz-range-thumb {
+    width:15px; height:15px; border-radius:50%; border:none;
+    background:var(--gold); box-shadow:0 0 10px rgba(227,185,92,.55); cursor:grab;
+  }
+
+  /* 页码：可直接输入跳转 */
+  .idx {
+    display:flex; align-items:center; gap:6px; flex:none;
+    font-size:12px; color:var(--muted); letter-spacing:1px; white-space:nowrap;
+  }
+  .idx input {
+    width:52px; padding:5px 4px; text-align:center; font-size:13px;
+    color:var(--gold2); background:#1c1611; border:1px solid var(--line);
+    border-radius:6px; outline:none; font-family:inherit;
+    -moz-appearance:textfield;
+  }
+  .idx input::-webkit-outer-spin-button, .idx input::-webkit-inner-spin-button {
+    -webkit-appearance:none; margin:0;
+  }
+  .idx input:focus { border-color:var(--gold); box-shadow:0 0 0 2px rgba(227,185,92,.16); }
+  .idx b { color:var(--gold2); font-weight:700; }
+
   .hint { margin-top:10px; font-size:11px; color:#6a5b46; letter-spacing:1px; }
+
+  /* 点击左右边缘翻页（视口两侧，不压卡片） */
+  .edge {
+    position:fixed; top:96px; bottom:0; width:max(26px, calc((100vw - 1180px) / 2 - 12px));
+    z-index:15; border:none; background:transparent; cursor:pointer;
+    display:flex; align-items:center; justify-content:center;
+    color:rgba(243,212,138,.32); font-size:30px; line-height:1;
+    transition:color .18s, background .18s;
+  }
+  .edge.left { left:0; padding-left:8px; }
+  .edge.right { right:0; padding-right:8px; }
+  .edge:hover:not(:disabled) {
+    color:var(--gold2); background:linear-gradient(90deg, rgba(227,185,92,.10), transparent);
+  }
+  .edge.right:hover:not(:disabled) {
+    background:linear-gradient(270deg, rgba(227,185,92,.10), transparent);
+  }
+  .edge:disabled { opacity:0; pointer-events:none; }
 
   /* ---------- 详情弹窗 ---------- */
   .modal {
@@ -274,11 +328,19 @@
 
   <div class="bookfoot">
     <button id="prev" type="button">‹ 上一页</button>
-    <span class="idx" id="idx"></span>
+    <div class="seekwrap">
+      <input id="seek" type="range" min="0" max="0" step="1" value="0" aria-label="拖动翻页">
+    </div>
+    <span class="idx">
+      第 <input id="pageInput" type="number" min="1" max="1" value="1" aria-label="页数"> / <b id="pageTotal">1</b> 册页
+    </span>
     <button id="next" type="button">下一页 ›</button>
   </div>
-  <div class="hint" id="hint">点已点亮的卡牌可放大查看 3D 卡面 · ← → 翻页</div>
+  <div class="hint" id="hint">点已点亮的卡牌可放大查看 3D 卡面 · ← → 翻页 · 拖滑块 / 输入页码 / 点左右边缘也能翻</div>
 </main>
+
+<button class="edge left" id="edgePrev" type="button" aria-label="上一页">‹</button>
+<button class="edge right" id="edgeNext" type="button" aria-label="下一页">›</button>
 
 <div class="modal" id="modal">
   <button class="close" id="modalClose">✕</button>
@@ -435,24 +497,68 @@ function render(dir) {
 
   const owned = DATA.owned || 0, tot = DATA.total || 0;
   $('progress').innerHTML = '收录 <b>' + owned + '</b> / ' + tot + ' 格';
-  $('idx').innerHTML = '第 <b>' + (spread + 1) + '</b> / ' + total + ' 册页';
-  $('prev').disabled = spread <= 0;
-  $('next').disabled = spread >= total - 1;
+  syncNav();
   $('hint').textContent = total > 1
-    ? '点已点亮的卡牌可放大查看 3D 卡面 · ← → 翻页'
-    : '点已点亮的卡牌可放大查看 3D 卡面 · 本册只有一册页（在 codex.json 里加主体会自动分页）';
+    ? '点已点亮的卡牌可放大查看 3D 卡面 · ← → 翻页 · 拖滑块 / 输入页码 / 点左右边缘也能翻'
+    : '点已点亮的卡牌可放大查看 3D 卡面 · 本册目前只有一册页（加主体后自动分页）';
 }
 
-function flip(d) {
+// 所有翻页入口都走这里：按钮 / 键盘 / 滑块 / 页码输入 / 点击边缘
+function gotoSpread(n, dir) {
   const t = spreads();
-  const n = Math.min(t - 1, Math.max(0, spread + d));
-  if (n === spread) return;
+  n = Math.max(0, Math.min(t - 1, Math.floor(n) || 0));
+  if (n === spread) { syncNav(); return; }
+  const d = (dir != null) ? dir : (n > spread ? 1 : -1);
   spread = n;
   render(d);
 }
 
+function flip(d) { gotoSpread(spread + d, d); }
+
+const seek = $('seek');
+const pageInput = $('pageInput');
+let seekPending = 0;
+
+// 滑块：拖动时逐帧合并，避免每像素重建整页
+seek.addEventListener('input', () => {
+  if (seekPending) return;
+  seekPending = requestAnimationFrame(() => {
+    seekPending = 0;
+    gotoSpread(+seek.value);
+  });
+});
+
+// 页码输入：回车 / 失焦时跳转，非法值回填当前页
+function commitPage() {
+  const n = parseInt(pageInput.value, 10);
+  if (!isFinite(n) || n < 1) { pageInput.value = spread + 1; return; }
+  gotoSpread(n - 1);
+}
+pageInput.addEventListener('keydown', e => {
+  if (e.key === 'Enter') { e.preventDefault(); commitPage(); pageInput.blur(); }
+  if (e.key === 'Escape') { pageInput.value = spread + 1; pageInput.blur(); }
+});
+pageInput.addEventListener('blur', commitPage);
+
 $('prev').addEventListener('click', () => flip(-1));
 $('next').addEventListener('click', () => flip(1));
+$('edgePrev').addEventListener('click', () => flip(-1));
+$('edgeNext').addEventListener('click', () => flip(1));
+
+// 页码/滑块/边缘按钮的状态同步（不重建书页，可以单独调用）
+function syncNav() {
+  const t = spreads();
+  $('pageTotal').textContent = t;
+  pageInput.max = t;
+  pageInput.value = spread + 1;
+  seek.max = String(t - 1);
+  seek.value = String(spread);
+  seek.style.setProperty('--p', (t > 1 ? (spread / (t - 1)) * 100 : 0) + '%');
+  $('prev').disabled = spread <= 0;
+  $('next').disabled = spread >= t - 1;
+  $('edgePrev').disabled = spread <= 0;
+  $('edgeNext').disabled = spread >= t - 1;
+}
 
 const sw = $('litSwitch');
 function setLit(v) {
@@ -527,8 +633,11 @@ document.addEventListener('keydown', e => {
     if (e.key === 'Escape') closeModal();
     return;
   }
-  if (e.key === 'ArrowLeft') { flip(-1); }
-  else if (e.key === 'ArrowRight') { flip(1); }
+  if (e.target === pageInput || e.target === seek) return;
+  if (e.key === 'ArrowLeft' || e.key === 'PageUp') { flip(-1); }
+  else if (e.key === 'ArrowRight' || e.key === 'PageDown') { flip(1); }
+  else if (e.key === 'Home') { gotoSpread(0); }
+  else if (e.key === 'End') { gotoSpread(spreads() - 1); }
 });
 
 // 离线打开时页内链接失效，收起来（避免点了报错）

@@ -45,7 +45,8 @@ EFFECTS_DIR = ASSETS / "effects"              # 自定义特效 JSON
 EFFECT_IMG_DIR = ASSETS / "effects-images"    # 特效图像/精灵帧图
 SETTINGS_FILE = PROJECT_ROOT / "settings.json"  # 界面参数持久化（如卡封强度）
 ALBUMS_FILE = PROJECT_ROOT / "albums.json"      # 收集册分组（册名 + 卡牌归属）
-CODEX_FILE = PROJECT_ROOT / "codex.json"        # 异兽牌图鉴目录（固定顺序的主体 + 版本槽位）
+CODEX_FILE = PROJECT_ROOT / "codex.json"        # 异兽牌图鉴：标题 / 版本顺序 / 手工覆盖
+CODEX_CARDS_FILE = PROJECT_ROOT / "codex_cards.json"  # 全部主体元数据（209 张，含未渲染的）
 
 _ASSET_TYPES = ("backgrounds", "faces", "frames", "frames-text", "seals", "backs",
                 "effects-images", "effects", "frame-effects")
@@ -456,12 +457,10 @@ _CODEX_DEFAULT = {
     "subtitle": "RipIt · 异兽图鉴",
     "edition_order": ["Normal", "Foil", "Metallic", "GoldBorder", "Alpha",
                       "Beta", "Omega", "Negative", "FirstEdition"],
-    "subjects": [
-        {"slug": "air-cat-01a", "name": "喵祥云", "en": "Macleod", "no": "081",
-         "element": "Air", "element_cn": "风", "rarity": "Rare"},
-        {"slug": "ice-cat-01a", "name": "九命冰猫", "en": "", "no": "117",
-         "element": "Ice", "element_cn": "冰", "rarity": "Rare"},
-    ],
+    "include_promo": False,
+    # 主体列表默认来自 codex_cards.json（209 张全量，按卡号排序）。
+    # 这里留空表示「自动」；填了 subjects 才按手写清单覆盖。
+    "subjects": [],
 }
 
 
@@ -484,13 +483,14 @@ def _normalize_codex(d: dict) -> dict:
             "element_cn": str(s.get("element_cn") or "").strip(),
             "rarity": str(s.get("rarity") or "").strip(),
         })
-    if not order or not subjects:
-        return _normalize_codex(_CODEX_DEFAULT)
+    if not order:
+        order = list(_CODEX_DEFAULT["edition_order"])
     return {
         "title": str(d.get("title") or "异兽牌").strip() or "异兽牌",
         "subtitle": str(d.get("subtitle") or "").strip(),
         "edition_order": order,
-        "subjects": subjects,
+        "subjects": subjects,          # 空 = 用 codex_cards.json 的全量清单
+        "include_promo": bool(d.get("include_promo", False)),
     }
 
 
@@ -506,13 +506,48 @@ def _load_codex() -> dict:
     return _normalize_codex(_CODEX_DEFAULT)
 
 
+def _load_codex_cards() -> list:
+    """全量主体元数据（codex_cards.json，209 张含未渲染的）。
+
+    由 cardrip/_gen_codex_cards.py 从「卡牌总表 + cards_final」合并导出：
+    名字/描述以总表为准（cards_final 里 01b/01c 变体大面积为空），
+    序号与稀有度取 cards_final。缺失或损坏时返回空，退回 codex.json 的手写清单。
+    """
+    try:
+        d = json.loads(CODEX_CARDS_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(d, list):
+        return []
+    out = []
+    for x in d:
+        if not isinstance(x, dict) or not str(x.get("slug") or "").strip():
+            continue
+        out.append({
+            "slug": str(x["slug"]).strip(),
+            "name": str(x.get("name") or x["slug"]).strip(),
+            "en": str(x.get("en") or "").strip(),
+            "no": str(x.get("no") or "").strip(),
+            "element": str(x.get("element") or "").strip(),
+            "element_cn": str(x.get("element_cn") or "").strip(),
+            "rarity": str(x.get("rarity") or "").strip(),
+            "promo": bool(x.get("promo")),
+            "animal": str(x.get("animal") or "").strip(),
+            "version": str(x.get("version") or "").strip(),
+        })
+    return out
+
+
 def codex_catalog(cards: list | None = None) -> dict:
     """图鉴数据：每主体固定 9 个版本槽位 + 该槽位是否已有成品卡（点亮）。"""
     cfg = _load_codex()
     cards = list_cards() if cards is None else cards
     by_id = {c["id"]: c for c in cards}
+    subjects = cfg.get("subjects") or _load_codex_cards()
+    if not cfg.get("include_promo", False):
+        subjects = [x for x in subjects if not x.get("promo")]
     entries, total_slots, total_owned = [], 0, 0
-    for s in cfg["subjects"]:
+    for s in subjects:
         slots = []
         for ed in cfg["edition_order"]:
             cid = f"{s['slug']}-{ed.lower()}"

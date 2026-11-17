@@ -230,6 +230,29 @@ CLI 缺省也会自动走 API（显式 `--model` 仍然优先）。
   想手工指定条目或顺序时，加 `subjects` 数组即可覆盖自动清单。
 - 卡牌 id 按 `<slug>-<版本小写>` 推导（如 `air-cat-01a-negative`）；点亮判定 = 这个目录是否真的存在。
 
+### 缩略图（**不要删** `thumb.png`）
+
+网格每格只有约 160 CSS px，早期直接用 1465×2048 的 `card.png` 当缩略图，实测：
+
+| | 一册页（18 格） | 单页解码 |
+|---|---|---|
+| `card.png` | **37 MB** | 0.8 – 2.0 s（翻页明显顿） |
+| `thumb.png`（宽 320，~172 KB） | **3.1 MB** | ~20 ms |
+
+所以每张卡额外写一份 `thumb.png`（`batch_editions.make_one` 生成，`_backfill_thumb.py` 可回填历史卡）。
+`card.png` 保持原样不动 —— 导出成品、离线查看、弹窗 3D 都还用它，弹窗走的是 `card.html` 里的 iframe，
+**不读** `card.png`，所以缩略图不会顶替大图。
+
+★ 两个坑：
+
+1. `thumb.png` **必须**在 `cardrip/_sharedize.py` 的 `KEEP_LOCAL` 里。它是每卡专属的，
+   一旦被当公共素材处理，就会被 prune 扫进 `packs/_trash`，图鉴立刻变成一片空位。
+2. 图鉴页注入数据用的是 `re.sub(...)`，**替换串会被解释反斜杠**（`\"` → `"`）。
+   直接把 `json.dumps` 的结果塞进替换串，卡牌描述里只要有一个引号，JSON 就被吃坏，
+   浏览器报 `Invalid or unexpected token`，`window.__CODEX__` 没定义 → 整本图鉴白屏。
+   必须用函数式替换（`lambda _m: payload`）原样插入，并顺手把 `</` 转成 `<\/`
+   防止描述里出现 `</script>` 提前闭合。
+
 离线双击 `codex.html` 也可看（图片走相对路径，链接自动隐藏）。
 
 ## 批量还原卡牌（从游戏解包图）

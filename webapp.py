@@ -246,6 +246,9 @@ def list_cards() -> list[dict]:
                 "text_pos": text_pos,
                 "card_png": (f"/preview/{d.name}/card.png" if (d / "card.png").exists()
                              else f"/preview/{d.name}/front.png"),
+                # 图鉴网格专用缩略图（宽 320）。没有就留空，前端回落到 card_png。
+                "card_thumb": (f"/preview/{d.name}/thumb.png"
+                               if (d / "thumb.png").exists() else ""),
                 "card_html": f"/preview/{d.name}/card.html" if (d / "card.html").exists() else "",
                 "frame": inherit.get("frame"),
                 "seal": inherit.get("seal"),
@@ -559,6 +562,7 @@ def codex_catalog(cards: list | None = None) -> dict:
                 "id": cid,
                 "label": (c or {}).get("name") or f"{s['name']} · {cn}",
                 "card_png": (c or {}).get("card_png") or "",
+                "thumb": (c or {}).get("card_thumb") or "",
                 "card_html": (c or {}).get("card_html") or "",
                 "unlocked": bool(c),
             })
@@ -594,10 +598,19 @@ def build_codex_page() -> str:
             # 在线走 /preview/，离线必须改成相对文件路径，所以两个都存，前端按协议选。
             s["card_png_off"] = s["card_png"].replace("/preview/", "assets/output/", 1)
             s["card_html_off"] = s["card_html"].replace("/preview/", "assets/output/", 1)
+            s["thumb_off"] = (s.get("thumb") or "").replace("/preview/", "assets/output/", 1)
     data_json = json.dumps(data, ensure_ascii=False)
+    # ★ 不能直接把 data_json 拼进 re.sub 的**替换串**：re.sub 会对替换串做转义解释
+    #   （`\"` → `"`、`\\` → `\`、`\n` → 换行），卡牌描述里只要有一个引号，
+    #   注入的 JSON 就被吃坏，浏览器报 "Invalid or unexpected token"，
+    #   于是 window.__CODEX__ / const DATA 全都没定义，图鉴白屏只剩空壳。
+    #   改用函数式替换，替换内容原样插入。
+    data_json = data_json.replace("</", "<\\/")   # 防止描述里出现 </script> 提前闭合
+    payload = ("/*__CODEX_DATA_START__*/\nwindow.__CODEX__ = " + data_json
+               + ";\n/*__CODEX_DATA_END__*/")
     html = re.sub(
         r"/\*__CODEX_DATA_START__\*/.*?/\*__CODEX_DATA_END__\*/",
-        "/*__CODEX_DATA_START__*/\nwindow.__CODEX__ = " + data_json + ";\n/*__CODEX_DATA_END__*/",
+        lambda _m: payload,
         html,
         flags=re.S,
     )

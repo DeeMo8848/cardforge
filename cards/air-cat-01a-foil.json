@@ -34,7 +34,7 @@
   "subject_outline": false,
   "mask_clip": true,
   "seal_name": "../../shared/seal/seal_foil.png",
-  "seal_strength_front": 1.0,
+  "seal_strength_front": 1.3,
   "seal_strength_back": 0.0,
   "seal_frame_name": null,
   "seal_frame_strength_front": 0.8,

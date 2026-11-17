@@ -568,7 +568,15 @@ EFFECT_ENGINE_JS = r"""
       // 掩码为 0（立绘/UI）处 fuv 不变 → 立绘/文字/图标原地不动；
       // 只有一张贴图被揉，没有第二层覆盖，所以不会重影、也不会整体变亮。
       '  if (uFlowAmt > 0.0) {\n' +
-'    float fmask = smoothstep(0.02, 0.55, texture2D(uFlowMask, faceUv).a);\n' +
+      // 第二十七轮：不再采样 uFlowMask。
+      // 那张掩码原本干两件事：① 挡住立绘/UI（让它们不动）② 卡边渐隐。
+      //  ① 是多余的 —— 立绘、边框、徽章、文字各自是**独立层**，renderOrder 都比
+      //    卡面高，卡面在它们底下怎么揉都看不见；掩码等于给「反正会被盖住」的
+      //    像素做逐个判断，还为此背了一张 1465×2048 的 PNG。
+      //  ② 已经由下面的程序化 ef（uv 距边 0.055 ≈ 113px 的 smoothstep）承担，
+      //    不依赖任何贴图。
+      // 所以现在「流动只动印刷背景、不动主体」是靠**层序**保证的，不是靠掩码。
+'    float fmask = 1.0;\n' +
 '    vec2 efv = vec2(min(faceUv.x, 1.0 - faceUv.x), min(faceUv.y, 1.0 - faceUv.y));\n' +
 '    float ef = smoothstep(0.0, 0.055, min(efv.x, efv.y));\n' +
 '    float ft = uTime * uFlowSpeed;\n' +
@@ -1418,6 +1426,7 @@ __ENGINE_JS__
   let prevPinch = 0;
   let targetFlip = 0;          // 0=正面 1=背面
   let autoRotate = false;      // 自动旋转开关
+  let viewLock = false;        // 调试用：锁死相机与倾斜，忽略鼠标输入（A/B 截图必须同角度才可比）
   let snapPause = 0;           // 归正期间暂停自动旋转（秒），让归正可见
   const AUTO_ROTATE_SPEED = 1.92; // 弧度/秒（约 3.3 秒一圈）
 
@@ -1444,6 +1453,7 @@ __ENGINE_JS__
     if (pointers.size === 1) tapStart = { x: e.clientX, y: e.clientY };
   });
   canvas.addEventListener('pointermove', (e) => {
+    if (viewLock) return;
     if (pointers.has(e.pointerId) && pointers.size === 1) {
       const last = pointers.get(e.pointerId);
       state.targetTheta -= (e.clientX - last.clientX) * 0.0058;
@@ -1644,6 +1654,21 @@ __GLOW_TICK__
   window.__cardAPI = {
     setAutoRotate: function (enable) {
       autoRotate = !!enable;
+    },
+    // 调试用：把相机与卡片倾斜钉死，供逐参数截图比对。
+    // A/B 必须同角度才可比（第二十八轮踩过：三张截图角度不同，掐掉一层后
+    // mean 反而升高，得出「星星在压暗画面」的错误结论）。
+    //   x / y 取 -1~1，0 = 正对；x 正 = 卡片向右手边翻，y 正 = 上仰。
+    setView: function (x, y) {
+      autoRotate = false;
+      viewLock = true;
+      state.theta = state.targetTheta = 0;
+      state.phi = state.targetPhi = Math.PI / 2;
+      hoverTarget.set(x || 0, y || 0);
+      hoverCurrent.copy(hoverTarget);
+    },
+    unlockView: function () {
+      viewLock = false;
     },
     flipCard: function () {
       doFlip();
@@ -3456,9 +3481,16 @@ FG_ROUND_JS = r"""
     t.colorSpace = THREE.SRGBColorSpace;
     t.anisotropy = 8;
     foregroundTexture = t;
+    var tries = 0;
     function round() {
       var img = orig.image;
-      if (!img || !img.width || !img.height) { setTimeout(round, 30); return; }
+      if (!img || !img.width || !img.height) {
+        // 贴图缺失（例如这张卡没有前景主体）时不能无限轮询：
+        // 3 秒后放弃，foregroundTexture 保持空纹理 —— 实测 fgMesh/shadowMesh
+        // 采样空纹理时全透明（不会出现白块），效果等同于没有前景层。
+        if (++tries > 100) { foregroundTexture = orig; return; }
+        setTimeout(round, 30); return;
+      }
       var nv = document.createElement('canvas');
       nv.width = img.width;
       nv.height = img.height;

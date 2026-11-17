@@ -126,7 +126,7 @@
     },
     {
       "slot": "Front3",
-      "tex": "ri_air-cat-01a-firstedition_seal_glitter",
+      "tex": null,
       "color": [
         0.55,
         0.7,
@@ -151,8 +151,8 @@
       "px": 0,
       "py": 0,
       "en": 1,
-      "tx": 1,
-      "ty": 1,
+      "tx": 4,
+      "ty": 5,
       "ox": 0.0,
       "oy": 0.0,
       "tint": [
@@ -169,7 +169,8 @@
       "bper": 3.0,
       "bdur": 0.16,
       "bpeak": 0.85,
-      "bphase": 0
+      "bphase": 0,
+      "on": 0
     }
   ]
 }

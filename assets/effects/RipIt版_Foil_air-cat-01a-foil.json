@@ -80,7 +80,7 @@
     },
     {
       "slot": "Front2",
-      "tex": "ri_air-cat-01a-foil_seal_glitter",
+      "tex": null,
       "color": [
         0.55,
         0.6,
@@ -105,8 +105,8 @@
       "px": 0,
       "py": 0,
       "en": 1,
-      "tx": 1,
-      "ty": 1,
+      "tx": 3,
+      "ty": 4,
       "ox": 0.0,
       "oy": 0.0,
       "tint": [
@@ -123,12 +123,11 @@
       "bper": 2.4,
       "bdur": 0.16,
       "bpeak": 0.85,
-      "bphase": 0
+      "bphase": 0,
+      "on": 0
     }
   ],
   "flow": {
-    "mask": "flowmask.png",
-    "noise": "flow_noise.png",
     "amt": 0.5,
     "speed": 1.0
   }

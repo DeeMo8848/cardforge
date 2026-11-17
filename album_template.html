@@ -16,10 +16,13 @@
     color: var(--text); font-family:"Microsoft YaHei","PingFang SC",system-ui,sans-serif;
     min-height:100vh;
   }
-  header {
+  /* 页头 + 册条共用一个粘性容器，避免两段 sticky 之间漏出卡片 */
+  .topwrap {
     position: sticky; top:0; z-index:20;
-    background: rgba(20,16,12,.85); backdrop-filter: blur(8px);
+    background: rgba(20,16,12,.86); backdrop-filter: blur(8px);
     border-bottom:1px solid var(--line);
+  }
+  header {
     padding:16px 24px; display:flex; align-items:center; gap:16px;
   }
   header h1 { font-size:20px; color:var(--gold2); letter-spacing:1px; }
@@ -41,10 +44,8 @@
 
   /* 收集册筛选条 */
   .albumbar {
-    position: sticky; top:57px; z-index:19;
     display:flex; flex-wrap:wrap; gap:8px; align-items:center;
-    padding:12px 24px; background:rgba(20,16,12,.72); backdrop-filter: blur(8px);
-    border-bottom:1px solid var(--line);
+    padding:0 24px 12px;
   }
   .achip {
     display:inline-flex; align-items:center; gap:8px;
@@ -256,13 +257,15 @@
 </style>
 </head>
 <body>
-<header>
-  <h1>📖 卡牌收集册</h1>
-  <span class="count" id="count"></span>
-  <button class="ghostbtn" id="selModeBtn" type="button">☑ 多选</button>
-  <a class="back" href="/">← 返回工坊</a>
-</header>
-<div class="albumbar" id="albumBar" style="display:none"></div>
+<div class="topwrap">
+  <header>
+    <h1>📖 卡牌收集册</h1>
+    <span class="count" id="count"></span>
+    <button class="ghostbtn" id="selModeBtn" type="button">☑ 多选</button>
+    <a class="back" href="/">← 返回工坊</a>
+  </header>
+  <div class="albumbar" id="albumBar" style="display:none"></div>
+</div>
 <main>
   <div class="grid" id="grid"></div>
   <div class="empty" id="empty" style="display:none">还没有成品卡牌，先去工坊制作一张吧～</div>
@@ -369,6 +372,7 @@ function applySummary(s) {
   if (curAlbum && curAlbum !== '__none__' && !ALBUMS.albums.some(a => a.id === curAlbum)) curAlbum = '';
   renderAlbumBar();
   renderPage();
+  if (selecting) syncBatchBar();   // 册列表可能变了，批量操作条的下拉要重建
 }
 
 // ---------- 收集册筛选条 ----------

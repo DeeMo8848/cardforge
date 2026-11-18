@@ -230,18 +230,32 @@ CLI 缺省也会自动走 API（显式 `--model` 仍然优先）。
   想手工指定条目或顺序时，加 `subjects` 数组即可覆盖自动清单。
 - 卡牌 id 按 `<slug>-<版本小写>` 推导（如 `air-cat-01a-negative`）；点亮判定 = 这个目录是否真的存在。
 
+### 成品大图用 WebP（`card.webp`）
+
+每张卡除了 `card.html`（3D 分层页）还写一份**平面成品图**，用于「导出图片」和制作页的 2D 预览。
+它存 `card.webp` 而不是 `card.png`：
+
+| | 单张（1465×2048） | 1800 版合计 |
+|---|---|---|
+| `card.png` | 1.75 MB | ~3.1 GB |
+| `card.webp`（q92，同分辨率） | **0.17 MB** | **~315 MB** |
+
+肉眼看不出差别。`_export_card` 在导出时用 PIL 转回 PNG 给用户（毫秒级），所以对外表现不变。
+`list_cards()` 用 `_big_name()` 取文件名，`card.webp` 不存在时回落 `card.png`（兼容老产物）。
+
 ### 缩略图（**不要删** `thumb.png`）
 
-网格每格只有约 160 CSS px，早期直接用 1465×2048 的 `card.png` 当缩略图，实测：
+网格每格只有约 160 CSS px，早期直接用 1465×2048 的成品大图当缩略图，实测：
 
 | | 一册页（18 格） | 单页解码 |
 |---|---|---|
-| `card.png` | **37 MB** | 0.8 – 2.0 s（翻页明显顿） |
-| `thumb.png`（宽 320，~172 KB） | **3.1 MB** | ~20 ms |
+| 整卡大图 | **37 MB** | 0.8 – 2.0 s（翻页明显顿） |
+| `thumb.png`（宽 320，~190 KB） | **3.1 MB** | ~20 ms |
 
 所以每张卡额外写一份 `thumb.png`（`batch_editions.make_one` 生成，`_backfill_thumb.py` 可回填历史卡）。
-`card.png` 保持原样不动 —— 导出成品、离线查看、弹窗 3D 都还用它，弹窗走的是 `card.html` 里的 iframe，
-**不读** `card.png`，所以缩略图不会顶替大图。
+收集册的网格格子和侧栏小图都读它；**详情弹窗走 `card.html` 的 iframe**，
+那里是 three.js 按层实时合成（front / under_rare / art / border / badges / text / smoke 各自一张贴图），
+不是一张预合成的大图 —— 这才是「换掉 art.png 就换主体」的可 DIY 架构。
 
 ★ 两个坑：
 

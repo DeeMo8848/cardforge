@@ -18,6 +18,7 @@ import base64
 import io
 import json
 import mimetypes
+import os
 import re
 import shutil
 import sys
@@ -205,6 +206,18 @@ def _remove_builtin_glow(stem: str) -> str | None:
     return removed
 
 
+def _big_name(d: Path) -> str:
+    """成品大图文件名。
+
+    新产物存 card.webp —— 同一张 1465×2048，PNG 1.75 MB、WebP(q92) 0.17 MB，
+    1800 版差 2.8 GB，肉眼分辨不出。老的 PNG 产物继续兼容。
+    """
+    for n in ("card.webp", "card.png"):
+        if (d / n).exists():
+            return n
+    return ""
+
+
 def list_cards() -> list[dict]:
     """已有卡牌（assets/output/ 下含 front.png 的目录），附收集册展示所需字段。"""
     out = ASSETS / "output"
@@ -218,24 +231,34 @@ def list_cards() -> list[dict]:
                 continue
             if d.name in _exclude or _is_hex_id(d.name):
                 continue
-            # 第二十四轮：front.png 已提到 shared/front/（按版本复用），卡目录只剩 card.html + card.png
+            # ★ 一次 scandir 拿到目录内全部文件名 —— 原来逐个 (d/n).exists()
+            #   是每张卡 8~10 次 stat，1802 张就是 1.8 万次，光 syscall 就要 1.2 秒。
+            try:
+                with os.scandir(d) as it:
+                    files = {e.name for e in it}
+            except OSError:
+                continue
+            # 第二十四轮：front.png 已提到 shared/front/（按版本复用），卡目录只剩 card.html + 大图
             # → 只要还有卡面或 3D 页，就算成品卡，别再拿 front.png 当存在性判据。
-            if not any((d / n).exists() for n in ("front.png", "card.png", "card.html")):
+            if not ({"front.png", "card.webp", "card.png", "card.html"} & files):
                 continue
             name, desc, text_type = d.name, "", "none"
             text_pos = None
             data = {}
             try:
-                cf = PROJECT_ROOT / "cards" / f"{d.name}.json"
-                if cf.exists():
-                    data = json.loads(cf.read_text(encoding="utf-8"))
-                    name = data.get("name") or d.name
-                    desc = data.get("description") or ""
-                    text_type = (data.get("text") or {}).get("type") or "none"
-                    text_pos = (data.get("text") or {}).get("pos")
+                # 直接读，别再 exists 一次（每张卡省一次 stat；读不到抛 OSError 一样兜住）
+                data = json.loads((PROJECT_ROOT / "cards" / f"{d.name}.json")
+                                  .read_text(encoding="utf-8"))
+                name = data.get("name") or d.name
+                desc = data.get("description") or ""
+                text_type = (data.get("text") or {}).get("type") or "none"
+                text_pos = (data.get("text") or {}).get("pos")
             except (OSError, ValueError):
-                pass
-            inherit = _inherit_card(d.name)
+                data = {}
+            # 把刚解析好的 JSON 递进去，别再读第二遍（1802 张卡白读 1 秒）
+            inherit = _inherit_card(d.name, _parsed=data)
+            _big = ("card.webp" if "card.webp" in files
+                    else "card.png" if "card.png" in files else "")
             # build_card_def 会把 extra 展开到 JSON 顶层，特效字段实际存在 data["effects"]
             effects = data.get("effects") or (data.get("extra") or {}).get("effects") or []
             cards.append({
@@ -244,12 +267,12 @@ def list_cards() -> list[dict]:
                 "description": desc,
                 "text_type": text_type,
                 "text_pos": text_pos,
-                "card_png": (f"/preview/{d.name}/card.png" if (d / "card.png").exists()
+                "card_png": (f"/preview/{d.name}/{_big}" if _big
                              else f"/preview/{d.name}/front.png"),
                 # 图鉴网格专用缩略图（宽 320）。没有就留空，前端回落到 card_png。
                 "card_thumb": (f"/preview/{d.name}/thumb.png"
-                               if (d / "thumb.png").exists() else ""),
-                "card_html": f"/preview/{d.name}/card.html" if (d / "card.html").exists() else "",
+                               if "thumb.png" in files else ""),
+                "card_html": f"/preview/{d.name}/card.html" if "card.html" in files else "",
                 "frame": inherit.get("frame"),
                 "seal": inherit.get("seal"),
                 "seal_name": inherit.get("seal_name"),
@@ -427,18 +450,21 @@ def build_album_page() -> str:
             "text_type": c["text_type"],
             "card_png": c["card_png"].replace("/preview/", "assets/output/", 1),
             "card_html": c["card_html"].replace("/preview/", "assets/output/", 1),
+            # 网格格子只有 ~200px，却拉 1465×2048 的整卡图 = 每格 1.7 MB。
+            # 有 thumb.png（宽 320）就用它，详情弹窗仍走 card_png。
+            "thumb": (c.get("card_thumb") or "").replace("/preview/", "assets/output/", 1),
         })
     data_json = json.dumps(offline, ensure_ascii=False)
     summary = albums_summary(cards)
     meta_json = json.dumps({"albums": summary["albums"], "members": summary["members"]},
                            ensure_ascii=False)
-    html = re.sub(
-        r"/\*__ALBUM_DATA_START__\*/.*?/\*__ALBUM_DATA_END__\*/",
-        "/*__ALBUM_DATA_START__*/\nwindow.__ALBUM_DATA__ = " + data_json + ";\n"
-        "window.__ALBUM_META__ = " + meta_json + ";\n/*__ALBUM_DATA_END__*/",
-        html,
-        flags=re.S,
-    )
+    # ★ 不能用 re.sub 的替换串：它会解释反斜杠（\" -> "），卡名/描述里只要
+    #   有一个英文引号，注入的 JSON 就被吃坏、整本收集册白屏（图鉴踩过一次）。
+    def _inj(_m):
+        return ("/*__ALBUM_DATA_START__*/\nwindow.__ALBUM_DATA__ = " + data_json + ";\n"
+                "window.__ALBUM_META__ = " + meta_json + ";\n/*__ALBUM_DATA_END__*/")
+    html = re.sub(r"/\*__ALBUM_DATA_START__\*/.*?/\*__ALBUM_DATA_END__\*/",
+                  _inj, html, flags=re.S)
     p.write_text(html, encoding="utf-8")
     return html
 
@@ -741,9 +767,18 @@ def _export_card(card_id: str, etype: str):
     if not cid or not d.is_dir():
         return None
     if etype == "image":
-        p = d / "card.png"
-        if not p.exists():
+        n = _big_name(d)
+        if not n:
             return None
+        p = d / n
+        if n.endswith(".webp"):
+            # 磁盘上存 WebP（省 90% 空间），导出仍给 PNG —— 用户拿去发人、打印
+            # 或丢进别的软件都不用担心兼容性。
+            # ★ 别用 optimize=True：1465×2048 的图它要多花 ~1.5 秒，只省 20% 体积。
+            from PIL import Image
+            buf = io.BytesIO()
+            Image.open(p).save(buf, "PNG", compress_level=6)
+            return (buf.getvalue(), "image/png", f"{cid}.png")
         return (p.read_bytes(), "image/png", f"{cid}.png")
     if etype == "html":
         p = d / "card.html"
@@ -884,23 +919,29 @@ def _match_asset_by_bytes(digest: str, *dirs: str) -> str | None:
     return None
 
 
-def _inherit_card(card_id: str) -> dict:
+def _inherit_card(card_id: str, _parsed: dict | None = None) -> dict:
     """读取成品卡 JSON，返回其边框/卡封/牌背/强度等配置（供拼装预览与保存沿用）。
 
     素材名优先级：
       1) 显式标记（JSON 顶层含 frame_name/seal_name/back_name 键，值为 null 表示"确实未使用"）；
       2) layers/顶层字段的素材路径 basename（生成卡的素材路径可直接取文件名）；
       3) 旧拼装卡只存输出目录副本（frame.png 等），按字节在素材库中反查。
+
+    `_parsed`：调用方已经解析好的 JSON。list_cards 要给 1802 张卡逐个取配置，
+    传进来就能省掉一次重复读盘（实测占它 1 秒）。
     """
     if not card_id:
         return {}
-    cf = PROJECT_ROOT / "cards" / f"{card_id}.json"
-    if not cf.exists():
-        return {}
-    try:
-        d = json.loads(cf.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
+    if _parsed:
+        d = _parsed
+    else:
+        cf = PROJECT_ROOT / "cards" / f"{card_id}.json"
+        if not cf.exists():
+            return {}
+        try:
+            d = json.loads(cf.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
     layers = d.get("layers") or {}
     extra = d.get("extra") or {}
     out: dict = {}

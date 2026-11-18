@@ -384,12 +384,17 @@ def export_card(card_id: str, etype: str = "image", out_path: str | Path | None 
     if not cid or not d.is_dir():
         raise ValueError(f"找不到卡牌「{card_id}」（assets/output/ 下无此目录）")
     if etype == "image":
-        p = d / "card.png"
-        if not p.exists():
-            raise ValueError(f"卡牌「{cid}」缺少 2D 合成图 card.png")
+        # 磁盘上是 card.webp（PNG 的 1/10 体积），也兼容老的 card.png
+        src = next((d / n for n in ("card.webp", "card.png") if (d / n).exists()), None)
+        if src is None:
+            raise ValueError(f"卡牌「{cid}」缺少成品大图 card.webp")
         out = Path(out_path) if out_path else (Path.cwd() / f"{cid}.png")
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_bytes(p.read_bytes())
+        if src.suffix.lower() == ".webp":
+            from PIL import Image
+            Image.open(src).save(out, "PNG", optimize=True)
+        else:
+            out.write_bytes(src.read_bytes())
         return out
     if etype == "html":
         p = d / "card.html"

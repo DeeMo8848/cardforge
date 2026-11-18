@@ -363,9 +363,9 @@ window.__CODEX__ = { title: '异兽牌', subtitle: 'RipIt · 异兽图鉴', entr
 const DATA = window.__CODEX__ || { title: '异兽牌', entries: [] };
 // 双击 codex.html（file://）时用本地相对路径；由服务器打开时用 /preview/
 const OFFLINE = location.protocol === 'file:';
-// 网格用缩略图（宽 320，一张 ~60 KB）；没有 thumb 就回落到整张 card.png。
-// 整张 card.png 是 1465×2048（~2 MB），一册页 18 格就是 37 MB、解码要 0.8~2 秒，
-// 翻页会明显顿 —— 缩略图把一册页压到 1 MB 出头。
+// 网格用缩略图（宽 320，一张 ~190 KB）；没有 thumb 就回落到成品大图（card.webp）。
+// 成品大图是 1465×2048，一册页 18 格就是 37 MB、解码要 0.8~2 秒，翻页会明显顿，
+// 所以正常情况下一定走 thumb。缩略图能把一册页压到 3 MB 出头。
 const pngOf = s => {
   if (OFFLINE) return s.thumb_off || s.thumb || s.card_png_off || s.card_png;
   return s.thumb || s.card_png;

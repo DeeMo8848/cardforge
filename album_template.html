@@ -676,7 +676,7 @@ function makeCard(c) {
     '<button class="sel" type="button" title="选择">✓</button>' +
     '<button class="del" type="button" title="删除卡牌" aria-label="删除">✕</button>' +
     '<button class="mv" type="button" title="移动到收集册" aria-label="移动">📁</button>' +
-    '<div class="inner"><img src="' + c.card_png + '" alt="" loading="lazy">' +
+    '<div class="inner"><img src="' + (c.thumb || c.card_thumb || c.card_png) + '" alt="" loading="lazy">' +
     '<div class="name">' + esc(c.name) + '</div>' +
     (albumName ? '<div class="alabel">📁 ' + esc(albumName) + '</div>' : '') +
     '</div>';
@@ -754,7 +754,10 @@ async function deleteCard(c) {
 
 function showInfo(c) {
   currentCard = c;
-  document.getElementById('infoImg').src = c.card_png;
+  // 侧栏这张是 .thumb 小图（~200px 高），用缩略图就够；
+  // 真正的分层实时预览在下面 modalFrame 里（card.html，three.js 按层合成）。
+  // 在线走 /api/cards（字段 card_thumb），离线读内嵌数据（字段 thumb）。
+  document.getElementById('infoImg').src = c.thumb || c.card_thumb || c.card_png;
   document.getElementById('infoName').textContent = c.name;
   document.getElementById('infoBadge').textContent = TYPE_BADGE[c.text_type] || c.text_type;
   const desc = document.getElementById('infoDesc');

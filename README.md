@@ -245,6 +245,23 @@ CLI 缺省也会自动走 API（显式 `--model` 仍然优先）。
 - 帧数上限 = shader 里的采样器数量（6 个，`uT0..uT5`）。要加张数就同步扩
   `SLOT` 数组、`lentiTex()`/`frameAt()` 的 if 链，以及 `build_card_html` 的 `uLentiN` 上限。
 
+**光栅卡 + foil 特效（一起用时的坑，已修）**
+
+特效（`assets/effects/*.json`，`engine: foil`）不是叠在主卡面上，而是**另起一块不透明平面**
+（`foilBuild`），自己贴着 `uMain`(= 卡面纹理) 画一遍再把特效加进去。所以：
+
+- 光栅卡的卡面算在**卡面网格**上，特效层却拿 `uMain` 覆盖它 ⇒ 看起来「光栅完全不切换，
+  永远停在第 1 张」，而且连棱纹都没有。
+- 修法：给 `FOIL_VS` 补世界轴/世界坐标 varying，`FOIL_FS` 里注入同一段透镜合成
+  （`_lenti_face_frag(target="col", uv_var="fuv")`，采样 `fuv` 而不是 `flowUv`），
+  uniform 直接**共享** `cardMaterial.uniforms` 的那批对象。非光栅页注入空串。
+- 注入位置必须在 `if (uBgOn > 0.5){ col = mix(bgc, mainTex.rgb, ...) }` **之后** ——
+  那句会把 `col` 整个重置回第 1 帧，放前面等于没写。
+- 主体层（`foilBuildSubject`，`uSubject=1`）要 `uGuard = uSubject < 0.5` 跳过透镜合成，
+  否则抠图前景也会被套上透镜图。
+- 视角很陡时（`setView`≈0.9）**光泽（`sheen`）会明显泛白**，尤其配白色/雾状特效的卡：
+  光栅+特效建议 `sheen 0.3~0.4`，纯光栅卡 0.6~0.9 都行。
+
 ## 收集册（分组）
 
 收集册页（顶栏「📖 收集册」，或 http://127.0.0.1:8765/album.html）除了浏览成品卡，还能给卡牌分组：

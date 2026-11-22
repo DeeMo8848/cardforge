@@ -419,10 +419,27 @@ EFFECT_ENGINE_JS = r"""
 
     function v4(a, b, c, d) { return new THREE.Vector4(a || 0, b || 0, c || 0, d || 0); }
 
+    // 光栅卡：特效层也要算透镜合成（否则这层不透明的 uMain 会把卡面上的
+    // 光栅结果整块盖回第 0 帧）⇒ VS 额外传世界轴/世界坐标，供相位投影使用。
     var FOIL_VS = 'varying vec2 vUv;\n' +
-      'void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }';
+      'varying vec3 vWorldNormal;\n' +
+      'varying vec3 vWorldPosition;\n' +
+      'varying vec3 vWorldXAxis;\n' +
+      'varying vec3 vWorldYAxis;\n' +
+      'void main(){ vUv = uv;\n' +
+      '  vWorldNormal = normalize(mat3(modelMatrix) * normal);\n' +
+      '  vWorldPosition = (modelMatrix * vec4(position, 1.0)).xyz;\n' +
+      '  vWorldXAxis = normalize((modelMatrix * vec4(1.0, 0.0, 0.0, 0.0)).xyz);\n' +
+      '  vWorldYAxis = normalize((modelMatrix * vec4(0.0, 1.0, 0.0, 0.0)).xyz);\n' +
+      '  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }';
 
     var FOIL_FS = 'precision highp float;\n' +
+      // vUv 由原 FOIL_FS 后面那行声明（别在这里重复，否则 GLSL 报 redefinition）
+      'varying vec3 vWorldNormal;\n' +
+      'varying vec3 vWorldPosition;\n' +
+      'varying vec3 vWorldXAxis;\n' +
+      'varying vec3 vWorldYAxis;\n' +
+      __FOIL_LENTI_GLSL__ +
       'uniform float uTime;\n' +
       'uniform sampler2D uMain, uMask, uDist, uInteriorMap;\n' +
       'uniform sampler2D uBgTex;\n' +
@@ -615,6 +632,10 @@ EFFECT_ENGINE_JS = r"""
       '    vec3 bgc = (uBgHasTex > 0.5) ? texture2D(uBgTex, clamp(bv, 0.001, 0.999)).rgb : uBgColor;\n' +
       '    col = mix(bgc, mainTex.rgb, mainTex.a);\n' +
       '  }\n' +
+      // 光栅卡面：必须放在背景合成【之后】—— 上面那句 col = mix(bgc, mainTex.rgb, ...)
+      // 会把 col 整个重置成 uMain（第 0 帧），放前面等于没写。
+      // 透镜合成写 col（不是 base.rgb）、采样已过流动扰动的 fuv。
+      __FOIL_LENTI_FACE__ +
       '  col = blend(uTex0, uLut0, uSlot0, uMove0, uFx0, uCtl0, uF0, uTile0, uPos0, uTint0, uLx0, uBlink0, euv, te, col);\n' +
       '  col = blend(uTex1, uLut1, uSlot1, uMove1, uFx1, uCtl1, uF1, uTile1, uPos1, uTint1, uLx1, uBlink1, euv, te, col);\n' +
       '  col = blend(uTex2, uLut2, uSlot2, uMove2, uFx2, uCtl2, uF2, uTile2, uPos2, uTint2, uLx2, uBlink2, euv, te, col);\n' +
@@ -755,6 +776,14 @@ EFFECT_ENGINE_JS = r"""
         U['uTex' + i].value.wrapS = U['uTex' + i].value.wrapT =
           (s.slot === 'Middle') ? THREE.ClampToEdgeWrapping : THREE.RepeatWrapping;
       });
+      // 光栅卡：特效层与主卡面共用同一批 uniform 对象（贴图异步加载、参数改动都自动同步），
+      // 这样特效层算出来的透镜合成与下面卡面网格逐像素一致，不会互相错位。
+      if (cm) {
+        ['uT0', 'uT1', 'uT2', 'uT3', 'uT4', 'uT5',
+         'uLentiN', 'uLAngle', 'uLLens', 'uLStripe', 'uLSheen', 'uLSheenPow',
+         'uLSoft', 'uLJitter', 'uLGyro', 'uLBend', 'uLPhase', 'uLGloss',
+         'uAspect'].forEach(function (k) { if (cm[k]) U[k] = cm[k]; });
+      }
       var mat = new THREE.ShaderMaterial({
         uniforms: U,
         vertexShader: FOIL_VS,
@@ -839,6 +868,17 @@ EFFECT_ENGINE_JS = r"""
     return { init: init, tick: tick };
   })();
 """
+
+
+def _engine_js(foil_lenti_glsl: str = '""', foil_lenti_face: str = '""') -> str:
+    """把特效引擎 JS 里预留的两个光栅占位换成 JS 字符串字面量。
+
+    非光栅页传默认的 `""`（否则占位符原样留在 JS 里 → 整页 SyntaxError）。
+    """
+    return (EFFECT_ENGINE_JS
+            .replace("__FOIL_LENTI_GLSL__", foil_lenti_glsl)
+            .replace("__FOIL_LENTI_FACE__", foil_lenti_face))
+
 
 # 前景组（透明主体）两种渲染顺序：
 #   默认 —— 主体被边框遮盖（renderOrder 2/3，边框 4、卡封 5、文本 6）
@@ -3716,11 +3756,20 @@ def _lenti_glsl(n: int, o: dict) -> str:
     )
 
 
-def _lenti_face_frag(n: int, o: dict) -> str:
-    """卡面采样后的光栅合成（写回 base）。"""
+def _lenti_face_frag(n: int, o: dict, target: str = "base.rgb",
+                     uv_var: str = "flowUv", head: str = "", guard: str = "") -> str:
+    """卡面采样后的光栅合成（写回 target）。
+
+    target/uv_var/head 给特效层（FOIL_FS）复用同一段代码用：那边写的是 col、
+    采样的是已经过流动扰动的 fuv，且要自己定义 viewDirection/normal。
+    guard 给主体层用（那层画的是抠图前景，不该套透镜图）。
+    """
+    write = ("            " + (("if (" + guard + ") ") if guard else "")
+             + target + " = clamp(lcol, 0.0, 1.0);\n")
     return (
         "          // ---- 光栅卡卡面：N 张图按柱状透镜条带交替，倾斜时切换 ----\n"
         "          {\n"
+        + head +
         "            float lca = cos(uLAngle), lsa = sin(uLAngle);\n"
         "            vec2 axP = vec2(lca, -lsa);   // 条纹推进方向（垂直于透镜轴）\n"
         "            vec2 axL = vec2(lsa, lca);    // 透镜轴（条纹走向）\n"
@@ -3739,8 +3788,8 @@ def _lenti_face_frag(n: int, o: dict) -> str:
         "            float wf = fract(lt);\n"
         "            float swin = max(uLSoft, 0.004);\n"
         "            wf = smoothstep(0.5 - 0.5 * swin, 0.5 + 0.5 * swin, wf);\n"
-        "            vec3 lc0 = lentiTex(i0, flowUv);\n"
-        "            vec3 lc1 = lentiTex(i0 + 1.0, flowUv);\n"
+        "            vec3 lc0 = lentiTex(i0, " + uv_var + ");\n"
+        "            vec3 lc1 = lentiTex(i0 + 1.0, " + uv_var + ");\n"
         "            vec3 lcol = mix(lc0, lc1, wf);\n"
         "            // 棱纹（AA 后过密退化成平场，避免摩尔纹反噬）\n"
         "            float laa = clamp(fwidth(lx) * 0.70, 0.0, 1.0);\n"
@@ -3763,7 +3812,7 @@ def _lenti_face_frag(n: int, o: dict) -> str:
         "            lcol += vec3(1.0, 0.992, 0.972) * uLSheen * uLGloss\n"
         "                  * (lband * (0.09 + 0.18 * lline) + lcore * 0.22\n"
         "                     + lband2 * (0.055 + 0.10 * lline)) * mix(0.62, 1.0, lridge);\n"
-        "            base.rgb = clamp(lcol, 0.0, 1.0);\n"
+        + write +
         "          }\n"
     )
 
@@ -4123,8 +4172,18 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
             "      uLPhase: { value: 0 },\n"
             "      uLGloss: { value: " + str(float(_lo["gloss"])) + " },\n"
         )
+        # 特效层（FOIL_FS）里也要做透镜合成：那层是不透明平面、用的是 uMain，
+        # 不补这段就会把卡面盖回第 0 帧（光栅看起来「不切换」）。注入成 JS 字面量。
+        foil_lenti_glsl = _json(lenti_glsl)
+        foil_lenti_face = _json(_lenti_face_frag(
+            _ln, _lo, target="col", uv_var="fuv", guard="uSubject < 0.5",
+            head=("            vec3 viewDirection = normalize(cameraPosition - vWorldPosition);\n"
+                  "            vec3 normal = normalize(vWorldNormal);\n")))
     else:
         lenti_glsl = lenti_face = lenti_load = lenti_uniform_values = ""
+        foil_lenti_glsl = foil_lenti_face = '""'
+
+    engine_js = _engine_js(foil_lenti_glsl, foil_lenti_face)
 
     return (
         CARD_HTML_TEMPLATE
@@ -4159,7 +4218,7 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
         .replace("__GLOW_TICK__", _GLOW_TICK_JS)
         .replace("__GLOW_INIT__", _glow_init_js(glow_name, glow_strength, glow_boost))
         .replace("__TEXT_LAYER__", _text_layer_js(description, text_type, text_pos))
-        .replace("__ENGINE_JS__", EFFECT_ENGINE_JS)
+        .replace("__ENGINE_JS__", engine_js)
         .replace("__EFFECTS__", _json(effects or []))
         .replace("__SUBJ_OFFSET_X__", str(subject_offset_x))
         .replace("__SUBJ_OFFSET_Y__", str(subject_offset_y))
@@ -4174,6 +4233,6 @@ def build_effect_preview(effects) -> str:
         .replace("__THREE_JS__", three_js)
         # 卡宽占位符原来没替换 ⇒ 预览页 JS 直接抛 __CARD_WIDTH__ is not defined（整页白屏）
         .replace("__CARD_WIDTH__", "2.25")
-        .replace("__ENGINE_JS__", EFFECT_ENGINE_JS)
+        .replace("__ENGINE_JS__", _engine_js())
         .replace("__EFFECTS__", _json(effects or []))
     )

@@ -4,10 +4,10 @@
   "description": "",
   "style": "transparent",
   "engine": "不使用抠图",
-  "source": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\端到端验证卡\\source.png",
+  "source": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\faces\\saba.png",
   "front": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\端到端验证卡\\front.png",
   "foreground": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\端到端验证卡\\foreground.png",
-  "back": "assets/backs/sample-1.png",
+  "back": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\backs\\sample-1.png",
   "layers": {
     "background": null,
     "face": null,
@@ -35,5 +35,6 @@
   "seal_frame_same": false,
   "card_scale": 1.0,
   "glow_name": null,
-  "glow_strength": 1.0
+  "glow_strength": 1.0,
+  "back_name": "sample-1.png"
 }

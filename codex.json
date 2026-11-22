@@ -12,7 +12,7 @@
     "Negative",
     "FirstEdition"
   ],
-  "include_promo": false,
-  "_note": "主体清单来自 codex_cards.json（209 张全量，按卡号排序，由 cardrip/_gen_codex_cards.py 生成）。想手工指定条目/顺序时，在本文件加 subjects 数组即可覆盖。include_promo=true 会把 No.201-209 特典卡也列进来。",
+  "include_promo": true,
+  "_note": "主体清单来自 codex_cards.json（209 张全量，按卡号排序，由 cardrip/_gen_codex_cards.py 生成）。想手工指定条目/顺序时，在本文件加 subjects 数组即可覆盖。include_promo=true 会把 No.201-209 特典卡也列进来（9 张合成一个条目，占图鉴最后一册页的左页 3×3 九格）。",
   "subjects": []
 }

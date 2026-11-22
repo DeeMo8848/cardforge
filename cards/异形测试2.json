@@ -7,7 +7,7 @@
   "source": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\异形测试2\\front.png",
   "front": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\异形测试2\\front.png",
   "foreground": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\异形测试2\\foreground.png",
-  "back": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\backs\\three-kingdoms-back.png",
+  "back": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\backs\\sample-1.png",
   "layers": {
     "background": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\异形测试2\\front.png",
     "face": null,
@@ -39,7 +39,7 @@
   "seal_frame_name": "Z几何格膜.png",
   "seal_frame_same": false,
   "frame_name": "异形测试.png",
-  "back_name": "three-kingdoms-back.png",
+  "back_name": "sample-1.png",
   "face_name": null,
   "background_name": null,
   "effects": []

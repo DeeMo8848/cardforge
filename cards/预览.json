@@ -7,12 +7,12 @@
   "source": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\预览\\front.png",
   "front": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\预览\\front.png",
   "foreground": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\预览\\foreground.png",
-  "back": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\预览\\back.png",
+  "back": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\backs\\sample-1.png",
   "layers": {
     "background": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\预览\\front.png",
     "face": null,
-    "frame": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\预览\\frame.png",
-    "seal": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\预览\\seal.png"
+    "frame": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\frames\\sample-1.png",
+    "seal": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\seals\\点状膜2.png"
   },
   "text": {
     "title": "预览",
@@ -32,5 +32,6 @@
   "seal_strength_front": 0.9,
   "seal_strength_back": 0.5775,
   "seal_name": "点状膜2.png",
-  "effects": []
+  "effects": [],
+  "back_name": "sample-1.png"
 }

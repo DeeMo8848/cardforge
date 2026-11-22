@@ -1,4 +1,4 @@
-"""用已有卡牌资产重新生成 card.html（应用最新 shader 光效）与 card.png（含边框/卡封/文本预览图）。"""
+"""用已有卡牌资产重新生成 card.html（应用最新 shader 光效）与 card.webp/thumb.webp（含边框/卡封/文本预览图）。"""
 import json
 import shutil
 import sys
@@ -10,6 +10,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from compositor import CARD_H, CARD_W, compose_card  # noqa: E402
+from cardforge import lib_ref, put_layer, save_preview  # noqa: E402
 from webcard import build_card_html  # noqa: E402
 
 
@@ -22,9 +23,13 @@ def regen(card_json: Path) -> bool:
         return False
 
     # 整幅风格：front.png 应为整幅原图（source.png），而非抠图主体
+    # source.png 若已外置成素材库引用（本地没有副本），按卡定义里的 source 找回原图
     if d.get("style") == "full-bleed":
         src = out_dir / "source.png"
-        if src.exists():
+        if not src.is_file():
+            _s = Path(str(d.get("source") or ""))
+            src = _s if _s.is_file() else src
+        if src.is_file():
             Image.open(src).convert("RGBA").save(out_dir / "front.png")
             print(f"  [front] {cid}: 已改为整幅原图")
 
@@ -37,14 +42,12 @@ def regen(card_json: Path) -> bool:
     frame_rel = seal_rel = None
     interior_rel = None
     if frame_path and Path(frame_path).exists():
-        frame_dst = out_dir / "frame.png"
-        if Path(frame_path) != frame_dst:
-            shutil.copy(frame_path, frame_dst)
-        frame_rel = "frame.png"
+        # 素材库原图只写引用（../../assets/frames/x.png），不再逐卡复制一份
+        frame_rel = put_layer(frame_path, out_dir, "frame.png") or "frame.png"
         # 边框内区域蒙版：整卡内容仅绘制在边框外围以内（与 webapp 保存逻辑一致）
         try:
             from compositor import save_frame_interior_mask
-            save_frame_interior_mask(Image.open(frame_dst), out_dir / "interior.png")
+            save_frame_interior_mask(Image.open(frame_path), out_dir / "interior.png")
             interior_rel = "interior.png"
         except Exception as e:  # noqa: BLE001
             print(f"  [interior] {cid}: 蒙版生成失败 {e}")
@@ -52,10 +55,7 @@ def regen(card_json: Path) -> bool:
     elif (out_dir / "interior.png").exists():
         (out_dir / "interior.png").unlink()
     if seal_path and Path(seal_path).exists():
-        seal_dst = out_dir / "seal.png"
-        if Path(seal_path) != seal_dst:
-            shutil.copy(seal_path, seal_dst)
-        seal_rel = "seal.png"
+        seal_rel = put_layer(seal_path, out_dir, "seal.png") or "seal.png"
     subject_over_frame = bool(d.get("subject_over_frame", extra.get("subject_over_frame")))
     subject_outline = bool(d.get("subject_outline", extra.get("subject_outline")))
     mask_clip = bool(d.get("mask_clip", extra.get("mask_clip", True)))
@@ -82,11 +82,18 @@ def regen(card_json: Path) -> bool:
             if ol is not None:
                 ol.save(out_dir / "outline.png")
                 outline_rel = "outline.png"
+    back_p = Path(str(d.get("back") or ""))
+    back_rel = (put_layer(back_p, out_dir, "back.png") if back_p.is_file() else "back.png")
+    # 卡面可能已外置成素材引用（front.png 不在卡目录），按卡定义找回原图
+    front_p = Path(str(d.get("front") or ""))
+    if not front_p.is_file():
+        front_p = out_dir / "front.png"
+    front_rel = lib_ref(front_p, out_dir) or "front.png"
     html = build_card_html(
         d.get("name") or cid,
-        "front.png",
+        front_rel,
         "foreground.png",
-        "back.png",
+        back_rel,
         frame_rel=frame_rel,
         seal_rel=seal_rel,
         seal_name=d.get("seal_name") or (Path(seal_path).name if seal_path else None),
@@ -126,11 +133,11 @@ def regen(card_json: Path) -> bool:
             subject_outline=bool(d.get("subject_outline", extra.get("subject_outline"))),
             mask_clip=mask_clip,
             size=(CARD_W, CARD_H),
-            front=str(out_dir / "front.png"),
+            front=str(front_p),
         )
-        composed.convert("RGB").save(out_dir / "card.png")
+        save_preview(composed, out_dir)
     except Exception as e:  # noqa: BLE001
-        print(f"  [card.png] {cid}: 合成失败 {e}")
+        print(f"  [card.webp] {cid}: 合成失败 {e}")
     print(f"  [OK] {cid} (seal={Path(seal_path).name if seal_path else None})")
     return True
 

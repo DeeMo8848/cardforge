@@ -337,7 +337,8 @@ function esc(s) {
 async function load() {
   let cards = null, albums = null;
   try {
-    const r = await fetch('/api/cards');
+    // scope=album：只要收集册可见的卡（assets/output）；异兽牌在 assets/ripit，只进图鉴。
+    const r = await fetch('/api/cards?scope=album');
     if (r.ok) {
       const d = await r.json();
       if (d.ok) cards = d.cards || [];

@@ -32,20 +32,33 @@ def _b64(rel_path: Path) -> str:
     return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
 
 
+def _pick(*cands) -> Path:
+    """挑第一个存在的文件：卡目录副本可能已按"素材库引用"策略外置，改用卡定义里的原图路径。"""
+    for c in cands:
+        if c is None:
+            continue
+        p = Path(str(c))
+        if not p.is_absolute():
+            p = ROOT / p
+        if p.is_file():
+            return p
+    raise FileNotFoundError(f"找不到素材：{cands}")
+
+
 def build(card_id: str) -> None:
     card = json.loads((ROOT / "cards" / f"{card_id}.json").read_text(encoding="utf-8"))
     out = OUT / card_id
-    front = _b64(out / "front.png")
-    foreground = _b64(out / "foreground.png")
-    back = _b64(out / "back.png")
+    front = _b64(_pick(card.get("front"), out / "front.png"))
+    foreground = _b64(_pick(out / "foreground.png"))
+    back = _b64(_pick(card.get("back"), out / "back.png"))
 
     layers = card.get("layers") or {}
-    frame_rel = _b64(out / "frame.png") if layers.get("frame") else None
+    frame_rel = _b64(_pick(layers.get("frame"), out / "frame.png")) if layers.get("frame") else None
     seal_rel = None
     seal_name = None
     if layers.get("seal"):
-        seal_path = Path(str(layers["seal"]))
-        seal_rel = _b64(seal_path if seal_path.is_absolute() else ROOT / seal_path)
+        seal_path = _pick(layers["seal"], out / "seal.png")
+        seal_rel = _b64(seal_path)
         seal_name = card.get("seal_name") or seal_path.name
 
     text = card.get("text") or {}

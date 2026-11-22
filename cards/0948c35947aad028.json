@@ -7,7 +7,7 @@
   "source": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\0948c35947aad028\\source.png",
   "front": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\0948c35947aad028\\front.png",
   "foreground": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\0948c35947aad028\\foreground.png",
-  "back": "assets/backs/three-kingdoms-back.png",
+  "back": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\backs\\sample-1.png",
   "layers": {
     "background": null,
     "face": null,
@@ -35,5 +35,6 @@
   "seal_frame_same": false,
   "card_scale": 1.0,
   "glow_name": null,
-  "glow_strength": 1.0
+  "glow_strength": 1.0,
+  "back_name": "sample-1.png"
 }

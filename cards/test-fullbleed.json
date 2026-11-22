@@ -4,10 +4,10 @@
   "description": "",
   "style": "full-bleed",
   "engine": "local(birefnet-massive)",
-  "source": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\test-fullbleed\\source.png",
-  "front": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\test-fullbleed\\front.png",
+  "source": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\backgrounds\\8635.jpg",
+  "front": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\backgrounds\\8635.jpg",
   "foreground": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\test-fullbleed\\foreground.png",
-  "back": "assets/backs/three-kingdoms-back.png",
+  "back": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\backgrounds\\8635.jpg",
   "layers": {
     "background": null,
     "face": null,
@@ -19,5 +19,6 @@
     "description": null
   },
   "card_size": "900x1200",
-  "composed": true
+  "composed": true,
+  "back_name": "8635.jpg"
 }

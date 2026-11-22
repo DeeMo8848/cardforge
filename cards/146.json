@@ -7,7 +7,7 @@
   "source": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\146\\source.png",
   "front": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\146\\front.png",
   "foreground": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\146\\foreground.png",
-  "back": "assets/backs/three-kingdoms-back.png",
+  "back": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\backs\\sample-1.png",
   "layers": {
     "background": null,
     "face": null,
@@ -30,5 +30,6 @@
   "animation": "none",
   "subject_over_frame": true,
   "subject_outline": false,
-  "mask_clip": false
+  "mask_clip": false,
+  "back_name": "sample-1.png"
 }

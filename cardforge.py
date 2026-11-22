@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import os
 import re
 import shutil
 import sys
@@ -38,6 +39,104 @@ from engine import (
 PROJECT_ROOT = Path(__file__).resolve().parent
 EFFECTS_DIR = PROJECT_ROOT / "assets" / "effects"        # 自定义特效 JSON（名称.json → {"def": {...}}）
 EFFECT_IMG_DIR = PROJECT_ROOT / "assets" / "effects-images"  # 特效图像/精灵帧图
+_PROJECT_RESOLVED = PROJECT_ROOT.resolve()
+
+
+# ---------- 素材引用（素材库内的图不再逐卡复制） ----------
+# 卡目录是 assets/output/<id>/，素材库是 assets/<类别>/、packs/<包>/、fx2/assets/…，
+# 二者是"兄弟"关系 ⇒ 从 card.html 引用素材库就是 ../../<...>（three.js 本来就这么引）。
+# 一张 2.6 MB 的牌背如果每张卡复制一份，几十张卡就是几十份同样的字节。
+
+
+def lib_ref(src, out_dir) -> str | None:
+    """素材库内的原始文件 → 相对 out_dir 的引用路径（如 "../../assets/backs/sample-1.png"）。
+
+    路径里带上项目根（assets/ packs/ fx2/ …），这样 file:// 双击展开后落在
+    项目目录内的真实文件上，HTTP 下也能被 /assets/ /packs/ /fx2/ 路由接住
+    （../../ 只往上走两层，不含 assets 时会落到站点根 /backs/… 而 404）。
+
+    不在本项目内、本身就已在 out_dir 里、或算不出向上相对路径时返回 None，
+    调用方退回复制，保证不会写出坏引用。
+    """
+    try:
+        if src is None:
+            return None
+        s = Path(src).resolve()
+        o = Path(out_dir).resolve()
+        if not s.is_file() or s.parent == o:
+            return None
+        s.relative_to(_PROJECT_RESOLVED)          # 必须在本项目内
+        up = os.path.relpath(_PROJECT_RESOLVED, o).replace("\\", "/")
+        down = os.path.relpath(s, _PROJECT_RESOLVED).replace("\\", "/")
+    except (OSError, ValueError):
+        return None
+    rel = down if up == "." else up.rstrip("/") + "/" + down
+    return rel if rel.startswith("../") else None
+
+
+def put_layer(src, out_dir, filename: str, *, local: bool = False) -> str | None:
+    """把素材落到卡目录：素材库原始文件只写引用，自定义/编辑过的复制成本地文件。
+
+    local=True 表示"已经在卡目录里就地生成/改写过"（如缩放烘焙），这时不复制、直接用文件名。
+    返回 card.html 里可用的相对引用（"frame.png" 或 "../../frames/x.png"）。
+    """
+    out_dir = Path(out_dir)
+    if local:
+        return filename if (out_dir / filename).exists() else None
+    if src is None:
+        return None
+    ref = lib_ref(src, out_dir)
+    if ref:
+        # 顺手清掉历史遗留的同名副本，别让旧文件继续占空间
+        stale = out_dir / filename
+        if stale.exists():
+            try:
+                stale.unlink()
+            except OSError:
+                pass
+        return ref
+    dst = out_dir / filename
+    try:
+        if Path(src).resolve() != dst.resolve():
+            shutil.copy(src, dst)
+    except OSError:
+        return None
+    return filename
+
+
+# ---------- 成品预览图（统一 WebP） ----------
+# 同一张 1465×2048：PNG 1.75 MB，WebP(q92) 0.17 MB，肉眼分辨不出。
+# 收集册网格另有 thumb.webp（宽 320，~40 KB）；原来拉整卡图一格 1.75 MB。
+PREVIEW_SIZE = (320, 448)
+PREVIEW_QUALITY = 92
+THUMB_QUALITY = 88
+
+
+def save_preview(im, out_dir, *, thumb: bool = True) -> Path:
+    """把合成图写成 card.webp（成品大图）+ thumb.webp（网格缩略图），清掉同名老 PNG。
+
+    卡目录里其它工具（webapp 保存 / make_text / _regen_cards）都走这里，
+    保证「成品图 + 预览图」永远是同一套 WebP 口径。
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    big = out_dir / "card.webp"
+    im.save(big, "WEBP", quality=PREVIEW_QUALITY, method=4)
+    stale = ["card.png"]
+    if thumb:
+        t = im if im.mode in ("RGB", "RGBA") else im.convert("RGBA")
+        t = t.copy()
+        t.thumbnail(PREVIEW_SIZE, Image.LANCZOS)
+        t.save(out_dir / "thumb.webp", "WEBP", quality=THUMB_QUALITY, method=4)
+        stale.append("thumb.png")
+    for n in stale:
+        p = out_dir / n
+        if p.exists():
+            try:
+                p.unlink()
+            except OSError:
+                pass
+    return big
 
 # 内置特效预设（与 assets/effects/*.json 的自定义特效同构；可在任何位置选择触发）
 BUILTIN_EFFECTS = {
@@ -251,14 +350,26 @@ def _resolve_effects(effects) -> list[dict]:
 
 
 def _materialize_effect_images(effects: list[dict], out_dir: Path) -> list[dict]:
-    """把特效引用的图片复制到 out_dir/effects/，def.image 改写为相对路径，保证单 HTML 自包含。组合特效递归处理。"""
+    """把特效引用的图片落到卡目录，def.image 改写为相对路径（保证单 HTML 可用）。
+
+    素材库里的贴图（fx2/assets/foil、assets/effects-images）**只写引用不复制**：
+    同一张 foil 遮罩在每张卡里存一份没有任何意义。只有库外/临时文件才复制进
+    out_dir/effects/。组合特效递归处理。
+    """
     effect_img_dir = out_dir / "effects"
-    effect_img_dir.mkdir(parents=True, exist_ok=True)
+
+    def _local_copy(src: Path) -> str:
+        """库内引用失败时的保底：真正复制到 out_dir/effects/。"""
+        effect_img_dir.mkdir(parents=True, exist_ok=True)
+        target = effect_img_dir / src.name
+        if not target.exists():
+            target.write_bytes(src.read_bytes())
+        return "effects/" + src.name
 
     foil_src_dir = PROJECT_ROOT / "fx2" / "assets" / "foil"
 
     def _walk_foil(defn: dict):
-        """闪卡特效：把用到的 foil 贴图/蒙版复制进 out_dir/effects/，保证导出的 HTML 自包含。"""
+        """闪卡特效：把用到的 foil 贴图/蒙版落到卡目录（库内引用，库外复制）。"""
         def _put(tex: str) -> str:
             name = Path(str(tex or "").replace("\\", "/")).name
             if not name:
@@ -268,10 +379,7 @@ def _materialize_effect_images(effects: list[dict], out_dir: Path) -> list[dict]
             src = foil_src_dir / name
             if not src.exists():
                 return ""
-            target = effect_img_dir / name
-            if not target.exists():
-                target.write_bytes(src.read_bytes())
-            return "effects/" + name
+            return lib_ref(src, out_dir) or _local_copy(src)
 
         for s in defn.get("slots") or []:
             s["tex"] = _put(s.get("tex"))
@@ -282,10 +390,7 @@ def _materialize_effect_images(effects: list[dict], out_dir: Path) -> list[dict]
         if mname:
             msrc = EFFECT_IMG_DIR / mname
             if msrc.exists():
-                target = effect_img_dir / mname
-                if not target.exists():
-                    target.write_bytes(msrc.read_bytes())
-                defn["mask"] = "effects/" + mname
+                defn["mask"] = lib_ref(msrc, out_dir) or _local_copy(msrc)
 
     def _walk(defn: dict):
         if not isinstance(defn, dict):
@@ -303,9 +408,8 @@ def _materialize_effect_images(effects: list[dict], out_dir: Path) -> list[dict]
                 candidates = [EFFECT_IMG_DIR / src_path, PROJECT_ROOT / "assets" / src_path]
                 src_path = next((c for c in candidates if c.exists()), src_path)
             if src_path.exists():
-                target = effect_img_dir / src_path.name
-                target.write_bytes(src_path.read_bytes())
-                defn["image"] = "image:effects/" + src_path.name
+                ref = lib_ref(src_path, out_dir) or _local_copy(src_path)
+                defn["image"] = "image:" + ref
         for sub in defn.get("subs") or []:
             if isinstance(sub, dict):
                 _walk(sub.get("def"))
@@ -374,27 +478,33 @@ def _load_layer(path: str | None, kind: str | None = None) -> str | None:
 
 
 def export_card(card_id: str, etype: str = "image", out_path: str | Path | None = None) -> Path:
-    """导出已有卡牌：image → 2D 合成图 card.png；html → 自包含单文件（同目录图片 base64 内嵌）。
+    """导出已有卡牌：image → 2D 合成图 card.webp；html → 自包含单文件（同目录图片 base64 内嵌）。
 
-    卡 id 即 assets/output/ 下的目录名；out_path 缺省输出到当前目录 <卡id>.png/.html。
+    卡 id 即 assets/ripit/ 或 assets/output/ 下的目录名；out_path 缺省输出到当前目录 <卡id>.webp/.html。
     返回导出文件路径；卡牌缺失/类型非法抛 ValueError。
     """
     cid = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "", (card_id or "").strip())
-    d = PROJECT_ROOT / "assets" / "output" / cid
-    if not cid or not d.is_dir():
-        raise ValueError(f"找不到卡牌「{card_id}」（assets/output/ 下无此目录）")
+    # 异兽牌流水线产物在 assets/ripit，cardforge 手动捏的卡在 assets/output —— 两边都找。
+    d = next((PROJECT_ROOT / "assets" / r / cid for r in ("ripit", "output")
+              if (PROJECT_ROOT / "assets" / r / cid).is_dir()), None)
+    if not cid or d is None:
+        raise ValueError(f"找不到卡牌「{card_id}」（assets/ripit 与 assets/output 下均无此目录）")
     if etype == "image":
         # 磁盘上是 card.webp（PNG 的 1/10 体积），也兼容老的 card.png
         src = next((d / n for n in ("card.webp", "card.png") if (d / n).exists()), None)
         if src is None:
             raise ValueError(f"卡牌「{cid}」缺少成品大图 card.webp")
-        out = Path(out_path) if out_path else (Path.cwd() / f"{cid}.png")
+        out = Path(out_path) if out_path else (Path.cwd() / f"{cid}.webp")
         out.parent.mkdir(parents=True, exist_ok=True)
-        if src.suffix.lower() == ".webp":
+        want_webp = out.suffix.lower() == ".webp"
+        if want_webp == (src.suffix.lower() == ".webp"):
+            out.write_bytes(src.read_bytes())      # 同格式：字节直搬，零重编码
+        elif want_webp:
+            from PIL import Image
+            Image.open(src).save(out, "WEBP", quality=PREVIEW_QUALITY, method=4)
+        else:
             from PIL import Image
             Image.open(src).save(out, "PNG", optimize=True)
-        else:
-            out.write_bytes(src.read_bytes())
         return out
     if etype == "html":
         p = d / "card.html"
@@ -405,6 +515,8 @@ def export_card(card_id: str, etype: str = "image", out_path: str | Path | None 
 
         def _embed(m: re.Match) -> str:
             name = m.group(2)
+            # name 可能是 "front.png"，也可能是素材库引用 "../../backs/sample-1.png"：
+            # d / "../../..." 会正常往上走两级，内联后导出的单文件照样能独立打开。
             fp = d / name
             if not fp.is_file():
                 return m.group(0)
@@ -413,7 +525,9 @@ def export_card(card_id: str, etype: str = "image", out_path: str | Path | None 
             mime = _mime.get(Path(name).suffix.lower().lstrip("."), "application/octet-stream")
             return f"{q}data:{mime};base64,{b64}{q}"
 
-        html = re.sub(r"""(['"])([A-Za-z0-9_.-]+\.(?:png|jpg|jpeg|webp))\1""", _embed, html)
+        # 素材名含中文（Z圆环.png 之类），字符类必须带上 CJK，否则这些图不会被内联
+        html = re.sub(r"""(['"])([A-Za-z0-9_./\u4e00-\u9fff-]+\.(?:png|jpg|jpeg|webp))\1""",
+                      _embed, html)
         out = Path(out_path) if out_path else (Path.cwd() / f"{cid}.html")
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(html, encoding="utf-8")
@@ -687,15 +801,17 @@ def make_card(
             follow_bg=follow_bg,
             follow_bg_src=str(out_dir / "bg_follow.png") if bg_follow_rel else None,
         )
-        composed_path = out_dir / "card.png"
-        composed.save(composed_path)
+        composed_path = save_preview(composed, out_dir)
         step += 1
 
-    # 5. 3D 卡网页（自包含单 HTML，双击即开）
+    # 5. 3D 卡网页（单 HTML，双击即开）
     log("生成 3D 卡网页…")
     back_src = _load_layer(back, "back") or (PROJECT_ROOT / "assets" / "backs" / "sample-1.png")
-    back_copy = out_dir / "back.png"
-    Image.open(back_src).convert("RGB").save(back_copy)
+    # 牌背一律来自素材库；2.6 MB 一张，逐卡复制没意义 —— 直接引用素材库原图。
+    back_rel = put_layer(back_src, out_dir, "back.png")
+    if back_rel is None:      # 极端情况（素材库文件不可读）退回老做法
+        Image.open(back_src).convert("RGB").save(out_dir / "back.png")
+        back_rel = "back.png"
     # 多卡封叠加：把额外层 PNG 复制进输出目录，保证 card.html 自包含
     seal_extra_resolved = []
     for _ex in (seal_extra or []):
@@ -727,7 +843,8 @@ def make_card(
     _materialize_effect_images(effect_instances, out_dir)
     web_path = out_dir / "card.html"
 
-    # 边框/卡封复制到输出目录，保证 card.html 自包含（本地双击与 HTTP 访问均可用）
+    # 边框/卡封：素材库内的只写引用（../../frames/x.png），库外/共享层路径保持原样，
+    # 真正属于这张卡的才复制进来。card.html 本来就是相对路径加载，多一层 ../ 无副作用。
     frame_path = _load_layer(frame, "frame")
     seal_path = _load_layer(seal, "seal")
     seal_frame_path = _load_layer(seal_frame, "seal")
@@ -739,14 +856,11 @@ def make_card(
     else:
         seal_rel = None
     if frame_path:
-        shutil.copy(frame_path, out_dir / "frame.png")
-        frame_rel = "frame.png"
+        frame_rel = put_layer(frame_path, out_dir, "frame.png")
     if seal_path and not seal_rel:
-        shutil.copy(seal_path, out_dir / "seal.png")
-        seal_rel = "seal.png"
+        seal_rel = put_layer(seal_path, out_dir, "seal.png")
     if seal_frame_path:
-        shutil.copy(seal_frame_path, out_dir / "seal_frame.png")
-        seal_frame_rel = "seal_frame.png"
+        seal_frame_rel = put_layer(seal_frame_path, out_dir, "seal_frame.png")
     # 分层素材：主体层（立绘+图标+边框+文字）叠在所有卡封之上
     detail_rel = None
     if detail:
@@ -795,7 +909,7 @@ def make_card(
             interior_rel = None
     # 未开启浮于边框时：边框按主体包围盒缩放（3D 卡，浏览器端计算包围盒）
     web_path.write_text(
-        build_card_html(name, "front.png", "foreground.png", "back.png", effects=effect_instances,
+        build_card_html(name, "front.png", "foreground.png", back_rel or "back.png", effects=effect_instances,
                         frame_rel=frame_rel,
                         seal_rel=seal_rel,
                         seal_name=Path(seal_path).name if seal_path else None,
@@ -952,9 +1066,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--export", default=None, metavar="CARD_ID",
                         help="导出已有卡牌（不生成新卡）；卡 id 即 assets/output/ 下的目录名")
     parser.add_argument("--export-type", choices=["image", "html"], default="image",
-                        help="导出类型：image=2D 合成图（card.png）；html=自包含单文件（图片 base64 内嵌，可离线双击打开）")
+                        help="导出类型：image=2D 合成图（card.webp）；html=自包含单文件（图片 base64 内嵌，可离线双击打开）")
     parser.add_argument("--out", default=None, metavar="PATH",
-                        help="导出文件保存路径（默认当前目录下 <卡id>.png/.html）")
+                        help="导出文件保存路径（默认当前目录下 <卡id>.webp/.html）")
     parser.add_argument("--name", default=None, help="卡片显示名（默认取文件名）")
     parser.add_argument("--slug", default=None, help="卡片 id（小写连字符，默认由名称生成）")
     parser.add_argument("--style", choices=["transparent", "full-bleed"], default="transparent",

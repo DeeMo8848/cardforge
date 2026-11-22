@@ -424,7 +424,9 @@ function slotEl(slot, subj) {
   const cap = document.createElement('div');
   cap.className = 'cap';
   if (on) {
-    cap.innerHTML = '<span class="ed">' + esc(slot.edition_cn) + '</span>';
+    // 常规格写版本名（普通/闪卡/…）；特典格由后端给 caption（No.201 樗警鸟），
+    // 否则 3×3 九格全写「促销」根本分不清是哪张。
+    cap.innerHTML = '<span class="ed">' + esc(slot.caption || slot.edition_cn) + '</span>';
   } else if (slot.unlocked) {
     cap.textContent = '？？？';
   } else {

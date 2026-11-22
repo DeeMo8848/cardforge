@@ -5,9 +5,9 @@
   "style": "transparent",
   "engine": "local(isnet-anime)",
   "source": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\145\\source.png",
-  "front": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\145\\front.png",
+  "front": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\backgrounds\\sample-1.png",
   "foreground": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\145\\foreground.png",
-  "back": "assets/backs/three-kingdoms-back.png",
+  "back": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\backgrounds\\sample-1.png",
   "layers": {
     "background": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\backgrounds\\sample-1.png",
     "face": null,
@@ -30,5 +30,6 @@
   "animation": "none",
   "subject_over_frame": true,
   "subject_outline": false,
-  "mask_clip": false
+  "mask_clip": false,
+  "back_name": "sample-1.png"
 }

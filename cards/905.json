@@ -4,10 +4,10 @@
   "description": "",
   "style": "transparent",
   "engine": "local(isnet-anime-q8)",
-  "source": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\905\\source.png",
-  "front": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\905\\front.png",
+  "source": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\backgrounds\\905.png",
+  "front": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\backgrounds\\sample-1.png",
   "foreground": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\905\\foreground.png",
-  "back": "assets/backs/sample-1.png",
+  "back": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\backgrounds\\sample-1.png",
   "layers": {
     "background": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\backgrounds\\sample-1.png",
     "face": null,
@@ -41,5 +41,6 @@
   "seal_frame_same": true,
   "card_scale": 1.0,
   "glow_name": "暖金描边",
-  "glow_strength": 1.0
+  "glow_strength": 1.0,
+  "back_name": "sample-1.png"
 }

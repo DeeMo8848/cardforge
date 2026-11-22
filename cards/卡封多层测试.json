@@ -47,12 +47,12 @@
   "effects": [],
   "seal_extra": [
     {
-      "seal": "ripit/ripit-rarity-rare.png",
+      "seal": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\卡封多层测试\\seal_1.png",
       "front": 0.85,
       "back": 0.0
     },
     {
-      "seal": "ripit/ripit-rarity-mythic.png",
+      "seal": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\卡封多层测试\\seal_2.png",
       "front": 0.45,
       "back": 0.3
     }

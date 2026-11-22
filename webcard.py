@@ -548,7 +548,12 @@ EFFECT_ENGINE_JS = r"""
       '  if (roundedCard(uv, 0.032) > 0.0) discard;\n' +
       '  vec2 faceUv = vUv;\n' +
       '  if (uFaceContain > 0.5){\n' +
-      '    vec2 cardUv2 = (uv - 0.5) * max(uContentScale, 1e-4) + 0.5;\n' +
+      // uFaceContain: 1.0 = 卡面素材路径（网格随 content_scale 缩放，uv 需反算回卡坐标）；
+      //               2.0 = 整卡边框路径（成品卡/上传图，网格不缩放，uv 本身就是卡坐标）。
+      //               ★ 2.0 时绝不能再乘 uContentScale，否则 contain 的固定窗口约束会把
+      //                 倍率抵消掉 —— 表现就是「卡面倍率怎么调都没变化」。
+      '    float cs = (uFaceContain > 1.5) ? 1.0 : max(uContentScale, 1e-4);\n' +
+      '    vec2 cardUv2 = (uv - 0.5) * cs + 0.5;\n' +
       '    vec2 boxLo = uFaceBox.xy;\n' +
       '    vec2 boxSize = max(uFaceBox.zw - uFaceBox.xy, vec2(1e-6));\n' +
       '    vec2 inBox = (cardUv2 - boxLo) / boxSize;\n' +
@@ -968,6 +973,7 @@ CARD_HTML_TEMPLATE = r"""<!DOCTYPE html>
       uFaceBox: { value: new THREE.Vector4(0, 0, 1, 1) },
       uFaceAspect: { value: 1.0 },
       __FLOW_UNIFORM_VALUES__
+      __LENTI_UNIFORM_VALUES__
     },
     vertexShader: `
       varying vec2 vUv;
@@ -999,7 +1005,7 @@ CARD_HTML_TEMPLATE = r"""<!DOCTYPE html>
       uniform float uFaceContain;
       uniform vec4 uFaceBox;
       uniform float uFaceAspect;
-      __FLOW_GLSL__
+      __FLOW_GLSL____LENTI_GLSL__
       varying vec2 vUv;
       varying vec3 vWorldNormal;
       varying vec3 vWorldPosition;
@@ -1040,8 +1046,10 @@ CARD_HTML_TEMPLATE = r"""<!DOCTYPE html>
           // 非浮起+边框+卡面素材：卡面 contain 到边框内沿（中空区域）以内，完整可见不超框；
           // 保持宽高比居中放入窗口，content_scale 围绕窗口中心缩放（与 2D compositor 一致）
           if (uFaceContain > 0.5) {
-            // 卡面网格随 content_scale 缩放时，UV 反算回卡片坐标（与下方蒙版采样一致）
-            vec2 cardUv2 = (uv - 0.5) * max(uContentScale, 1e-4) + 0.5;
+            // 卡面网格随 content_scale 缩放时，UV 反算回卡片坐标（与下方蒙版采样一致）；
+            // 整卡边框路径（uFaceContain=2.0）网格不缩放，uv 本身即卡坐标，不能再乘。
+            float cs = (uFaceContain > 1.5) ? 1.0 : max(uContentScale, 1e-4);
+            vec2 cardUv2 = (uv - 0.5) * cs + 0.5;
             vec2 boxLo = uFaceBox.xy;
             vec2 boxSize = max(uFaceBox.zw - uFaceBox.xy, 1e-6);
             vec2 inBox = (cardUv2 - boxLo) / boxSize;
@@ -1055,11 +1063,13 @@ CARD_HTML_TEMPLATE = r"""<!DOCTYPE html>
           }
           __FLOW_WARP__
           base = texture2D(uFrontTexture, flowUv);
+          __LENTI_FACE__
           // 边框内区域蒙版：正面内容仅绘制在边框外围以内（含中空）；卡背不受蒙版限制。
           // 卡面随 content_scale 缩放时（网格在 cardContent 组内），UV 需反算回卡片坐标，
           // 否则蒙版随卡面一起缩放导致边缘错位（采样点偏离真实卡片位置）
           // 缩放后网格 vUv 0..1 覆盖整卡几何，卡片坐标 = (vUv-0.5)*s + 0.5（s=uContentScale）
-          vec2 cardUv = (vUv - 0.5) * max(uContentScale, 1e-4) + 0.5;
+          // 整卡边框路径（uFaceContain=2.0）网格不缩放，s 视为 1.0
+          vec2 cardUv = (vUv - 0.5) * ((uFaceContain > 1.5) ? 1.0 : max(uContentScale, 1e-4)) + 0.5;
           // mask_clip=false（内边框效果）时正面卡面不裁到边框内，可延伸出边框外沿一圈图像
           base.a *= mix(1.0, texture2D(uInteriorMap, cardUv).a, uMaskClip);
         } else {
@@ -1128,6 +1138,7 @@ CARD_HTML_TEMPLATE = r"""<!DOCTYPE html>
     `,
   });
 
+  __LENTI_LOAD__
   // ---- 辉光 aura（沿蒙版边缘绘制：采样蒙版有符号距离场，不再用固定圆角矩形） ----
   // 样式由 GLOW_EFFECTS 预设注入：uGlowTop/Bottom 颜色渐变、uGlowTight/uGlowSoft 距离、
   // uGlowMode 形状模式（0渐变/1四角/2双色/3菲涅尔/4双环/5RGB循环/6霓虹/7发廊螺纹）、
@@ -1800,7 +1811,7 @@ def _overlay_layer_js(rel: str | None, z: float, order: int, side: str = "THREE.
         return ""
     return (
         "  (function () {\n"
-        "    var t = loader.load(" + json.dumps(rel) + ");\n"
+        "    var t = loader.load(" + _json(rel) + ");\n"
         "    t.colorSpace = THREE.SRGBColorSpace;\n"
         "    t.anisotropy = 8;\n"
         "    var m = new THREE.Mesh(\n"
@@ -1820,7 +1831,7 @@ def _outline_layer_js(rel: str | None, z: float, order: float) -> str:
         return ""
     return (
         "  (function () {\n"
-        "    var t = loader.load(" + json.dumps(rel) + ");\n"
+        "    var t = loader.load(" + _json(rel) + ");\n"
         "    t.colorSpace = THREE.SRGBColorSpace;\n"
         "    t.anisotropy = 8;\n"
         "    var m = new THREE.Mesh(\n"
@@ -1837,23 +1848,24 @@ def _outline_layer_js(rel: str | None, z: float, order: float) -> str:
 # 卡面 contain 到边框内沿（中空区域）：非浮起+边框+卡面素材时，主 shader 按 uFaceBox
 # 把卡面等比缩放居中放进中空窗口，整图完整可见不超框（2D compositor 同步实现）。
 # 中空 = 边框内区域蒙版（白=边框环+中空）∩ 边框图透明区（镂空），两者叠加后取白区 bbox。
-_FACE_CONTAIN_JS = r"""
-    var frameImg = null;
-    (function pollFrame() {
-      if (t.image && t.image.width) frameImg = t.image;
-      else setTimeout(pollFrame, 30);
-    })();
-    function setFaceBox(f) {
-      if (!interiorMaskImg || !frameImg || !frameImg.width) { setTimeout(function () { setFaceBox(f); }, 30); return; }
+_FACE_BOX_JS = r"""
+    // 由「边框内区域蒙版」∩「边框透明区」算出卡面窗口 bbox，写入主 shader 的
+    // uFaceBox / uFaceAspect / uFaceContain。挂到 window 上，是为了让整卡边框路径
+    // （_frame_layer_js 的非 fit_subject 分支）也能复用同一份实现。
+    // plain=true：整卡边框路径（成品卡/上传图）—— 网格不随卡面倍率缩放，
+    // 主 shader 用 uFaceContain=2.0 区分，倍率改由 UV 承担（否则会被 contain 抵消）。
+    window.__faceBoxApply = function (fi, ii, f, plain) {
+      if (!fi || !fi.width || !ii || !ii.width) return false;
+      if (!cardMaterial || !cardMaterial.uniforms || !cardMaterial.uniforms.uFaceBox) return false;
       var cv = document.createElement('canvas');
       cv.width = 450; cv.height = 600;
       var ctx = cv.getContext('2d');
       var rx = (f.cx - f.fw / 2) * 450, ry = (f.cy - f.fh / 2) * 600, rw = f.fw * 450, rh = f.fh * 600;
       ctx.clearRect(0, 0, 450, 600);
-      ctx.drawImage(interiorMaskImg, rx, ry, rw, rh);
+      ctx.drawImage(ii, rx, ry, rw, rh);
       var di = ctx.getImageData(0, 0, 450, 600).data;
       ctx.clearRect(0, 0, 450, 600);
-      ctx.drawImage(frameImg, rx, ry, rw, rh);
+      ctx.drawImage(fi, rx, ry, rw, rh);
       var df = ctx.getImageData(0, 0, 450, 600).data;
       var x0 = 450, y0 = 600, x1 = -1, y1 = -1;
       for (var y = 0; y < 600; y++) {
@@ -1867,23 +1879,40 @@ _FACE_CONTAIN_JS = r"""
           }
         }
       }
-      if (x1 < 0) return;
+      if (x1 < 0) return false;
       // canvas y 自上而下，纹理 UV y 自下而上（CanvasTexture 默认 flipY）：翻转 y 后再写入
       cardMaterial.uniforms.uFaceBox.value.set(x0 / 450, 1.0 - (y1 + 1) / 600, (x1 + 1) / 450, 1.0 - y0 / 600);
-      var fi = frontTexture.image;
-      cardMaterial.uniforms.uFaceAspect.value = (fi && fi.width) ? (fi.width / fi.height) : 1.0;
-      cardMaterial.uniforms.uFaceContain.value = 1.0;
+      var fi2 = frontTexture.image;
+      cardMaterial.uniforms.uFaceAspect.value = (fi2 && fi2.width) ? (fi2.width / fi2.height) : 1.0;
+      cardMaterial.uniforms.uFaceContain.value = plain ? 2.0 : 1.0;
+      return true;
+    };
+"""
+
+_EMBED_FIT = r"""
+    var frameImg = null;
+    (function pollFrame() {
+      if (t.image && t.image.width) frameImg = t.image;
+      else setTimeout(pollFrame, 30);
+    })();
+    function setFaceBox(f, plain) {
+      if (!interiorMaskImg || !frameImg || !frameImg.width) { setTimeout(function () { setFaceBox(f, plain); }, 30); return; }
+      window.__faceBoxApply(frameImg, interiorMaskImg, f, plain);
     }
-    function setFaceBoxRetry(f) {
-      if (cardMaterial) setFaceBox(f);
-      else setTimeout(function () { setFaceBoxRetry(f); }, 30);
+    function setFaceBoxRetry(f, plain) {
+      if (cardMaterial) setFaceBox(f, plain);
+      else setTimeout(function () { setFaceBoxRetry(f, plain); }, 30);
     }
 """
+
+# 整卡边框（非 fit_subject）路径的卡面 contain：边框按整卡绘制，窗口矩形即整卡，
+# 只需拿到 frame / interior 两张图交给通用实现。
+_FACE_CONTAIN_JS = _FACE_BOX_JS + _EMBED_FIT
 
 
 def _frame_layer_js(rel: str | None, z: float, order: int, fit_subject: bool = False,
                     adapt_limit: float | None = None, interior_rel: str | None = None,
-                    contain: bool = False) -> str:
+                    contain: bool = False, contain_plain: bool = False) -> str:
     """边框叠加层 JS。fit_subject 时按前景主体包围盒缩放边框（否则整卡），仅正面渲染。
 
     主体包围盒在浏览器端从前景纹理 alpha 计算（无需服务端 numpy），
@@ -1899,22 +1928,22 @@ def _frame_layer_js(rel: str | None, z: float, order: int, fit_subject: bool = F
     if fit_subject:
         return (
             "  (function () {\n"
-            "    var t = loader.load(" + json.dumps(rel) + ");\n"
+            "    var t = loader.load(" + _json(rel) + ");\n"
             "    t.colorSpace = THREE.SRGBColorSpace;\n"
             "    t.anisotropy = 8;\n"
             "    var pad = 0.03;\n"
             "    var adaptLimit = " + ("null" if adapt_limit is None else json.dumps(adapt_limit)) + ";\n"
             "    var lastFit = null;\n"
             "    var interiorMaskImg = null;\n"
-            + ("    loader.load(" + json.dumps(interior_rel) + ", function (it) { interiorMaskImg = it.image; if (lastFit) drawInterior(lastFit); });\n" if interior_rel else "")
-            + ("\n" + _FACE_CONTAIN_JS if contain else "")
+            + ("    loader.load(" + _json(interior_rel) + ", function (it) { interiorMaskImg = it.image; if (lastFit) drawInterior(lastFit); });\n" if interior_rel else "")
+            + ("\n" + _FACE_CONTAIN_JS if (contain or contain_plain) else "")
             + "    function drawInterior(f) {\n"
             "      if (!interiorMaskImg || !interiorMaskImg.width) return;\n"
             "      interiorCtx.clearRect(0, 0, 450, 600);\n"
             "      interiorCtx.drawImage(interiorMaskImg, (f.cx - f.fw / 2) * 450, (f.cy - f.fh / 2) * 600, f.fw * 450, f.fh * 600);\n"
             "      interiorTexture.needsUpdate = true;\n"
             "      updateInteriorSdf();\n"
-            + ("      setFaceBoxRetry(f);\n" if contain else "")
+            + ("      setFaceBoxRetry(f, " + ("true" if contain_plain else "false") + ");\n" if (contain or contain_plain) else "")
             + "    }\n"
             "    function addFrame(fw, fh, cx, cy) {\n"
             "      var m = new THREE.Mesh(\n"
@@ -1967,12 +1996,28 @@ def _frame_layer_js(rel: str | None, z: float, order: int, fit_subject: bool = F
     if interior_rel:
         overlay += (
             "  (function () {\n"
-            "    loader.load(" + json.dumps(interior_rel) + ", function (t) {\n"
+            "    loader.load(" + _json(interior_rel) + ", function (t) {\n"
             "      interiorCtx.clearRect(0, 0, 450, 600);\n"
             "      interiorCtx.drawImage(t.image, 0, 0, 450, 600);\n"
             "      interiorTexture.needsUpdate = true;\n"
             "      updateInteriorSdf();\n"
             "    });\n"
+            "  })();\n"
+        )
+    # 整卡边框的卡面 contain：成品卡/上传图（face_scales=False）也把卡面等比装进
+    # 「边框内沿」窗口再裁切，而不是按整卡 cover 后被 interior 削掉一圈。
+    if contain_plain and interior_rel:
+        overlay += (
+            "  (function () {\n"
+            + _FACE_BOX_JS +
+            "    var __fbFrame = null, __fbInterior = null, __fbTries = 0;\n"
+            "    function __fbApply() {\n"
+            "      if (window.__faceBoxApply(__fbFrame, __fbInterior, { fw: 1, fh: 1, cx: 0.5, cy: 0.5 }, true)) return;\n"
+            "      if (++__fbTries > 600) return;\n"
+            "      setTimeout(__fbApply, 30);\n"
+            "    }\n"
+            "    loader.load(" + _json(rel) + ", function (t) { __fbFrame = t.image; __fbApply(); });\n"
+            "    loader.load(" + _json(interior_rel) + ", function (t) { __fbInterior = t.image; __fbApply(); });\n"
             "  })();\n"
         )
     return overlay
@@ -2594,7 +2639,7 @@ def _seal_layer_js(effect: dict, front_strength: float = 0.945, back_strength: f
         prefix = prefix.replace("void main() {", "uniform sampler2D uFrameMap;\nvoid main() {", 1)
     elif mask_rel:
         mask_js = (
-            "    var sealFrameTex = loader.load(" + json.dumps(mask_rel) + ");\n"
+            "    var sealFrameTex = loader.load(" + _json(mask_rel) + ");\n"
             "    sealFrameTex.colorSpace = THREE.SRGBColorSpace;\n"
         )
         uniform_decl += "    uFrameMap: { value: sealFrameTex },\n"
@@ -2693,7 +2738,7 @@ def _flow_layer_js(rel: str | None, strength: float = 0.62, speed: float = 1.0,
     )
     return (
         "  (function () {\n"
-        "    var t = loader.load(" + json.dumps(rel) + ");\n"
+        "    var t = loader.load(" + _json(rel) + ");\n"
         "    t.colorSpace = THREE.NoColorSpace;\n"
         "    t.anisotropy = 8;\n"
         "    t.wrapS = THREE.MirroredRepeatWrapping;\n"
@@ -2860,7 +2905,7 @@ def _custom_seal_layer_js(rel: str | None, front_strength: float = 0.945, back_s
         prefix = prefix.replace("void main() {", "uniform sampler2D uFrameMap;\nvoid main() {", 1)
     elif mask_rel:
         mask_js = (
-            "    var sealFrameTex = loader.load(" + json.dumps(mask_rel) + ");\n"
+            "    var sealFrameTex = loader.load(" + _json(mask_rel) + ");\n"
             "    sealFrameTex.colorSpace = THREE.SRGBColorSpace;\n"
         )
         prefix = prefix.replace("void main() {", "uniform sampler2D uFrameMap;\nvoid main() {", 1)
@@ -2870,7 +2915,7 @@ def _custom_seal_layer_js(rel: str | None, front_strength: float = 0.945, back_s
 
     return (
         "  (function () {\n"
-        "    var t = loader.load(" + json.dumps(rel) + ");\n"
+        "    var t = loader.load(" + _json(rel) + ");\n"
         "    t.colorSpace = THREE.NoColorSpace;\n"
         "    t.anisotropy = 8;\n"
         + mask_js
@@ -2937,7 +2982,7 @@ def _detail_layer_js(rel: str | None, z: float = 0.030, order: float = 6.0,
     )
     return (
         "(function () {\n"
-        "  var t = new THREE.TextureLoader().load(" + json.dumps(rel) + ");\n"
+        "  var t = new THREE.TextureLoader().load(" + _json(rel) + ");\n"
         "  t.colorSpace = THREE.NoColorSpace;\n"
         "  t.anisotropy = 8;\n"
         "  t.minFilter = THREE.LinearMipmapLinearFilter;\n"
@@ -2989,7 +3034,7 @@ def _sprite_layer_js(rel: str | None, z: float, order: float,
     )
     return (
         "(function () {\n"
-        "  var t = new THREE.TextureLoader().load(" + json.dumps(rel) + ");\n"
+        "  var t = new THREE.TextureLoader().load(" + _json(rel) + ");\n"
         "  t.colorSpace = THREE.NoColorSpace;\n"
         "  t.anisotropy = 8;\n"
         "  t.minFilter = THREE.LinearMipmapLinearFilter;\n"
@@ -3033,7 +3078,7 @@ def _pattern_layer_js(rel: str | None, z: float = 0.014, order: float = 4.6) -> 
     )
     return (
         "(function () {\n"
-        "  var t = new THREE.TextureLoader().load(" + json.dumps(rel) + ");\n"
+        "  var t = new THREE.TextureLoader().load(" + _json(rel) + ");\n"
         "  t.colorSpace = THREE.NoColorSpace;\n"
         "  t.anisotropy = 8;\n"
         "  t.minFilter = THREE.LinearMipmapLinearFilter;\n"
@@ -3236,8 +3281,8 @@ def _fg_edge_mask_js(content_scale: float = 1.0, frame_rel: str | None = None,
         "      edgeTex = new THREE.CanvasTexture(cv);\n"
         "      edgeTex.colorSpace = THREE.NoColorSpace;\n"
         "    }\n"
-        "    loader.load(" + json.dumps(frame_rel) + ", function (t) { frameImg = t.image; build(); });\n"
-        "    loader.load(" + json.dumps(interior_rel) + ", function (t) { interiorImg = t.image; build(); });\n"
+        "    loader.load(" + _json(frame_rel) + ", function (t) { frameImg = t.image; build(); });\n"
+        "    loader.load(" + _json(interior_rel) + ", function (t) { interiorImg = t.image; build(); });\n"
         + mask_js
         + "  })();\n"
     )
@@ -3542,7 +3587,7 @@ def _bg_layer_js(rel: str | None, face_scales: bool) -> str:
     if rel:
         return (
             "  (function () {\n"
-            "    var bgTex = loader.load(" + json.dumps(rel) + ");\n"
+            "    var bgTex = loader.load(" + _json(rel) + ");\n"
             "    bgTex.colorSpace = THREE.SRGBColorSpace;\n"
             "    bgTex.anisotropy = 8;\n"
             "    var bgMat = new THREE.ShaderMaterial({\n"
@@ -3560,7 +3605,7 @@ def _bg_layer_js(rel: str | None, face_scales: bool) -> str:
             "        'void main(){ if (bgRounded(vUv, 0.032) > 0.0) discard; vec2 bv = vUv; if (uTexAspect > uAspect) { bv.x = (vUv.x-0.5)*(uAspect/uTexAspect)+0.5; } else { bv.y = (vUv.y-0.5)*(uTexAspect/uAspect)+0.5; } vec4 c = texture2D(uBgTexture, clamp(bv, 0.001, 0.999)); c.a *= texture2D(uInteriorMap, vUv).a; gl_FragColor = c; }'\n"
             "      ].join('\\n'),\n"
             "    });\n"
-            "    loader.load(" + json.dumps(rel) + ", function (t) { bgMat.uniforms.uTexAspect.value = t.image.width / t.image.height; });\n"
+            "    loader.load(" + _json(rel) + ", function (t) { bgMat.uniforms.uTexAspect.value = t.image.width / t.image.height; });\n"
             "    var bgMesh = new THREE.Mesh(new THREE.PlaneGeometry(CARD_WIDTH, CARD_HEIGHT), bgMat);\n"
             "    bgMesh.position.z = -0.004; bgMesh.renderOrder = -2; flipGroup.add(bgMesh);\n"
             "    window.__BG_LAYER__ = bgMesh;\n"
@@ -3635,6 +3680,119 @@ def _subject_offset_js(off_x: float, off_y: float) -> str:
     )
 
 
+LENTI_DEFAULTS = {
+    "angle": 0.0,      # 条纹方向（度）：0=竖直 90=水平
+    "lens": 120,       # 每卡宽度的透镜条数
+    "stripe": 0.48,    # 棱纹强度
+    "sheen": 0.90,     # 塑料光泽
+    "sheenPow": 3.2,   # 光泽锐度
+    "soft": 0.62,      # 切换柔和度 0=硬切（一条条纯图竖条）1=全渐变
+    "jitter": 0.02,    # 条带错位（必须远小于 soft，否则撕成竖条）
+    "gain": 1.0,       # 倾角灵敏度（相位行程 = (N-1)*gain）
+    "bend": 0.22,      # 相位随卡内位置的梯度（扫光成带状、擦除方向感）
+    "gloss": 1.0,
+}
+
+
+def _lenti_glsl(n: int, o: dict) -> str:
+    """光栅卡卡面：uniform 声明 + 按槽位取图。"""
+    return (
+        "      // ---- 光栅卡（lenticular）uniform ----\n"
+        "      uniform sampler2D uT0, uT1, uT2, uT3, uT4, uT5;\n"
+        "      uniform float uLentiN, uLAngle, uLLens, uLStripe, uLSheen, uLSheenPow;\n"
+        "      uniform float uLSoft, uLJitter, uLGyro, uLBend, uLPhase, uLGloss;\n"
+        "      float lhash11(float p) {\n"
+        "        p = fract(p * 0.1031); p *= p + 33.33; p *= p + p; return fract(p);\n"
+        "      }\n"
+        "      vec3 lentiTex(float idx, vec2 uv) {\n"
+        "        float k = mod(idx, max(uLentiN, 1.0));\n"
+        "        if (k < 0.5) return texture2D(uT0, uv).rgb;\n"
+        "        if (k < 1.5) return texture2D(uT1, uv).rgb;\n"
+        "        if (k < 2.5) return texture2D(uT2, uv).rgb;\n"
+        "        if (k < 3.5) return texture2D(uT3, uv).rgb;\n"
+        "        if (k < 4.5) return texture2D(uT4, uv).rgb;\n"
+        "        return texture2D(uT5, uv).rgb;\n"
+        "      }\n"
+    )
+
+
+def _lenti_face_frag(n: int, o: dict) -> str:
+    """卡面采样后的光栅合成（写回 base）。"""
+    return (
+        "          // ---- 光栅卡卡面：N 张图按柱状透镜条带交替，倾斜时切换 ----\n"
+        "          {\n"
+        "            float lca = cos(uLAngle), lsa = sin(uLAngle);\n"
+        "            vec2 axP = vec2(lca, -lsa);   // 条纹推进方向（垂直于透镜轴）\n"
+        "            vec2 axL = vec2(lsa, lca);    // 透镜轴（条纹走向）\n"
+        "            vec2 qc = (vUv - 0.5) * vec2(uAspect, 1.0);\n"
+        "            float lx = dot(qc, axP) * (uLLens / uAspect);\n"
+        "            float lid = floor(lx);\n"
+        "            float lsub = fract(lx);\n"
+        "            float lh = lhash11(lid + 0.5);\n"
+        "            vec3 axPw = normalize(vWorldXAxis * axP.x + vWorldYAxis * axP.y);\n"
+        "            vec3 axLw = normalize(vWorldXAxis * axL.x + vWorldYAxis * axL.y);\n"
+        "            // 相位 = 视角在条纹推进方向上的有符号投影（±1）+ 卡内位置梯度\n"
+        "            float sv = dot(viewDirection, axPw);\n"
+        "            float ph = uLPhase + sv * uLGyro + dot(qc, axP) * uLBend;\n"
+        "            float lt = ph + (lh - 0.5) * uLJitter;\n"
+        "            float i0 = floor(lt);\n"
+        "            float wf = fract(lt);\n"
+        "            float swin = max(uLSoft, 0.004);\n"
+        "            wf = smoothstep(0.5 - 0.5 * swin, 0.5 + 0.5 * swin, wf);\n"
+        "            vec3 lc0 = lentiTex(i0, flowUv);\n"
+        "            vec3 lc1 = lentiTex(i0 + 1.0, flowUv);\n"
+        "            vec3 lcol = mix(lc0, lc1, wf);\n"
+        "            // 棱纹（AA 后过密退化成平场，避免摩尔纹反噬）\n"
+        "            float laa = clamp(fwidth(lx) * 0.70, 0.0, 1.0);\n"
+        "            float lline = 0.5 + 0.5 * cos(6.28318530718 * lsub);\n"
+        "            lline = mix(lline, 0.5, laa);\n"
+        "            float lridge = pow(lline, 7.0);\n"
+        "            lcol *= 1.0 - uLStripe * (1.0 - lline) * 0.42;\n"
+        "            lcol += uLStripe * 0.055 * lridge;\n"
+        "            // 扫光：柱状透镜的镜面反射带（方向随条纹旋转）\n"
+        "            vec3 lrefl = reflect(-viewDirection, normal);\n"
+        "            vec3 lpl = lrefl - normal * dot(lrefl, normal);\n"
+        "            vec3 lb1 = normalize(axPw * 0.942 + axLw * 0.335);\n"
+        "            vec3 lb2 = normalize(axPw * -0.335 + axLw * 0.942);\n"
+        "            float lg1 = clamp(abs(dot(lpl, lb1)) * 2.6, 0.0, 1.0);\n"
+        "            float lg2 = clamp(abs(dot(lpl, lb2)) * 2.6, 0.0, 1.0);\n"
+        "            float lband = pow(lg1, uLSheenPow);\n"
+        "            float lcore = pow(lg1, uLSheenPow * 3.0);\n"
+        "            float lband2 = pow(lg2, uLSheenPow * 2.0) * 0.45;\n"
+        "            lcol *= 1.0 + (0.10 * lband + 0.05 * lcore) * uLSheen;\n"
+        "            lcol += vec3(1.0, 0.992, 0.972) * uLSheen * uLGloss\n"
+        "                  * (lband * (0.09 + 0.18 * lline) + lcore * 0.22\n"
+        "                     + lband2 * (0.055 + 0.10 * lline)) * mix(0.62, 1.0, lridge);\n"
+        "            base.rgb = clamp(lcol, 0.0, 1.0);\n"
+        "          }\n"
+    )
+
+
+def _lenti_load_js(urls, n: int, o: dict) -> str:
+    """贴图加载 + uniform 赋值（放在 cardMaterial 定义之后）。"""
+    return (
+        "  // ---- 光栅卡贴图（最多 6 张；空槽绑 1x1 黑图，取样器必须都有值）----\n"
+        "  (function () {\n"
+        "    var BLK = new THREE.DataTexture(new Uint8Array([0, 0, 0, 255]), 1, 1);\n"
+        "    BLK.needsUpdate = true;\n"
+        "    var SLOT = ['uT0', 'uT1', 'uT2', 'uT3', 'uT4', 'uT5'];\n"
+        "    var urls = " + _json(urls[:6]) + ";\n"
+        "    SLOT.forEach(function (k) { cardMaterial.uniforms[k].value = BLK; });\n"
+        "    urls.forEach(function (u, i) {\n"
+        "      var t = loader.load(u, function (tt) {\n"
+        "        // 与 frontTexture 一致：ShaderMaterial 输出不做 sRGB 编码，贴图必须直通\n"
+        "        if ('colorSpace' in tt) tt.colorSpace = THREE.NoColorSpace;\n"
+        "        tt.anisotropy = 8;\n"
+        "        tt.generateMipmaps = true;\n"
+        "        tt.minFilter = THREE.LinearMipmapLinearFilter;\n"
+        "      });\n"
+        "      cardMaterial.uniforms[SLOT[i]].value = t;\n"
+        "    });\n"
+        "    cardMaterial.uniforms.uLentiN.value = Math.max(1, Math.min(6, urls.length || 1));\n"
+        "  })();\n"
+    )
+
+
 def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: str, effects=None,
                     frame_rel: str | None = None, seal_rel: str | None = None,
                     seal_name: str | None = None,
@@ -3689,7 +3847,9 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
                     follow_bg: bool = False,
                     bg_follow_rel: str | None = None,
                     card_width: float = 2.25,
-                    three_rel: str = THREE_SRC_REL) -> str:
+                    three_rel: str = THREE_SRC_REL,
+                    lenti_images: list | None = None,
+                    lenti_opts: dict | None = None) -> str:
     """生成自包含 3D 卡网页 HTML。
 
     three_rel: three.js 的 script src。默认是"上两级"的 ../../shared/lib/，
@@ -3790,25 +3950,38 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
             seal_frame_layer = _custom_seal_layer_js(
                 seal_frame_rel, seal_frame_strength_front, seal_frame_strength_back,
                 parent="flipGroup", z=0.02, order=5.2, mask_rel=frame_rel)
+    # 整卡边框（成品卡/上传图）的卡面 contain：勾选「裁剪到边框内」时启用。
+    # 这条路径下卡面网格**不**跟随 content_scale 缩放 —— 网格缩放会被 contain 的
+    # 固定窗口约束抵消（卡面永远被等比塞回同一窗口），表现为「卡面倍率怎么调都没变化」。
+    # 倍率改由 shader 的 UV 承担（uContentScale，uFaceContain=2.0 分支），真正生效。
+    contain_plain = bool(frame_rel and interior_rel and mask_clip
+                         and not face_scales and not subject_over_frame)
     # 卡面渲染缩放：可选项（默认 1.0 不缩放），由界面填写；仅缩放卡面/主体，背景与层1卡封不跟随。
     # 卡面网格随缩放时（face_scales），主 shader 需按内容缩放反算蒙版采样坐标（uContentScale）
     scale_js = ""
     if content_scale != 1.0:
-        scale_js += "  (function () { cardContent.scale.setScalar(" + str(content_scale) + "); })();\n"
-    if face_scales and content_scale != 1.0:
-        scale_js += ("  (function () { cardMaterial.uniforms.uContentScale.value = " + str(content_scale)
-                     + "; if (window.__FACE_MAT__) window.__FACE_MAT__.uniforms.uContentScale.value = "
-                     + str(content_scale) + "; })();\n")
+        if not contain_plain:
+            scale_js += "  (function () { cardContent.scale.setScalar(" + str(content_scale) + "); })();\n"
+        if face_scales or contain_plain:
+            scale_js += ("  (function () { cardMaterial.uniforms.uContentScale.value = " + str(content_scale)
+                         + "; if (window.__FACE_MAT__) window.__FACE_MAT__.uniforms.uContentScale.value = "
+                         + str(content_scale) + "; })();\n")
     # 边框层：未开启浮于边框且 frame_fit_subject 时按主体包围盒缩放，否则整卡；均仅正面渲染。
     # boxed 文本框边框素材按整卡设计（文本框在底部），不随主体缩放；
     # 文本型卡图 cover 铺满卡图区，边框按整卡覆盖、不向内收缩
     adapt_limit = _text_adapt_limit(text_type, description, text_pos)
+    frame_fit = bool(frame_fit_subject and not subject_over_frame and text_type != "boxed" and adapt_limit is None)
+    # 光栅卡面是整幅插画：不 contain 到边框窗口（否则窗口里会留出一圈透明边），
+    # 直接 cover 整卡、由边框内蒙版裁掉边框环 —— 与 2D 的 face_cover 语义一致。
+    _lenti_on = bool([u for u in (lenti_images or []) if u])
     frame_layer = _frame_layer_js(
-        frame_rel, 0.012, 4,
-        frame_fit_subject and not subject_over_frame and text_type != "boxed" and adapt_limit is None,
-        None,
-        interior_rel,
-        bool(frame_rel and not subject_over_frame and face_scales and frame_fit_subject),
+        frame_rel, 0.012, 4, frame_fit, None, interior_rel,
+        # ① 卡面素材（face_scales）随边框包围盒 fit —— 原有行为，未改
+        bool(frame_rel and not subject_over_frame and face_scales and frame_fit_subject
+             and not _lenti_on),
+        # ② 成品卡/上传图（face_scales=False）：勾选「裁剪到边框内」时按整卡窗口 contain，
+        #    否则卡面按整卡 cover，被 interior 蒙版削掉边框环那一圈，画面不完整
+        contain_plain,
     )
     # 主体描边层：渲染在主体之上（盖住主体边缘锯齿），浮起时随前景组抬升到边框之上
     outline_layer = _outline_layer_js(
@@ -3816,7 +3989,7 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
         4.45 if subject_over_frame else 3.1,
     )
     bg_follow_load = (
-        "var bgFollowTexture = loader.load(" + json.dumps(bg_follow_rel) + ");\n"
+        "var bgFollowTexture = loader.load(" + _json(bg_follow_rel) + ");\n"
         "  bgFollowTexture.colorSpace = THREE.NoColorSpace;\n"
         "  bgFollowTexture.anisotropy = 8;\n"
     ) if bg_follow_rel else ""
@@ -3854,9 +4027,9 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
             "          }\n"
         )
         flow_uniform_values = (
-            "      uFlowMask: { value: loader.load(" + json.dumps(flow_mask_rel) + ") },\n"
+            "      uFlowMask: { value: loader.load(" + _json(flow_mask_rel) + ") },\n"
             "      uFlowNoise: { value: (function () {\n"
-            "        var nt = loader.load(" + json.dumps(flow_noise_rel or "") + ");\n"
+            "        var nt = loader.load(" + _json(flow_noise_rel or "") + ");\n"
             "        nt.wrapS = THREE.RepeatWrapping; nt.wrapT = THREE.RepeatWrapping;\n"
             "        nt.colorSpace = THREE.NoColorSpace;\n"
             "        return nt;\n"
@@ -3924,9 +4097,42 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
             band_power=float(_ex.get("band_power", 2.0)),
             rainbow=float(_ex.get("rainbow", 0.7)),
         )
+    # ---- 光栅卡卡面（可选）----
+    _li = [u for u in (lenti_images or []) if u]
+    _ln = min(6, max(1, len(_li))) if _li else 0
+    _lenti_on = bool(_li)
+    _lo = dict(LENTI_DEFAULTS)
+    _lo.update({k: v for k, v in (lenti_opts or {}).items() if v is not None})
+    if _ln:
+        lenti_glsl = _lenti_glsl(_ln, _lo)
+        lenti_face = _lenti_face_frag(_ln, _lo)
+        lenti_load = _lenti_load_js(_li, _ln, _lo)
+        lenti_uniform_values = (
+            "      uT0: { value: null }, uT1: { value: null }, uT2: { value: null },\n"
+            "      uT3: { value: null }, uT4: { value: null }, uT5: { value: null },\n"
+            "      uLentiN: { value: " + str(float(_ln)) + " },\n"
+            "      uLAngle: { value: " + str(float(_lo["angle"]) * 3.141592653589793 / 180.0) + " },\n"
+            "      uLLens: { value: " + str(float(_lo["lens"])) + " },\n"
+            "      uLStripe: { value: " + str(float(_lo["stripe"])) + " },\n"
+            "      uLSheen: { value: " + str(float(_lo["sheen"])) + " },\n"
+            "      uLSheenPow: { value: " + str(float(_lo["sheenPow"])) + " },\n"
+            "      uLSoft: { value: " + str(float(_lo["soft"])) + " },\n"
+            "      uLJitter: { value: " + str(float(_lo["jitter"])) + " },\n"
+            "      uLGyro: { value: " + str(max(1, _ln - 1) * float(_lo["gain"])) + " },\n"
+            "      uLBend: { value: " + str(float(_lo["bend"])) + " },\n"
+            "      uLPhase: { value: 0 },\n"
+            "      uLGloss: { value: " + str(float(_lo["gloss"])) + " },\n"
+        )
+    else:
+        lenti_glsl = lenti_face = lenti_load = lenti_uniform_values = ""
+
     return (
         CARD_HTML_TEMPLATE
         .replace("__THREE_SRC__", three_rel)
+        .replace("__LENTI_GLSL__", lenti_glsl)
+        .replace("__LENTI_FACE__", lenti_face)
+        .replace("__LENTI_UNIFORM_VALUES__", lenti_uniform_values)
+        .replace("__LENTI_LOAD__", lenti_load)
         .replace("__CARD_WIDTH__", ("%g" % round(card_width, 6)))
         .replace("__CARD_NAME__", name)
         .replace("__FRONT__", front_rel)
@@ -3966,6 +4172,8 @@ def build_effect_preview(effects) -> str:
     return (
         PREVIEW_HTML_TEMPLATE
         .replace("__THREE_JS__", three_js)
+        # 卡宽占位符原来没替换 ⇒ 预览页 JS 直接抛 __CARD_WIDTH__ is not defined（整页白屏）
+        .replace("__CARD_WIDTH__", "2.25")
         .replace("__ENGINE_JS__", EFFECT_ENGINE_JS)
         .replace("__EFFECTS__", _json(effects or []))
     )

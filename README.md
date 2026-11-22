@@ -6,8 +6,8 @@
 
 | 入口 | 负责 | 说明 |
 |---|---|---|
-| `cardforge.cmd`（命令行） | **卡牌生成** | 供脚本/其他工具调用：抠图 → 生成卡牌资产（front / foreground / card.png / JSON 定义） |
-| `webui.cmd`（可视化界面） | 卡牌生成 + **特效 DIY / 卡牌拼装 / 素材管理 / 收集册（分组）/ 异兽牌（图鉴）** | http://127.0.0.1:8765，特效 DIY、卡牌拼装、素材管理等目前仅 Web 提供 |
+| `cardforge.cmd`（命令行） | **卡牌生成** | 供脚本/其他工具调用：抠图 → 生成卡牌资产（front / foreground / card.webp / thumb.webp / JSON 定义） |
+| `webui.cmd`（可视化界面） | 卡牌生成 + **特效 DIY / 卡牌拼装 / 素材管理 / 收集册（分组）/ 异兽牌（图鉴）/ 光栅卡** | http://127.0.0.1:8765，特效 DIY、卡牌拼装、素材管理、光栅卡等目前仅 Web 提供 |
 
 > 其他工具对接本工具时只需调用命令行（卡牌生成部分），特效 DIY、卡牌拼装、素材管理不在 CLI 范围内。
 
@@ -63,7 +63,7 @@ cardforge.cmd 封面.png --name "xxx" --model isnet-anime
 | 参数 | 默认 | 说明 |
 |---|---|---|
 | `--export` | 无 | 导出已有卡牌（卡 id 即 `assets/output/` 下的目录名，可在收集册列表或列表接口看到） |
-| `--export-type` | `image` | 导出类型：`image`=2D 合成图（`card.png`）；`html`=自包含单文件（同目录图片 base64 内嵌，可离线双击打开） |
+| `--export-type` | `image` | 导出类型：`image`=2D 合成图（`card.webp`）；`html`=自包含单文件（同目录图片 base64 内嵌，可离线双击打开） |
 | `--out` | 当前目录 | 导出文件保存路径（默认 `<卡id>.png` / `<卡id>.html`） |
 
 > 示例：`cardforge.cmd --export hasunosora-duo --export-type html --out 收藏/莲之空.html`
@@ -172,8 +172,18 @@ CLI 缺省也会自动走 API（显式 `--model` 仍然优先）。
 - `source.png` — 原图副本
 - `front.png` — 底图层（3D 卡应用用）
 - `foreground.png` — 透明前景层（抠图主体）
-- `card.png` — 2D 合成预览卡图（背景+主体+边框+特效+文字）
+- `card.webp` — 2D 合成预览卡图（背景+主体+边框+特效+文字）
+- `thumb.webp` — 收集册网格缩略图（宽 320）
 - `cards/<slug>.json` — 卡牌定义（含全部 DIY 字段）
+
+**素材库内的素材不再逐卡复制**：牌背、边框、卡封、背景、特效贴图这些如果直接取自
+`assets/`、`packs/`、`fx2/`，`card.html` 里写的就是相对引用（`../../../assets/backs/sample-1.png`），
+卡目录里不留副本 —— 一张 2.8 MB 的牌背在几十张卡里各存一份纯属浪费。
+只有你自己上传、裁剪、缩放烘焙过的素材才会落到卡目录里（`front.png` / `interior.png` / `outline.png`
+这类每卡独有的产物同样留在本地）。
+
+要让单张卡脱离项目目录独立分发，用 `--export-type html` 导出：导出时会把所有引用（含 `../../../`）
+现场 base64 内嵌，得到一个真正自包含的单文件。
 
 ## DIY 素材目录（目前均为示例，可替换）
 
@@ -190,6 +200,50 @@ CLI 缺省也会自动走 API（显式 `--model` 仍然优先）。
 > 「🪟 这张图只作透明前景层」勾选框决定它是铺满整卡还是叠成前景。
 
 > 区分：**卡封** = 静态覆层（镭射这类，叠在卡面最上层）；**特效** = 3D 网页卡里的动态动画（冒爱心、冒闪光，周期随机触发），由 `--effect` 或界面下拉选择。
+
+## 光栅卡（lenticular）
+
+模拟实体「光栅变画卡」：卡面是一排柱状透镜，下面压着 N 条图像条带，换视角时
+透镜把不同条带折射进眼睛 —— 于是倾斜卡片会切换画面，同时伴随棱纹反光。
+
+**主入口：卡牌拼装页**（勾选「🎞️ 光栅卡卡面」）—— 光栅卡面就是一个卡面层，
+边框 / 卡封 / 辉光 / 特效 / 文字照常往上叠，预览仍是工具那套可拖拽缩放旋转的 3D 卡。
+
+| 入口 | 用法 |
+|---|---|
+| 拼装页（推荐） | 🧩 卡牌拼装 → 勾选「🎞️ 光栅卡卡面」→ 加 2~6 张图（上传 / 素材库卡面）→ 调参数 → 保存为卡牌 |
+| 单页工作台 | 主界面导航「🎞️ 光栅卡」→ 填路径或上传 → 生成预览 |
+| 命令行 | `python lenticular.py --images a.png b.png c.png --name demo` |
+
+拼装页参数：**条纹方向**（0°=竖直 · 90°=水平 · 其余斜向）/ 透镜密度 / 棱纹 / 光泽 /
+柔和（0=硬切变画，1=全渐变）/ 错位 / 灵敏度（倾角 → 相位行程）。
+
+命令行参数：
+
+- `--mode flip`：N 张图直接交替（经典变画卡，**2~6 张**）
+- `--mode 3d`：把每张图展开成视差帧（抠主体 + 按深度错位），张数 × 帧数 ≤ 6
+- `--aspect 3:4|2:3|1:1|<数字>`：画幅，默认 3:4
+- `--lpi 75`：额外导出一张 `print_interlaced.jpg`（按 600dpi 交错，可直接送印）
+
+保存下来的光栅卡：卡目录 `lenti/f00.webp…`（帧图）+ `card.html`（同一套透镜 shader，
+双击可离线看）+ `card.webp`（首帧当静态封面）；`cards/<id>.json` 的 `lenti`
+记着**原始图源 spec 与参数**，重开这张卡会自动回填面板。
+
+**实现要点**（改之前先读）：
+
+- 透镜坐标：`axP`（条纹推进方向，垂直于透镜轴）/ `axL`（条纹走向）由 `uAngle` 旋转得到，
+  `lx = dot(qc, axP) * (uLens/uAspect)`；扫光方向 `brush/cross` 也跟着这两根轴转。
+- 相位用**视角在 `axP` 上的有符号投影**（`sv = dot(viewDirection, axPw)`），不写死 rotY ——
+  否则条纹一转 90° 就变成「横条纹却在横向倾斜时变画」。`uSpan`（自动 =(N-1)/2）× 系数
+  决定「满倾角走几张图」。
+- 扫光包络必须用 **未归一化**的面内反射分量模长（∝ sin2θ）。用归一化方向做
+  `dot(r2, brush)` 会得到 cos(夹角)，一点点倾斜就跳到 1 —— 退化成开关，卡面直接泛白。
+- **过渡柔和**靠 `soft` 窗口 + 极小的 `jitter`：`jitter` 一旦接近窗口宽度，
+  相邻透镜就会一半纯图 A 一半纯图 B，画面撕成竖条（早期 0.24/0.05 就是这个毛病）。
+- 光栅卡面按 **cover** 铺满整卡、由边框内蒙版裁掉边框环（`face_cover` / 不 contain）：
+  插画比例通常比边框窗口窄，contain 会在窗口里留一圈透明边。
+- 帧数上限 = shader 里的采样器数量（6 个，`uT0..uT5`）。要加张数就同步扩
+  `SLOT` 数组、`lentiTex()`/`frameAt()` 的 if 链，以及 `build_card_html` 的 `uLentiN` 上限。
 
 ## 收集册（分组）
 
@@ -230,36 +284,43 @@ CLI 缺省也会自动走 API（显式 `--model` 仍然优先）。
   想手工指定条目或顺序时，加 `subjects` 数组即可覆盖自动清单。
 - 卡牌 id 按 `<slug>-<版本小写>` 推导（如 `air-cat-01a-negative`）；点亮判定 = 这个目录是否真的存在。
 
-### 成品大图用 WebP（`card.webp`）
+### 成品大图与缩略图统一用 WebP（`card.webp` + `thumb.webp`）
 
-每张卡除了 `card.html`（3D 分层页）还写一份**平面成品图**，用于「导出图片」和制作页的 2D 预览。
-它存 `card.webp` 而不是 `card.png`：
+每张卡除了 `card.html`（3D 分层页）还写一份**平面成品图**，用于「导出图片」和制作页的 2D 预览，
+外加一份网格用的**缩略图**。两者都存 WebP：
 
-| | 单张（1465×2048） | 1800 版合计 |
+| | 单张 | 1800 版合计 |
 |---|---|---|
-| `card.png` | 1.75 MB | ~3.1 GB |
+| `card.png`（1465×2048） | 1.75 MB | ~3.1 GB |
 | `card.webp`（q92，同分辨率） | **0.17 MB** | **~315 MB** |
+| `thumb.png`（宽 320） | ~190 KB | ~340 MB |
+| `thumb.webp`（q88，宽 320） | **~35 KB** | **~63 MB** |
 
-肉眼看不出差别。`_export_card` 在导出时用 PIL 转回 PNG 给用户（毫秒级），所以对外表现不变。
+肉眼看不出差别。**保存、重生成文字、CLI 合成、导出**四个入口全部走
+`cardforge.save_preview(im, out_dir)`（`card.webp` q92 + `thumb.webp` q88，顺手清掉同名老 PNG），
+口径只此一处 —— 以前分散在 `cardforge.py` / `webapp.py` 两处各写一遍 PNG，
+改口径时漏一处就会出现「有的卡是 png 有的是 webp」。
+`_export_card` 现在也直接给 `.webp`（磁盘已是 webp 就字节直搬，不做重编码）。
 `list_cards()` 用 `_big_name()` 取文件名，`card.webp` 不存在时回落 `card.png`（兼容老产物）。
 
-### 缩略图（**不要删** `thumb.png`）
+### 缩略图（**不要删** `thumb.webp`）
 
 网格每格只有约 160 CSS px，早期直接用 1465×2048 的成品大图当缩略图，实测：
 
 | | 一册页（18 格） | 单页解码 |
 |---|---|---|
 | 整卡大图 | **37 MB** | 0.8 – 2.0 s（翻页明显顿） |
-| `thumb.png`（宽 320，~190 KB） | **3.1 MB** | ~20 ms |
+| `thumb.webp`（宽 320，~35 KB） | **0.6 MB** | ~20 ms |
 
-所以每张卡额外写一份 `thumb.png`（`batch_editions.make_one` 生成，`_backfill_thumb.py` 可回填历史卡）。
+所以每张卡额外写一份 `thumb.webp`（`batch_editions.make_one` / `cardforge.save_preview` 生成，
+`_backfill_thumb.py` 可回填历史卡）。
 收集册的网格格子和侧栏小图都读它；**详情弹窗走 `card.html` 的 iframe**，
 那里是 three.js 按层实时合成（front / under_rare / art / border / badges / text / smoke 各自一张贴图），
 不是一张预合成的大图 —— 这才是「换掉 art.png 就换主体」的可 DIY 架构。
 
 ★ 两个坑：
 
-1. `thumb.png` **必须**在 `cardrip/_sharedize.py` 的 `KEEP_LOCAL` 里。它是每卡专属的，
+1. `thumb.webp`（和老的 `thumb.png`）**必须**在 `cardrip/_sharedize.py` 的 `KEEP_LOCAL` 里。它是每卡专属的，
    一旦被当公共素材处理，就会被 prune 扫进 `packs/_trash`，图鉴立刻变成一片空位。
 2. 图鉴页注入数据用的是 `re.sub(...)`，**替换串会被解释反斜杠**（`\"` → `"`）。
    直接把 `json.dumps` 的结果塞进替换串，卡牌描述里只要有一个引号，JSON 就被吃坏，

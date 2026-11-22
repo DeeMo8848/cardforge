@@ -534,6 +534,7 @@ def compose_card(
     follow_bg_src: str | Path | None = None,
     subject_offset_x: float = 0.0,
     subject_offset_y: float = 0.0,
+    face_cover: bool = False,
 ) -> Image.Image:
     """2D 卡牌合成：背景 → 卡面 → 主体 → 卡封1 → 边框内蒙版 → 边框 → 卡封2 → 文字。
 
@@ -549,6 +550,7 @@ def compose_card(
     主体都能像素级遮盖背景原主体）；缺省回退为 front 垂直居中裁切（仅竖长源精确）。
     subject_offset_x/y: 主体图像偏移（卡宽/卡高比例，如 ±0.25），仅偏移图像位置，
     蒙版/渲染范围不跟随偏移（与 3D 视差一致）；正 x 向右、正 y 向上。
+    face_cover: 卡面按 cover 铺满整卡、不做 contain（光栅卡面等整幅插画用）。
     """
     w, h = size
     sc = max(0.5, min(1.5, content_scale))
@@ -597,8 +599,17 @@ def compose_card(
         fr_canvas.alpha_composite(fr_im, (fr_x, fr_y))
         # 非浮起+边框+卡面素材：卡面 contain 到边框内沿（中空区域），整图完整可见不超框
         # （整幅卡面除外：整幅卡即完整卡面设计，边框直接覆盖，不收缩）
-        if face_scales and not subject_over_frame and style != "full-bleed":
+        # 成品卡/上传图（face_scales=False）在勾选「裁剪到边框内」（mask_clip）时同样
+        # contain —— 否则卡面按整卡 cover，随后被 interior 蒙版削掉边框环那一圈，
+        # 画面就不完整了（与 3D 侧 contain_plain 保持同一语义）
+        if not subject_over_frame and (
+            (face_scales and style != "full-bleed") or (mask_clip and not face_scales)
+        ):
             face_box = _frame_hollow_bbox(fr_canvas, w, h)
+        if face_cover:
+            # 光栅卡面（整幅插画）：cover 铺满整卡，随后由边框内蒙版裁掉边框环。
+            # 走 contain 会在窗口里留一圈透明边（插画比例通常比窗口窄）。
+            face_box = None
 
     # —— 背景层：整卡尺寸，不随缩放 ——
     if style == "full-bleed":
@@ -613,7 +624,10 @@ def compose_card(
             canvas = _cover(base, w, h)
     else:
         if not face_scales:
-            base = _load_optional(front)
+            # 勾选「裁剪到边框内」时卡面要 contain 进边框窗口：整卡 front 不能同时当底图，
+            # 否则窗口外那一圈会透出未缩放的整卡画面（与 3D 那边 discard 掉窗口外的语义不符），
+            # 放大倍率时更会出现「中间放大、四周还是原图」的双影。
+            base = None if face_box else _load_optional(front)
         else:
             base = _load_optional(background)
         if base is None:
@@ -626,9 +640,19 @@ def compose_card(
         base = _load_optional(front) or _load_optional(face) or foreground
         # 整幅+文本型跟随：卡面层由下方「跟随背景」承担（与主体同变换），不再叠整幅清晰图
         if base is not None and not follow_bg:
-            canvas.alpha_composite(_cover(base, cw, ch), (cx0, cy0))
+            if face_box:
+                # 勾选「裁剪到边框内」时，整幅卡面也 contain 进边框内沿，避免被蒙版削掉一圈
+                bw_, bh_ = face_box[2] - face_box[0], face_box[3] - face_box[1]
+                f2, fx_, fy_ = _contain(base, bw_, bh_)
+                canvas.alpha_composite(f2, (face_box[0] + fx_, face_box[1] + fy_))
+            else:
+                canvas.alpha_composite(_cover(base, cw, ch), (cx0, cy0))
     else:
         base = _load_optional(front) if face_scales else _load_optional(face)
+        # 成品卡/上传图（face=None）勾选「裁剪到边框内」时，卡面素材就是整卡 front：
+        # 必须拿它进 contain 分支，否则卡面层整个被跳过（倍率、窗口缩放在 2D 里毫无变化）。
+        if base is None and face_box:
+            base = _load_optional(front)
         if base is not None:
             if face_box:
                 # 卡面 contain 到边框内沿（中空区域）：等比缩放居中、整图完整可见；

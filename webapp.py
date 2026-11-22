@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import io
 import json
 import mimetypes
@@ -36,12 +37,89 @@ from compositor import CARD_H, CARD_W, _cover, compose_card, frame_glow_boost, s
 from engine import DEFAULT_MODEL, SUPPORTED_MODELS, create_engine, get_api_config, model_status
 import webcard
 import packs
+import lenticular
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 ASSETS = PROJECT_ROOT / "assets"
 UPLOAD_DIR = ASSETS / "output" / "_uploads"
 TMP_DIR = ASSETS / "output" / "_tmp"          # 临时上传（拼装前景层等）
 PREVIEW_DIR = ASSETS / "output" / "_preview"  # 实时预览 HTML 缓存
+# 异兽牌（RipIt 批量还原）的成品卡目录。跟 cardforge 自己的 assets/output
+# 分开存放：那边是工具手动捏的试验卡，这边是 1800 版流水线产物。
+RIPIT_DIR = ASSETS / "ripit"
+# 成品卡可能落在两个根下，取图/列卡都要按顺序找。
+CARD_ROOTS = (("assets/ripit", RIPIT_DIR), ("assets/output", ASSETS / "output"))
+# 收集册只收录 cardforge 自己捏的卡（assets/output）。
+# assets/ripit 是异兽牌专用目录，按约定**不进收集册**，只在「图鉴」里展示。
+ALBUM_ROOTS = ("assets/output",)
+
+
+def card_dir(card_id: str) -> Path:
+    """按 id 找成品卡目录：先 assets/ripit，再 assets/output，都没有就返回 output 下的路径。"""
+    for _rel, root in CARD_ROOTS:
+        d = root / card_id
+        if d.is_dir():
+            return d
+    return ASSETS / "output" / card_id
+
+
+def _put_layer(src: Path, out_dir: Path, filename: str, *, local: bool = False):
+    """素材落到卡目录，返回 (card.html 引用, 实际文件路径)。
+
+    素材库里的原始文件 → 只写引用（如 "../../../assets/backs/sample-1.png"），不复制；
+    自定义/编辑过的（缩放烘焙、上传、生成）→ 复制成 out_dir/filename。
+    card.html 本来就是相对路径加载（three.js 也走 ../../shared/lib/），
+    多几层 ../ 不需要改前端；http 下这些路径由 /assets/ /packs/ /fx2/ 路由接住。
+    """
+    ref = cardforge.put_layer(src, out_dir, filename, local=local)
+    if ref is None:
+        return None, None
+    p = Path(src).resolve() if ref.startswith("../") else (Path(out_dir) / filename)
+    return ref, p
+
+
+def _card_layer(card_id: str, media: str):
+    """取一张卡某个层文件的实际路径：本地副本优先，被外置成素材引用时按卡定义找回原图。
+
+    外置后卡目录里没有 frame.png / seal.png / back.png，重开编辑（改文字、重存）
+    必须能从 cards/<id>.json 记录里找回来，否则会静默丢层。
+    """
+    copies = {"frame": "frame.png", "seal": "seal.png", "seal_frame": "seal_frame.png",
+              "back": "back.png", "face": "front.png", "background": "front.png",
+              "subject": "foreground.png"}
+    dirs = {"frame": ("frames", "frames-text"), "seal": ("seals",), "seal_frame": ("seals",),
+            "back": ("backs",), "face": ("faces",), "background": ("backgrounds",),
+            "subject": ("faces",)}
+    keys = {"frame": "frame", "seal": "seal", "seal_frame": "seal_frame", "back": "back",
+            "face": "face_name", "background": "background_name", "subject": "subject_name"}
+    p = card_dir(card_id) / copies[media]
+    if p.exists():
+        return p
+    info = _inherit_card(card_id)
+    name = info.get(keys[media])
+    if name:
+        for d in dirs[media]:
+            q = resolve_asset(d, name)
+            if q:
+                return q
+    # 卡目录内的自产图层（光栅卡 lenti/f00.webp 之类）：按卡片定义里的路径找回
+    try:
+        _d = json.loads((PROJECT_ROOT / "cards" / f"{card_id}.json").read_text(encoding="utf-8"))
+        _layers = _d.get("layers") or {}
+        rel = _layers.get(media) or _layers.get("face") or _layers.get("background")
+        if rel:
+            q = Path(str(rel))
+            if not q.is_absolute():
+                q = card_dir(card_id) / q
+            if q.is_file():
+                return q
+    except (OSError, ValueError, TypeError):
+        pass
+    return None
+
+
+# list_cards() 的短 TTL 缓存：(时间戳, 结果)。见函数注释。
+_CARDS_CACHE = None
 EFFECTS_DIR = ASSETS / "effects"              # 自定义特效 JSON
 EFFECT_IMG_DIR = ASSETS / "effects-images"    # 特效图像/精灵帧图
 SETTINGS_FILE = PROJECT_ROOT / "settings.json"  # 界面参数持久化（如卡封强度）
@@ -219,17 +297,34 @@ def _big_name(d: Path) -> str:
 
 
 def list_cards() -> list[dict]:
-    """已有卡牌（assets/output/ 下含 front.png 的目录），附收集册展示所需字段。"""
-    out = ASSETS / "output"
+    """已有卡牌（assets/ripit + assets/output 下含成品图的目录），附收集册展示所需字段。
+
+    加 4 秒缓存：打开收集册/图鉴时，**页面构建**和页面内 **/api/cards** 会各扫一次
+    1800 个卡目录（每次 ~1.9 s），实测首屏要 3~4 s。缓存后首屏 ~2 s。
+    TTL 短到不会让人看不到刚渲出来的卡，又足够覆盖“页面 + 接口”这一次连招。
+    """
+    global _CARDS_CACHE
+    now = time.time()
+    if _CARDS_CACHE and now - _CARDS_CACHE[0] < 4.0:
+        return _CARDS_CACHE[1]
+    cards = _list_cards_uncached()
+    _CARDS_CACHE = (now, cards)
+    return cards
+
+
+def _list_cards_uncached() -> list[dict]:
     # 其他工具调用生成的卡牌不展示：settings.json 显式排除的 id + 16 位 hex id 通用规则
     _exclude = set((_load_settings().get("album_exclude_ids") or []))
     _is_hex_id = lambda n: bool(re.fullmatch(r"[0-9a-f]{16}", n))
     cards = []
-    if out.exists():
+    seen = set()
+    for rel_root, out in CARD_ROOTS:
+        if not out.exists():
+            continue
         for d in sorted(out.iterdir()):
             if not d.is_dir() or d.name.startswith("_"):
                 continue
-            if d.name in _exclude or _is_hex_id(d.name):
+            if d.name in _exclude or _is_hex_id(d.name) or d.name in seen:
                 continue
             # ★ 一次 scandir 拿到目录内全部文件名 —— 原来逐个 (d/n).exists()
             #   是每张卡 8~10 次 stat，1802 张就是 1.8 万次，光 syscall 就要 1.2 秒。
@@ -242,6 +337,7 @@ def list_cards() -> list[dict]:
             # → 只要还有卡面或 3D 页，就算成品卡，别再拿 front.png 当存在性判据。
             if not ({"front.png", "card.webp", "card.png", "card.html"} & files):
                 continue
+            seen.add(d.name)
             name, desc, text_type = d.name, "", "none"
             text_pos = None
             data = {}
@@ -261,17 +357,22 @@ def list_cards() -> list[dict]:
                     else "card.png" if "card.png" in files else "")
             # build_card_def 会把 extra 展开到 JSON 顶层，特效字段实际存在 data["effects"]
             effects = data.get("effects") or (data.get("extra") or {}).get("effects") or []
+            # 缩略图优先 WebP（宽 320，PNG ~172 KB / WebP ~40 KB，1800 张省 240 MB 左右）；
+            # 老的 thumb.png 继续兼容。
+            _thumb = ("thumb.webp" if "thumb.webp" in files
+                      else "thumb.png" if "thumb.png" in files else "")
             cards.append({
                 "id": d.name,
                 "name": name,
                 "description": desc,
                 "text_type": text_type,
                 "text_pos": text_pos,
+                # 卡目录所在的真实根（assets/ripit 或 assets/output），离线路径要从它拼。
+                "root": rel_root,
                 "card_png": (f"/preview/{d.name}/{_big}" if _big
                              else f"/preview/{d.name}/front.png"),
                 # 图鉴网格专用缩略图（宽 320）。没有就留空，前端回落到 card_png。
-                "card_thumb": (f"/preview/{d.name}/thumb.png"
-                               if "thumb.png" in files else ""),
+                "card_thumb": f"/preview/{d.name}/{_thumb}" if _thumb else "",
                 "card_html": f"/preview/{d.name}/card.html" if "card.html" in files else "",
                 "frame": inherit.get("frame"),
                 "seal": inherit.get("seal"),
@@ -299,6 +400,7 @@ def list_cards() -> list[dict]:
                 "glow_strength": data.get("glow_strength",
                                         (data.get("extra") or {}).get("glow_strength", 1.0)),
                 "effects": effects,
+                "lenti": data.get("lenti") or (data.get("extra") or {}).get("lenti"),
             })
     return cards
 
@@ -331,13 +433,25 @@ def _save_albums(data: dict) -> None:
         pass
 
 
+def album_cards(cards: list | None = None) -> list[dict]:
+    """收集册可见的卡：只取 ALBUM_ROOTS 里的根（默认 assets/output）。
+
+    异兽牌那 1800 版住在 assets/ripit，按约定不进收集册 —— 它们只由
+    「图鉴」（codex）展示。之前 list_cards() 一并扫两个根，导致收集册里
+    把它们当「未分类」全列出来了，点开还能正常预览。
+    """
+    cards = list_cards() if cards is None else cards
+    return [c for c in cards if (c.get("root") or "assets/output") in ALBUM_ROOTS]
+
+
 def albums_summary(cards: list | None = None) -> dict:
     """收集册列表 + 每册卡数 + 卡牌归属（只统计当前确实存在的卡，避免删卡留下幽灵计数）。
 
-    cards 传入已算好的 list_cards() 结果可省一次目录扫描（收集册页面同时要两者）。
+    cards 传入已算好的 list_cards() 结果可省一次目录扫描（收集册页面同时要两者）；
+    无论传进来的是什么，都只按 ALBUM_ROOTS 过滤后再统计。
     """
     d = _load_albums()
-    ids = [c["id"] for c in (cards if cards is not None else list_cards())]
+    ids = [c["id"] for c in album_cards(cards)]
     known = set(ids)
     aid = {a["id"] for a in d["albums"]}
     members = {k: v for k, v in d["members"].items() if k in known and v in aid}
@@ -441,18 +555,20 @@ def build_album_page() -> str:
     else:
         return "<!DOCTYPE html><html lang='zh-CN'><head><meta charset='utf-8'><title>收集册</title></head><body><p>album.html 缺失</p></body></html>"
     offline = []
-    cards = list_cards()
+    # 只列 assets/output 的卡（ALBUM_ROOTS）。异兽牌在 assets/ripit，只进图鉴不进收集册。
+    cards = album_cards()
     for c in cards:
+        _r = (c.get("root") or "assets/output") + "/"
         offline.append({
             "id": c["id"],
             "name": c["name"],
             "description": c["description"],
             "text_type": c["text_type"],
-            "card_png": c["card_png"].replace("/preview/", "assets/output/", 1),
-            "card_html": c["card_html"].replace("/preview/", "assets/output/", 1),
+            "card_png": c["card_png"].replace("/preview/", _r, 1),
+            "card_html": c["card_html"].replace("/preview/", _r, 1),
             # 网格格子只有 ~200px，却拉 1465×2048 的整卡图 = 每格 1.7 MB。
-            # 有 thumb.png（宽 320）就用它，详情弹窗仍走 card_png。
-            "thumb": (c.get("card_thumb") or "").replace("/preview/", "assets/output/", 1),
+            # 有缩略图（宽 320）就用它，详情弹窗仍走 card_png。
+            "thumb": (c.get("card_thumb") or "").replace("/preview/", _r, 1),
         })
     data_json = json.dumps(offline, ensure_ascii=False)
     summary = albums_summary(cards)
@@ -568,13 +684,21 @@ def _load_codex_cards() -> list:
 
 
 def codex_catalog(cards: list | None = None) -> dict:
-    """图鉴数据：每主体固定 9 个版本槽位 + 该槽位是否已有成品卡（点亮）。"""
+    """图鉴数据：每主体固定 9 个版本槽位 + 该槽位是否已有成品卡（点亮）。
+
+    特典卡（No.201-209）只有 Promo 一种版本，所以**九张合成一个条目**、
+    占最后一册页的左页（3×3 正好 9 格）—— 否则每张都要开 9 格，
+    会多出 72 个永远空着的格子、还把特典拆到 5 个册页里。
+    """
     cfg = _load_codex()
     cards = list_cards() if cards is None else cards
     by_id = {c["id"]: c for c in cards}
-    subjects = cfg.get("subjects") or _load_codex_cards()
-    if not cfg.get("include_promo", False):
-        subjects = [x for x in subjects if not x.get("promo")]
+    all_subjects = cfg.get("subjects") or _load_codex_cards()
+    if cfg.get("include_promo", False):
+        subjects = [x for x in all_subjects if not x.get("promo")]
+        promos = [x for x in all_subjects if x.get("promo")]
+    else:
+        subjects, promos = [x for x in all_subjects if not x.get("promo")], []
     entries, total_slots, total_owned = [], 0, 0
     for s in subjects:
         slots = []
@@ -590,6 +714,7 @@ def codex_catalog(cards: list | None = None) -> dict:
                 "card_png": (c or {}).get("card_png") or "",
                 "thumb": (c or {}).get("card_thumb") or "",
                 "card_html": (c or {}).get("card_html") or "",
+                "root": (c or {}).get("root") or "assets/output",
                 "unlocked": bool(c),
             })
         owned = sum(1 for x in slots if x["unlocked"])
@@ -597,6 +722,34 @@ def codex_catalog(cards: list | None = None) -> dict:
         total_owned += owned
         entries.append({**s, "slots": slots, "owned": owned, "total": len(slots),
                         "complete": owned >= len(slots)})
+    if promos:
+        slots = []
+        for s in promos:
+            cid = f"{s['slug']}-promo"
+            c = by_id.get(cid)
+            slots.append({
+                "edition": "Promo",
+                "edition_cn": "促销",
+                "id": cid,
+                # label 只进 img alt；格子下方用 caption，否则 9 格全是「促销」分不清是谁
+                "label": (c or {}).get("name") or f"{s['name']} · 促销",
+                "caption": "No.%s %s" % (s.get("no") or "", s.get("name") or ""),
+                "card_png": (c or {}).get("card_png") or "",
+                "thumb": (c or {}).get("card_thumb") or "",
+                "card_html": (c or {}).get("card_html") or "",
+                "root": (c or {}).get("root") or "assets/ripit",
+                "unlocked": bool(c),
+            })
+        owned = sum(1 for x in slots if x["unlocked"])
+        total_slots += len(slots)
+        total_owned += owned
+        entries.append({
+            "slug": "promo-set", "no": "201-209", "name": "特典",
+            "en": "Promo", "element": "Promo", "element_cn": "特典",
+            "rarity": "Promo", "promo": True,
+            "slots": slots, "owned": owned, "total": len(slots),
+            "complete": owned >= len(slots),
+        })
     return {
         "title": cfg["title"],
         "subtitle": cfg["subtitle"],
@@ -622,9 +775,10 @@ def build_codex_page() -> str:
         for s in e["slots"]:
             # 同一份数据要同时喂给「HTTP」与「双击 file://」两种打开方式：
             # 在线走 /preview/，离线必须改成相对文件路径，所以两个都存，前端按协议选。
-            s["card_png_off"] = s["card_png"].replace("/preview/", "assets/output/", 1)
-            s["card_html_off"] = s["card_html"].replace("/preview/", "assets/output/", 1)
-            s["thumb_off"] = (s.get("thumb") or "").replace("/preview/", "assets/output/", 1)
+            _r = (s.get("root") or "assets/output") + "/"
+            s["card_png_off"] = s["card_png"].replace("/preview/", _r, 1)
+            s["card_html_off"] = s["card_html"].replace("/preview/", _r, 1)
+            s["thumb_off"] = (s.get("thumb") or "").replace("/preview/", _r, 1)
     data_json = json.dumps(data, ensure_ascii=False)
     # ★ 不能直接把 data_json 拼进 re.sub 的**替换串**：re.sub 会对替换串做转义解释
     #   （`\"` → `"`、`\\` → `\`、`\n` → 换行），卡牌描述里只要有一个引号，
@@ -666,15 +820,21 @@ def _parse_scale(v) -> float:
     return min(1.5, max(0.5, s))
 
 
-def _scale_card_layer(src, scale: float, dst: Path, base_fill=None) -> Path:
+def _scale_card_layer(src, scale: float, dst: Path, base_fill=None, cover: bool = False) -> Path:
     """把素材按卡牌中心缩放后烘焙成 CARD_W×CARD_H PNG。
 
-    先 cover 铺满整卡（与现有背景/边框渲染一致），再按 scale 缩放并居中；
+    默认 stretch 到整卡（与 3D 边框层「plane 整卡 + 贴图 UV 0~1」的基准一致），
+    再整体放大 scale 倍并按中心裁掉溢出。cover=True 时先把素材等比 cover 到整卡
+    （背景层用：3D 背景层会按 uTexAspect 做等比处理，不能被拉伸）。
     四周空白：base_fill 给定时填充该 RGB（卡体深色底），否则保持透明（边框）。
+
+    ★ 这里**不能**无条件用 ImageOps.fit（cover）：素材比例若与卡比例不一致
+      （如 3:4 的 900×1200 边框），fit 会先放大裁切再乘 scale，等于凭空多出一档
+      放大 —— 表现就是「边框倍率 1.01 就顶出卡边、形状还变了」。
     """
-    from PIL import Image, ImageOps
+    from PIL import Image
     im = Image.open(src).convert("RGBA")
-    im = ImageOps.fit(im, (CARD_W, CARD_H), Image.LANCZOS)
+    im = _cover(im, CARD_W, CARD_H) if cover else im.resize((CARD_W, CARD_H), Image.LANCZOS)
     sw, sh = max(1, round(CARD_W * scale)), max(1, round(CARD_H * scale))
     im = im.resize((sw, sh), Image.LANCZOS)
     canvas = Image.new(
@@ -748,6 +908,108 @@ def _cleanup_old_previews(max_age: float = 3600.0) -> None:
         pass
 
 
+LENTI_ASPECT = 1465 / 2048          # 卡面比例，光栅帧按它规范化
+
+
+def lenti_path_of(spec: str) -> Path:
+    """前端 spec → 本地图片路径（tmp:<上传名> / asset:<类型>:<素材名> / 直接路径）。"""
+    kind, _, val = (spec or "").partition(":")
+    if kind == "tmp":
+        p = TMP_DIR / _safe_name(val)
+    elif kind == "asset":
+        atype, _, key = val.partition(":")
+        if atype not in _ASSET_TYPES:
+            raise ValueError("未知素材类型: " + atype)
+        p = resolve_asset(atype, key) or Path()
+    else:
+        p = Path(val or spec)
+    p = Path(p)
+    if not p.is_file():
+        raise ValueError("找不到图片: " + (val or spec))
+    if p.suffix.lower() not in _IMG_EXTS:
+        raise ValueError("不是支持的图片格式: " + p.name)
+    return p
+
+
+def lenti_src_list(data: dict) -> list[Path]:
+    """拼装页提交的光栅图源（读不到的跳过；最多 6 张）。"""
+    out = []
+    for sp in (data.get("lenti_images") or []):
+        try:
+            out.append(lenti_path_of(sp))
+        except (ValueError, OSError):
+            continue
+    return out[:6]
+
+
+def _lenti_frames(paths: list[Path]):
+    """把光栅图源规范化成卡面比例的帧（webp），按「文件名+大小+mtime」指纹缓存。
+
+    调边框/卡封/特效时 preview 会整页重建，缓存命中就只 stat 一次，
+    不必每次重复解码 PNG（6 张大图约 0.3~0.6s）。
+    返回 (目录, 文件名列表)。
+    """
+    sig = []
+    for p in paths:
+        try:
+            st = p.stat()
+            sig.append("%s|%d|%d" % (p.name, st.st_size, int(st.st_mtime)))
+        except OSError:
+            sig.append(p.name)
+    key = hashlib.md5(("|".join(sig) + "|%.4f" % LENTI_ASPECT).encode("utf-8")).hexdigest()[:12]
+    d = PREVIEW_DIR / "_lenti" / key
+    names = sorted(x.name for x in d.glob("f*.webp")) if d.is_dir() else []
+    if not names:
+        tmp = PREVIEW_DIR / "_lenti" / (key + ".tmp")
+        if tmp.exists():
+            shutil.rmtree(tmp, ignore_errors=True)
+        frames = [lenticular.load_frame(p, LENTI_ASPECT) for p in paths[:6]]
+        names = lenticular.save_frames(frames, tmp)
+        if d.exists():
+            shutil.rmtree(d, ignore_errors=True)
+        tmp.rename(d)
+    return d, names
+
+
+def _card_front_path(card_sel: str):
+    """成品卡卡面实际文件：卡目录 front.webp/front.png 优先，否则按卡定义找回图层
+    （光栅卡的卡面是 lenti/f00.webp，目录里没有 front.png）。"""
+    d = ASSETS / "output" / card_sel
+    for n in ("front.webp", "front.png"):
+        if (d / n).exists():
+            return d / n
+    return _card_layer(card_sel, "face") or _card_layer(card_sel, "background")
+
+
+def _card_front_url(card_sel: str):
+    """/_preview/ 路由只映射 assets/{ripit,output}，卡目录内相对路径都能走通。"""
+    p = _card_front_path(card_sel)
+    if not p:
+        return None
+    d = ASSETS / "output" / card_sel
+    try:
+        rel = Path(p).resolve().relative_to(d.resolve()).as_posix()
+        return f"/preview/{card_sel}/{rel}"
+    except ValueError:
+        return None
+
+
+def _lenti_opts_of(data: dict) -> dict:
+    """拼装页的光栅参数（只取认识的键，全部转 float）。"""
+    o = data.get("lenti") or {}
+    out = {}
+    for k in ("angle", "lens", "stripe", "sheen", "sheenPow", "soft",
+              "jitter", "gain", "bend", "gloss"):
+        v = o.get(k)
+        if v is None or v == "":
+            continue
+        try:
+            out[k] = float(v)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
 def _write_preview_html(html: str) -> dict:
     token = uuid.uuid4().hex[:12]
     d = PREVIEW_DIR / token
@@ -758,12 +1020,12 @@ def _write_preview_html(html: str) -> dict:
 
 
 def _export_card(card_id: str, etype: str):
-    """导出成品卡：image → card.png；html → 自包含单文件（同目录图片 base64 内嵌）。
+    """导出成品卡：image → card.webp；html → 自包含单文件（同目录图片 base64 内嵌）。
 
     返回 (body, mime, filename)；卡片缺失或类型非法返回 None。
     """
     cid = _safe_name(card_id)
-    d = ASSETS / "output" / cid
+    d = card_dir(cid)
     if not cid or not d.is_dir():
         return None
     if etype == "image":
@@ -771,15 +1033,14 @@ def _export_card(card_id: str, etype: str):
         if not n:
             return None
         p = d / n
+        # 成品图统一 WebP（PNG 同尺寸 1.75 MB → 0.17 MB）。磁盘已是 webp 就字节直搬；
+        # 老的 card.png 现转一次，别让导出入口还吐 PNG。
         if n.endswith(".webp"):
-            # 磁盘上存 WebP（省 90% 空间），导出仍给 PNG —— 用户拿去发人、打印
-            # 或丢进别的软件都不用担心兼容性。
-            # ★ 别用 optimize=True：1465×2048 的图它要多花 ~1.5 秒，只省 20% 体积。
-            from PIL import Image
-            buf = io.BytesIO()
-            Image.open(p).save(buf, "PNG", compress_level=6)
-            return (buf.getvalue(), "image/png", f"{cid}.png")
-        return (p.read_bytes(), "image/png", f"{cid}.png")
+            return (p.read_bytes(), "image/webp", f"{cid}.webp")
+        from PIL import Image
+        buf = io.BytesIO()
+        Image.open(p).save(buf, "WEBP", quality=cardforge.PREVIEW_QUALITY, method=4)
+        return (buf.getvalue(), "image/webp", f"{cid}.webp")
     if etype == "html":
         p = d / "card.html"
         if not p.exists():
@@ -800,6 +1061,158 @@ def _export_card(card_id: str, etype: str):
         html = re.sub(r"""(['"])([A-Za-z0-9_.-]+\.(?:png|jpg|jpeg|webp))\1""", _embed, html)
         return (html.encode("utf-8"), "text/html; charset=utf-8", f"{cid}.html")
     return None
+
+
+_LENTI_PANEL = r"""
+<div class="sec">
+  <h2>图源（1~6 张）</h2>
+  <textarea id="gPaths" spellcheck="false" placeholder="每行一个图片路径，例如：&#10;E:/Shadowverse2/Sprites/卡面/1000110100.png&#10;也可以直接「上传图片」"></textarea>
+  <div class="btnrow" style="margin-top:8px">
+    <div class="btn" id="gAdd">加入路径</div>
+    <div class="btn" id="gPick">上传图片</div>
+    <div class="btn" id="gClear">清空</div>
+  </div>
+  <input type="file" id="gFile" accept="image/*" multiple hidden>
+  <div class="chips" id="gChips"></div>
+</div>
+<div class="sec">
+  <h2>生成</h2>
+  <div class="btnrow">
+    <div class="btn on" data-lmode="flip">变画（N 张交替）</div>
+    <div class="btn" data-lmode="3d">立体（视差序列）</div>
+  </div>
+  <div class="btnrow" style="margin-top:8px">
+    <div class="btn" id="gBuild">生成预览</div>
+    <div class="btn" id="gSave">保存到光栅卡库</div>
+  </div>
+  <div class="sub" id="gMsg"></div>
+</div>
+"""
+
+_LENTI_JS = r"""
+<script>
+(function () {
+  const q = [];            // [{spec, name}]
+  const chips = document.getElementById('gChips');
+  const msg = document.getElementById('gMsg');
+  let mode = 'flip';
+  let token = '';
+
+  function say(t, err) {
+    msg.textContent = t || '';
+    msg.style.color = err ? 'var(--err)' : 'var(--muted)';
+  }
+  function draw() {
+    chips.innerHTML = q.map((it, i) =>
+      '<span class="chip">' + (i + 1) + '. ' + it.name +
+      '<b data-del="' + i + '">×</b></span>').join('');
+  }
+  chips.addEventListener('click', (e) => {
+    const i = e.target.dataset && e.target.dataset.del;
+    if (i !== undefined) { q.splice(+i, 1); draw(); }
+  });
+
+  document.getElementById('gAdd').onclick = async () => {
+    const txt = document.getElementById('gPaths').value || '';
+    const lines = txt.split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
+    if (!lines.length) { say('先填路径，或直接上传图片', true); return; }
+    for (const ln of lines) {
+      try {
+        const r = await fetch('/api/lenti/probe', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({path: ln})
+        }).then((x) => x.json());
+        if (!r.ok) { say(r.error || ('读不到: ' + ln), true); continue; }
+        q.push({spec: 'path:' + r.path, name: r.name});
+      } catch (err) { say(String(err), true); }
+    }
+    document.getElementById('gPaths').value = '';
+    draw();
+    if (q.length) say('队列 ' + q.length + ' 张');
+  };
+
+  document.getElementById('gPick').onclick = () => document.getElementById('gFile').click();
+  document.getElementById('gFile').onchange = async (e) => {
+    for (const f of e.target.files) {
+      const b64 = await new Promise((res) => {
+        const fr = new FileReader();
+        fr.onload = () => res(String(fr.result).split(',')[1]);
+        fr.readAsDataURL(f);
+      });
+      const r = await fetch('/api/tmp_upload', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({b64: b64, name: f.name})
+      }).then((x) => x.json());
+      if (r.ok) q.push({spec: 'tmp:' + r.name, name: f.name});
+    }
+    e.target.value = '';
+    draw();
+    if (q.length) say('队列 ' + q.length + ' 张');
+  };
+  document.getElementById('gClear').onclick = () => { q.length = 0; draw(); token = ''; say(''); };
+
+  document.querySelectorAll('[data-lmode]').forEach((b) => {
+    b.onclick = () => {
+      mode = b.dataset.lmode;
+      document.querySelectorAll('[data-lmode]').forEach((x) => x.classList.toggle('on', x === b));
+    };
+  });
+
+  document.getElementById('gBuild').onclick = async () => {
+    if (!q.length) { say('队列是空的', true); return; }
+    if (q.length > 6) { say('最多 6 张（变画卡建议 2~3 张）', true); return; }
+    say('生成中…');
+    const r = await fetch('/api/lenti/build', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({specs: q.map((x) => x.spec), mode: mode})
+    }).then((x) => x.json()).catch((e) => ({ok: false, error: String(e)}));
+    if (!r.ok) { say(r.error || '生成失败', true); return; }
+    token = r.token;
+    await window.__lentiAPI.setImages(r.images.map((n) => ({src: r.base + n, name: n})));
+    say('已生成 ' + r.images.length + ' 帧 · ' + (mode === '3d' ? '立体视差' : '变画'));
+  };
+
+  document.getElementById('gSave').onclick = async () => {
+    if (!token) { say('先生成预览', true); return; }
+    const name = prompt('给这张光栅卡起个名字', q[0] ? q[0].name.replace(/\.[^.]+$/, '') : '光栅卡');
+    if (!name) return;
+    const r = await fetch('/api/lenti/save', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({token: token, name: name})
+    }).then((x) => x.json()).catch((e) => ({ok: false, error: String(e)}));
+    if (!r.ok) { say(r.error || '保存失败', true); return; }
+    say('已保存：' + r.url + '（双击 assets/lenticular 里的 lenti.html 也能离线打开）');
+    window.open(r.url, '_blank');
+  };
+
+  window.__lentiGenInit = () => { draw(); say(''); };
+})();
+</script>
+"""
+
+
+def build_lenti_page() -> str:
+    """光栅卡工作页：右侧面板选图 / 生成 / 保存，左侧 3D 实时预览。"""
+    return lenticular.build_lenti_html(
+        [], title="光栅卡 · cardforge",
+        three_rel=lenticular.THREE_SRC_ABS,
+        top=_LENTI_PANEL + _LENTI_JS,
+        boot_extra="window.__lentiGenInit && window.__lentiGenInit();",
+    )
+
+
+def _lenti_gc(max_age: float = 86400 * 3) -> None:
+    """清掉 3 天前的临时预览目录（assets/lenticular/_work/<token>）。"""
+    work = lenticular.LENTI_ROOT / "_work"
+    if not work.is_dir():
+        return
+    now = time.time()
+    for d in work.iterdir():
+        try:
+            if d.is_dir() and now - d.stat().st_mtime > max_age:
+                shutil.rmtree(d, ignore_errors=True)
+        except Exception:
+            pass
 
 
 def build_page() -> str:
@@ -1090,29 +1503,66 @@ def _save_assembly(data: dict) -> dict:
     bg_p = resolve_asset("backgrounds", custom_bg)
     # 背景渲染视图：背景倍率非 1 时按卡牌中心缩放并烘焙成整卡 PNG（深色底避免透明空洞）
     bg_view_p = bg_p
-    bg_view_url = f"/assets_abs/backgrounds/{custom_bg}" if bg_p else None
+    # 背景素材直接引用素材库（相对路径，file:// 双击也能显示；/assets_abs 只在 HTTP 下有效）
+    bg_view_url = (cardforge.lib_ref(bg_p, out) or f"/assets_abs/backgrounds/{custom_bg}") if bg_p else None
+    bg_view_p = bg_p
     if bg_p and bg_scale != 1.0:
-        bg_view_p = _scale_card_layer(bg_p, bg_scale, out / "background.png", base_fill=(14, 11, 9))
-        bg_view_url = f"/preview/{card_id}/background.png"
+        bg_view_p = _scale_card_layer(bg_p, bg_scale, out / "background.png",
+                                      base_fill=(14, 11, 9), cover=True)
+        bg_view_url = "background.png"
     elif (out / "background.png").exists():
         (out / "background.png").unlink()
-    if face_p:
+    # 卡面：素材库原图 → 只引用（不复制）；烘焙/生成的 → 落本地文件
+    front_rel = None            # card.html 里的引用
+    front_path = None           # 2D 合成 / 卡定义用的实际路径
+
+    def _front_from_bg():
+        """背景当卡面：背景被缩放过（烘焙成 background.png）时必须复制成本地卡面，
+        未缩放时直接引用素材库原图。"""
+        if bg_scale != 1.0:
+            dst = out / "front.png"
+            if Path(bg_view_p).resolve() != dst.resolve():
+                shutil.copy(bg_view_p, dst)
+            return "front.png", dst
+        return _put_layer(bg_view_p, out, "front.png")
+
+    # 光栅卡卡面：图源规范化成卡目录 lenti/f00.webp…（card.html 直接引用，可离线打开）；
+    # 首帧同时当静态卡面（2D 成品图 / 缩略图），其余帧交给 shader 做透镜合成。
+    lenti_specs = [sp for sp in (data.get("lenti_images") or []) if sp]
+    lenti_opts = _lenti_opts_of(data)
+    lenti_rel: list[str] = []
+    _lsrc = lenti_src_list(data)
+    if _lsrc:
+        _ldir, _lnames = _lenti_frames(_lsrc)
+        _ldst = out / "lenti"
+        if _ldst.exists():
+            shutil.rmtree(_ldst, ignore_errors=True)
+        shutil.copytree(_ldir, _ldst)
+        lenti_rel = ["lenti/" + n for n in _lnames]
+        front_rel, front_path = lenti_rel[0], _ldst / _lnames[0]
+        fg_url = ""
+        face_as_fg = False
+    if face_p and not lenti_rel:
         face_used = face_sel
         if face_as_fg or text_type == "boxed":
             # 这张图只作前景层：底图用背景，没背景时用深色底（透明图铺不了整卡）
             if bg_view_p:
-                shutil.copy(bg_view_p, out / "front.png")
+                front_rel, front_path = _front_from_bg()
             else:
                 Image_dark(out / "front.png")
+                front_rel, front_path = "front.png", out / "front.png"
         else:
-            shutil.copy(face_p, out / "front.png")
+            front_rel, front_path = _put_layer(face_p, out, "front.png")
         fg_url = f"/assets_abs/faces/{face_sel}" if face_floats else ""
-    elif bg_view_p:
-        shutil.copy(bg_view_p, out / "front.png")
+    elif bg_view_p and not lenti_rel:
+        front_rel, front_path = _front_from_bg()
         if card_sel and not fg_url:
             fg_url = f"/preview/{card_sel}/foreground.png"
-    elif card_sel and (ASSETS / "output" / card_sel / "front.png").exists():
-        _copy_if_diff(ASSETS / "output" / card_sel / "front.png", out / "front.png")
+    elif card_sel and not lenti_rel and (_card_layer(card_sel, "face") or _card_layer(card_sel, "background")):
+        # 成品卡当底图：源卡自己的卡面可能已外置成素材引用，走 _card_layer 找实际文件
+        _src_front = _card_layer(card_sel, "face") or _card_layer(card_sel, "background")
+        _copy_if_diff(_src_front, out / "front.png")
+        front_rel, front_path = "front.png", out / "front.png"
         # 分层卡的主体层（立绘/图标/边框/文字），一起复制过来叠在卡封之上
         _det = ASSETS / "output" / card_sel / "detail.png"
         if _det.exists():
@@ -1120,8 +1570,11 @@ def _save_assembly(data: dict) -> dict:
             detail_rel = "detail.png"
         if not fg_url:
             fg_url = f"/preview/{card_sel}/foreground.png"
-    else:
+    elif not lenti_rel:
         Image_dark(out / "front.png")
+        front_rel, front_path = "front.png", out / "front.png"
+    if front_rel is None:       # 兜底：绝不写坏引用
+        front_rel, front_path = "front.png", out / "front.png"
 
     # 独立背景层素材：卡面单独缩放时背景整卡铺满（3D 独立背景层 / 2D 背景层共用）
     bg_rel_url = None
@@ -1148,15 +1601,16 @@ def _save_assembly(data: dict) -> dict:
     else:
         Image_blank(out / "foreground.png")
 
-    # 牌背（记录原始素材名，供再次拼装时反查）
+    # 牌背（记录原始素材名，供再次拼装时反查）：素材库原图 → 只引用，不复制
     back_p = resolve_asset("backs", back)
     back_file = back if back_p else "sample-1.png"
     if not back_p:
         back_p = resolve_asset("backs", back_file)
-    shutil.copy(back_p, out / "back.png")
+    back_rel, back_path = _put_layer(back_p, out, "back.png")
 
     # 边框 / 卡封（边框可能来自 frames/ 或 frames-text/；layers 存原始素材路径，便于反查）
     frame_rel = seal_rel = seal_frame_rel = None
+    frame_path = seal_path = seal_frame_path = None
     frame_src = seal_src = seal_frame_src = None
     seal_used = seal_sel
     # 卡封叠加层（拼装页「＋ 添加卡封层」）：每层独立素材 + 正/背强度
@@ -1168,23 +1622,23 @@ def _save_assembly(data: dict) -> dict:
         for _d in ("frames", "frames-text"):
             _p = resolve_asset(_d, frame_sel)
             if _p:
-                shutil.copy(_p, out / "frame.png")
                 if frame_scale != 1.0:
+                    # 缩放过的边框是这张卡独有的，必须落本地
                     _scale_card_layer(_p, frame_scale, out / "frame.png")
-                frame_rel = "frame.png"
+                    frame_rel, frame_path = "frame.png", out / "frame.png"
+                else:
+                    frame_rel, frame_path = _put_layer(_p, out, "frame.png")
                 frame_src = str(_p)
                 break
     if seal_sel:
         _p = resolve_asset("seals", seal_sel)
         if _p:
-            shutil.copy(_p, out / "seal.png")
-            seal_rel = "seal.png"
+            seal_rel, seal_path = _put_layer(_p, out, "seal.png")
             seal_src = str(_p)
     if seal_frame_sel:
         _p = resolve_asset("seals", seal_frame_sel)
         if _p:
-            shutil.copy(_p, out / "seal_frame.png")
-            seal_frame_rel = "seal_frame.png"
+            seal_frame_rel, seal_frame_path = _put_layer(_p, out, "seal_frame.png")
             seal_frame_src = str(_p)
 
     # 卡封叠加层：逐层复制成 seal_<n>.png（素材只存一份，卡里只存引用）
@@ -1199,11 +1653,12 @@ def _save_assembly(data: dict) -> dict:
         if not _p:
             continue
         _fn = "seal_%d.png" % (_i + 1)
-        shutil.copy(_p, out / _fn)
+        # 叠加层同样：素材库原图只写引用，卡里存的是 ../../seals/xxx.png
+        _rel, _ = _put_layer(_p, out, _fn)
         _f = float(_it.get("front", 0.6) or 0)
         _b = float(_it.get("back", 0.0) or 0)
         seal_extra_layers.append(dict(
-            rel=_fn,
+            rel=_rel or _fn,
             front_strength=_f,
             back_strength=_b,
             base=float(_it.get("base", 0.10)),
@@ -1230,10 +1685,10 @@ def _save_assembly(data: dict) -> dict:
 
     # 边框内区域蒙版：整卡内容仅绘制在边框外围以内（2D 合成内嵌生成；3D shader 用预生成 PNG）
     interior_rel = None
-    if frame_rel:
+    if frame_rel and frame_path:
         try:
             from PIL import Image
-            save_frame_interior_mask(Image.open(out / "frame.png"), out / "interior.png")
+            save_frame_interior_mask(Image.open(frame_path), out / "interior.png")
             interior_rel = "interior.png"
         except Exception:
             interior_rel = None
@@ -1241,7 +1696,7 @@ def _save_assembly(data: dict) -> dict:
         (out / "interior.png").unlink()
 
     # 卡面素材是否作为整幅卡面（随缩放）：非文本型且卡面当底图时为真（背景/层1卡封不缩放）
-    face_scales = bool(face_used and not face_as_fg and text_type != "boxed")
+    face_scales = bool((face_used or lenti_rel) and not face_as_fg and text_type != "boxed")
 
     # 特效
     effect_instances = cardforge._resolve_effects(data.get("effects") or [])
@@ -1263,7 +1718,8 @@ def _save_assembly(data: dict) -> dict:
     elif (out / "outline.png").exists():
         (out / "outline.png").unlink()
     (out / "card.html").write_text(
-        webcard.build_card_html(name, "front.png", "foreground.png", "back.png", effects=effect_instances,
+        webcard.build_card_html(name, front_rel, "foreground.png", back_rel or "back.png",
+                                effects=effect_instances,
                                 frame_rel=frame_rel, seal_rel=seal_rel,
                                 seal_name=seal_used if seal_rel else None,
                                 seal_frame_rel=seal_frame_rel,
@@ -1286,21 +1742,24 @@ def _save_assembly(data: dict) -> dict:
                                 background_rel=bg_rel_url,
                                 glow_name=glow_name,
                                 glow_strength=glow_strength,
-                                glow_boost=frame_glow_boost(out / "frame.png") if frame_rel else 1.0,
+                                glow_boost=frame_glow_boost(frame_path) if frame_path else 1.0,
                                 subject_offset_x=subject_offset_x,
-                                subject_offset_y=subject_offset_y),
+                                subject_offset_y=subject_offset_y,
+                                lenti_images=lenti_rel,
+                                lenti_opts=lenti_opts),
         encoding="utf-8",
     )
 
-    # 卡牌定义
+    # 卡牌定义：路径一律指向"实际文件"（素材库原图或卡目录副本），重开编辑时才对得上
+    _front_abs = str(front_path or (out / "front.png"))
     card = build_card_def(
         card_id=card_id, name=name, style="transparent",
-        source=str(out / "front.png"), front=str(out / "front.png"),
+        source=_front_abs, front=_front_abs,
         foreground=str(out / "foreground.png"), engine="assembly",
         description=desc or "",
         back=str(resolve_asset("backs", back_file)),
         layers={
-            "background": str(out / "front.png"),
+            "background": _front_abs,
             # 卡面/主体共用一个素材目录：写进 face 还是 subject 只表示"当底图"还是"当前景"
             "face": str(resolve_asset("faces", face_sel)) if (face_used and not face_as_fg) else None,
             "subject": str(resolve_asset("faces", face_sel)) if (face_used and face_as_fg) else None,
@@ -1334,6 +1793,8 @@ def _save_assembly(data: dict) -> dict:
             "glow_name": glow_name,
             "glow_strength": glow_strength,
             "effects": [{"name": e["name"], "pos": e["pos"]} for e in effect_instances],
+            # 光栅卡：存的是原始图源 spec + 参数（重开时按源图重新规范化，不依赖临时文件）
+            "lenti": {"images": lenti_specs, "opts": lenti_opts} if lenti_rel else None,
         },
     )
     # 卡封叠加层清单（重开这张卡时回填到拼装面板）
@@ -1346,33 +1807,38 @@ def _save_assembly(data: dict) -> dict:
         fg = None
         if (out / "foreground.png").stat().st_size > 0:
             fg = Image.open(out / "foreground.png")
-        composed = compose_card(fg, style="transparent", front=str(out / "front.png"),
+        composed = compose_card(fg, style="transparent", front=_front_abs,
                                 background=str(bg_rel_path) if bg_rel_path else None,
-                                frame=str(out / "frame.png") if frame_rel else None,
-                                seal=str(out / "seal.png") if seal_rel else None,
-                                seal_frame=str(out / "seal_frame.png") if seal_frame_rel else None,
+                                frame=str(frame_path) if frame_rel else None,
+                                seal=str(seal_path) if seal_rel else None,
+                                seal_frame=str(seal_frame_path) if seal_frame_rel else None,
                                 title=name, description=desc, text_type=text_type,
                                 text_area=text_pos,
                                 subject_over_frame=subject_over_frame,
                                 subject_outline=subject_outline, size=(CARD_W, CARD_H),
                                 content_scale=scale,
                                 face_scales=face_scales,
+                                face_cover=bool(lenti_rel),
                                 mask_clip=mask_clip,
                                 subject_offset_x=subject_offset_x,
                                 subject_offset_y=subject_offset_y)
-        composed.save(out / "card.png")
+        cardforge.save_preview(composed, out)
     except Exception:
         pass
 
     build_album_page()  # 刷新离线收集册
-    return {"ok": True, "id": card_id, "webcard": str(out / "card.html")}
+    # preview 直接给前端用：成品图统一 card.webp（老卡可能是 card.png，_big_name 兜底）
+    return {"ok": True, "id": card_id, "webcard": str(out / "card.html"),
+            "preview": f"/preview/{card_id}/{_big_name(out)}"}
 
 
 def _make_text(data: dict) -> dict:
     """基于已有卡牌重新生成文字层（添加/调整卡牌描述与位置，不重新抠图）。"""
     card_id = _safe_name((data.get("id") or "").strip())
-    out = ASSETS / "output" / card_id
-    if not card_id or not (out / "front.png").exists():
+    out = card_dir(card_id)
+    # 卡面可能已被外置成素材库引用（front.png 不再落在卡目录），按卡定义找回原图
+    front_p = _card_layer(card_id, "face") or _card_layer(card_id, "background")
+    if not card_id or front_p is None:
         raise ValueError("找不到该卡牌")
     desc = (data.get("desc") or "").strip() or None
     text_type = data.get("text_type") or "none"
@@ -1445,16 +1911,20 @@ def _make_text(data: dict) -> dict:
     except (OSError, ValueError):
         pass
 
-    frame_rel = "frame.png" if (out / "frame.png").exists() else None
-    seal_rel = "seal.png" if (out / "seal.png").exists() else None
-    seal_frame_rel = "seal_frame.png" if (out / "seal_frame.png").exists() else None
+    # 三个层同样可能已被外置成素材引用：本地副本优先，否则按卡定义找回素材库原图
+    frame_p = _card_layer(card_id, "frame")
+    seal_p = _card_layer(card_id, "seal")
+    seal_frame_p = _card_layer(card_id, "seal_frame")
+    frame_rel = (cardforge.lib_ref(frame_p, out) or "frame.png") if frame_p else None
+    seal_rel = (cardforge.lib_ref(seal_p, out) or "seal.png") if seal_p else None
+    seal_frame_rel = (cardforge.lib_ref(seal_frame_p, out) or "seal_frame.png") if seal_frame_p else None
     # 边框内区域蒙版：缺图时从边框重新生成（旧卡没有 interior.png）
     interior_rel = None
     if frame_rel:
         if not (out / "interior.png").exists():
             try:
                 from PIL import Image
-                save_frame_interior_mask(Image.open(out / "frame.png"), out / "interior.png")
+                save_frame_interior_mask(Image.open(frame_p), out / "interior.png")
             except Exception:
                 pass
         if (out / "interior.png").exists():
@@ -1473,7 +1943,7 @@ def _make_text(data: dict) -> dict:
         _bg_p = resolve_asset("backgrounds", _bgname) if _bgname else None
         if _bg_p:
             bg_rel_path = _bg_p
-            bg_rel_url = f"/assets_abs/backgrounds/{_bgname}"
+            bg_rel_url = cardforge.lib_ref(_bg_p, out) or f"/assets_abs/backgrounds/{_bgname}"
     except (OSError, ValueError):
         pass
     # 主体白色描边：启用时从已有前景图重新生成
@@ -1504,8 +1974,12 @@ def _make_text(data: dict) -> dict:
             bg_follow_rel = None
     elif (out / "bg_follow.png").exists():
         (out / "bg_follow.png").unlink()
+    _front_rel = cardforge.lib_ref(front_p, out) or "front.png"
+    _back_p = _card_layer(card_id, "back")
+    _back_rel = (cardforge.lib_ref(_back_p, out) or "back.png") if _back_p else "back.png"
     (out / "card.html").write_text(
-        webcard.build_card_html(name, "front.png", "foreground.png", "back.png", effects=effect_instances,
+        webcard.build_card_html(name, _front_rel, "foreground.png", _back_rel,
+                                effects=effect_instances,
                                 frame_rel=frame_rel, seal_rel=seal_rel,
                                 seal_name=seal_name,
                                 seal_frame_rel=seal_frame_rel,
@@ -1527,7 +2001,7 @@ def _make_text(data: dict) -> dict:
                                 glow_strength=glow_strength,
                                 follow_bg=follow_bg,
                                 bg_follow_rel=bg_follow_rel,
-                                glow_boost=frame_glow_boost(out / "frame.png") if frame_rel else 1.0,
+                                glow_boost=frame_glow_boost(frame_p) if frame_p else 1.0,
                                 subject_offset_x=subject_offset_x,
                                 subject_offset_y=subject_offset_y),
         encoding="utf-8",
@@ -1537,11 +2011,11 @@ def _make_text(data: dict) -> dict:
         fg = None
         if (out / "foreground.png").stat().st_size > 0:
             fg = Image.open(out / "foreground.png")
-        composed = compose_card(fg, style=card_style, front=str(out / "front.png"),
+        composed = compose_card(fg, style=card_style, front=str(front_p),
                                 background=str(bg_rel_path) if bg_rel_path else None,
-                                frame=str(out / "frame.png") if frame_rel else None,
-                                seal=str(out / "seal.png") if seal_rel else None,
-                                seal_frame=str(out / "seal_frame.png") if seal_frame_rel else None,
+                                frame=str(frame_p) if frame_rel else None,
+                                seal=str(seal_p) if seal_rel else None,
+                                seal_frame=str(seal_frame_p) if seal_frame_rel else None,
                                 title=title, description=desc, text_type=text_type,
                                 text_area=pos,
                                 subject_over_frame=subject_over_frame,
@@ -1554,7 +2028,7 @@ def _make_text(data: dict) -> dict:
                                 follow_bg_src=str(out / "bg_follow.png") if bg_follow_rel else None,
                                 subject_offset_x=subject_offset_x,
                                 subject_offset_y=subject_offset_y)
-        composed.convert("RGB").save(out / "card.png")
+        cardforge.save_preview(composed, out)
     except Exception:
         pass
     if cf.exists():
@@ -1567,7 +2041,9 @@ def _make_text(data: dict) -> dict:
         except (OSError, ValueError):
             pass
     build_album_page()  # 刷新离线收集册
-    return {"ok": True, "id": card_id, "webcard": str(out / "card.html")}
+    # preview 直接给前端用：成品图统一 card.webp（老卡可能是 card.png，_big_name 兜底）
+    return {"ok": True, "id": card_id, "webcard": str(out / "card.html"),
+            "preview": f"/preview/{card_id}/{_big_name(out)}"}
 
 
 def Image_blank(path: Path) -> None:
@@ -1677,6 +2153,33 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
 
+        if path == "/favicon.ico":
+            self.send_response(204)
+            self.end_headers()
+            return
+
+        if path in ("/lenti.html", "/lenti"):
+            body = build_lenti_page().encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        if path.startswith("/lenti/"):
+            # /lenti/<目录>/<文件> —— 光栅卡产物（帧图 + lenti.html）
+            parts = path.strip("/").split("/")
+            if len(parts) >= 3 and all(p and p != ".." for p in parts[1:]):
+                rel = lenticular.LENTI_ROOT
+                for p in parts[1:]:
+                    rel = rel / unquote(p)
+                if self._send_file(rel):
+                    return
+            self._send_json({"ok": False, "error": "not found"}, 404)
+            return
+
         if path in ("/fx2", "/fx2/"):
             path = "/fx2/index.html"
 
@@ -1730,12 +2233,34 @@ class Handler(BaseHTTPRequestHandler):
 
         if path.startswith("/preview/"):
             # /preview/<dir>/.../<file>（可嵌套，如 output/_preview/<token>/preview.html）
+            # 成品卡现在分裂在两个根下：异兽牌流水线的产物在 assets/ripit，
+            # cardforge 手动捏的试验卡在 assets/output —— 依次试，命中即返回。
             parts = path.strip("/").split("/")
             if len(parts) >= 3 and parts[0] == "preview" and all(p and p != ".." for p in parts[1:]):
-                rel = ASSETS / "output"
-                for p in parts[1:]:
-                    rel = rel / unquote(p)
-                if self._send_file(rel):
+                for _root in (ASSETS / "ripit", ASSETS / "output"):
+                    rel = _root
+                    for p in parts[1:]:
+                        rel = rel / unquote(p)
+                    if self._send_file(rel):
+                        return
+            self._send_json({"ok": False, "error": "not found"}, 404)
+            return
+
+        if path.startswith(("/assets/", "/packs/", "/fx2/")):
+            # 卡目录里对素材库的相对引用（../../assets/backs/x.png）在 http 下会被规范化成
+            # 站点根的 /assets/… —— 直接映射回项目目录，file:// 与 http 两种打开方式同源。
+            parts = path.strip("/").split("/")
+            if len(parts) >= 2 and all(p and p != ".." for p in parts):
+                rel = PROJECT_ROOT
+                ok = True
+                for p in parts:
+                    q = unquote(p)
+                    # 解码后再拦一次（%2e%2e / %2f 之类不能被当成路径分隔符）
+                    if q in ("", ".", "..") or "/" in q or "\\" in q:
+                        ok = False
+                        break
+                    rel = rel / q
+                if ok and self._send_file(rel):
                     return
             self._send_json({"ok": False, "error": "not found"}, 404)
             return
@@ -1766,7 +2291,12 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(list_effects())
             return
         if path == "/api/cards":
-            self._send_json({"ok": True, "cards": list_cards()})
+            # scope=album：只返回收集册可见的卡（assets/output）。
+            # 收集册页面用这个；主编辑器仍要不带 scope 的全量（含异兽牌，便于打开编辑）。
+            _q = self.path.split("?", 1)[1] if "?" in self.path else ""
+            _album_only = any(kv == "scope=album" for kv in _q.split("&"))
+            self._send_json({"ok": True,
+                             "cards": album_cards() if _album_only else list_cards()})
             return
         if path == "/api/albums":
             self._send_json({"ok": True, **albums_summary()})
@@ -1850,6 +2380,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(self._cutout(data))
             elif self.path == "/api/subject/cutout":
                 self._send_json(self._subject_cutout(data))
+            elif self.path == "/api/lenti/probe":
+                self._send_json(self._lenti_probe(data))
+            elif self.path == "/api/lenti/build":
+                self._send_json(self._lenti_build(data))
+            elif self.path == "/api/lenti/save":
+                self._send_json(self._lenti_save(data))
             else:
                 self._send_json({"ok": False, "error": "not found"}, 404)
         except ValueError as e:
@@ -1858,6 +2394,77 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"ok": False, "error": str(e)}, 500)
 
     # ---------- 业务 ----------
+
+    # ---- 光栅卡 ----
+
+    def _lenti_path(self, spec: str) -> Path:
+        return lenti_path_of(spec)
+
+    def _lenti_src(self, data: dict) -> list[Path]:
+        return lenti_src_list(data)
+
+    def _lenti_probe(self, data: dict) -> dict:
+        p = self._lenti_path("path:" + (data.get("path") or ""))
+        return {"ok": True, "path": str(p), "name": p.name}
+
+    def _lenti_aspect(self, data: dict) -> float:
+        a = data.get("aspect") or lenticular.DEFAULT_ASPECT
+        if isinstance(a, str) and a in lenticular.ASPECTS:
+            return lenticular.ASPECTS[a]
+        try:
+            v = float(a)
+        except Exception:
+            return lenticular.DEFAULT_ASPECT
+        return v if 0.4 <= v <= 2.5 else lenticular.DEFAULT_ASPECT
+
+    def _lenti_build(self, data: dict) -> dict:
+        specs = data.get("specs") or []
+        if not specs:
+            raise ValueError("没有图片")
+        if len(specs) > 6:
+            raise ValueError("最多 6 张（立体模式会按张数分配帧数）")
+        paths = [self._lenti_path(sp) for sp in specs]
+        mode = data.get("mode") if data.get("mode") in ("flip", "3d") else "flip"
+        frames = int(data.get("frames") or 5)
+        aspect = self._lenti_aspect(data)
+        token = uuid.uuid4().hex[:10]
+        _lenti_gc()
+        depth = float(data.get("depth") or 1.35)
+        root = lenticular.build(token, paths, mode=mode, frames=frames,
+                                aspect=aspect, depth=depth,
+                                out_root=lenticular.LENTI_ROOT / "_work",
+                                title="光栅卡预览")
+        names = [p.name for p in sorted(root.glob("f*.*")) if p.suffix.lower() in (".webp", ".png", ".jpg")]
+        return {"ok": True, "token": token, "base": "/lenti/_work/" + token + "/",
+                "images": names, "count": len(names), "mode": mode}
+
+    def _lenti_save(self, data: dict) -> dict:
+        token = _safe_name((data.get("token") or "").strip())
+        if not token or ".." in token:
+            raise ValueError("无效的预览 token")
+        src = lenticular.LENTI_ROOT / "_work" / token
+        if not src.is_dir():
+            raise ValueError("预览已失效，请重新生成")
+        name = (data.get("name") or "").strip() or token
+        slug = lenticular._slug(name)
+        dst = (lenticular.LENTI_ROOT / slug).resolve()
+        if lenticular.LENTI_ROOT.resolve() not in dst.parents:
+            raise ValueError("非法目录")
+        if dst.exists():
+            shutil.rmtree(dst)
+        shutil.copytree(src, dst)
+        meta = {}
+        try:
+            meta = json.loads((dst / "meta.json").read_text(encoding="utf-8"))
+        except Exception:
+            pass
+        html = lenticular.build_lenti_html(
+            meta.get("images") or [], opts=meta.get("opts") or None,
+            aspect=float(meta.get("aspect") or lenticular.DEFAULT_ASPECT),
+            title=name, three_rel=lenticular.THREE_SRC_REL)
+        (dst / "lenti.html").write_text(html, encoding="utf-8")
+        return {"ok": True, "url": "/lenti/" + slug + "/lenti.html", "dir": slug}
+
 
     def _decode_image(self, b64: str, filename: str) -> Path:
         raw = base64.b64decode(b64)
@@ -1967,7 +2574,7 @@ class Handler(BaseHTTPRequestHandler):
         card_id = _safe_name((data.get("card") or "").strip())
         src = resolve_asset("backgrounds", bg) if bg else None
         if src is None and card_id:
-            p = ASSETS / "output" / card_id / "front.png"
+            p = card_dir(card_id) / "front.png"
             if p.exists():
                 src = p
         if src is None:
@@ -2086,7 +2693,8 @@ class Handler(BaseHTTPRequestHandler):
             if bg_p and bg_scale != 1.0:
                 PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
                 bname = f"bgs_{uuid.uuid4().hex[:8]}.png"
-                bg_view_p = _scale_card_layer(bg_p, bg_scale, PREVIEW_DIR / bname, base_fill=(14, 11, 9))
+                bg_view_p = _scale_card_layer(bg_p, bg_scale, PREVIEW_DIR / bname,
+                                              base_fill=(14, 11, 9), cover=True)
                 bg_view_url = f"/preview/_preview/{bname}"
             if face_p:
                 if face_as_fg or text_type == "boxed":
@@ -2098,7 +2706,7 @@ class Handler(BaseHTTPRequestHandler):
                 front_url = bg_view_url
                 fg = fg or (f"/preview/{card_sel}/foreground.png" if card_sel else blank_url)
             elif card_sel:
-                front_url = f"/preview/{card_sel}/front.png"
+                front_url = _card_front_url(card_sel) or _ensure_dark()
                 fg = fg or f"/preview/{card_sel}/foreground.png"
                 # 分层卡：底图只有背景，主体层单独一张（叠在卡封之上）
                 if (ASSETS / "output" / card_sel / "detail.png").exists():
@@ -2138,6 +2746,19 @@ class Handler(BaseHTTPRequestHandler):
                     interior_url = f"/preview/_preview/{mname}"
                 except Exception:
                     interior_url = None
+            # 光栅卡卡面：N 张图在 shader 里按柱状透镜条带合成，首帧同时当静态卡面/2D 底图。
+            # 取代上面选的卡面素材（边框/卡封/特效/文字照常叠加在它之上）。
+            lenti_urls = []
+            lenti_paths = self._lenti_src(data)
+            if lenti_paths:
+                _ld, _lnames = _lenti_frames(lenti_paths)
+                lenti_urls = ["/preview/_preview/_lenti/" + _ld.name + "/" + n for n in _lnames]
+                face_p = _ld / _lnames[0]
+                face_as_fg = False
+                face_sel = ""
+                front_url = lenti_urls[0]
+                fg = blank_url
+                face_floats = subject_over_frame or text_type == "boxed"
             # 卡面素材是否作为整幅卡面（随缩放）：非文本型且卡面当底图时为真
             face_scales = bool(face_p and not face_as_fg and text_type != "boxed")
             seal_p = resolve_asset("seals", seal_sel) if seal_sel else None
@@ -2179,7 +2800,7 @@ class Handler(BaseHTTPRequestHandler):
             seal_front, seal_back = _seal_strengths(data)
             seal_frame_front, seal_frame_back = _seal_frame_strengths(data)
             if mode == "2d":
-                # 2D 合成预览：与保存时 card.png 同一套 compose_card 逻辑（收集册缩略图同款）
+                # 2D 合成预览：与保存时 card.webp 同一套 compose_card 逻辑（收集册缩略图同款）
                 from PIL import Image
                 front_p = None
                 if face_p:
@@ -2189,8 +2810,8 @@ class Handler(BaseHTTPRequestHandler):
                             front_p = bg_view_p
                     else:
                         front_p = face_p
-                elif card_sel and (ASSETS / "output" / card_sel / "front.png").exists():
-                    front_p = ASSETS / "output" / card_sel / "front.png"
+                elif card_sel and _card_front_path(card_sel) is not None:
+                    front_p = _card_front_path(card_sel)
                 elif bg_p:
                     front_p = bg_view_p
                 fg_im = None
@@ -2215,6 +2836,7 @@ class Handler(BaseHTTPRequestHandler):
                     subject_outline=subject_outline, size=(CARD_W, CARD_H),
                     content_scale=scale,
                     face_scales=face_scales,
+                    face_cover=bool(lenti_urls),
                     mask_clip=mask_clip,
                     subject_offset_x=subject_offset_x,
                     subject_offset_y=subject_offset_y,
@@ -2249,6 +2871,8 @@ class Handler(BaseHTTPRequestHandler):
                                            subject_offset_x=subject_offset_x,
                                            subject_offset_y=subject_offset_y,
                                 detail_rel=detail_url,
+                                lenti_images=lenti_urls,
+                                lenti_opts=_lenti_opts_of(data),
                                 # 预览页写在 assets/output/_preview/<token>/，比卡目录深一层，
                                 # "../../shared/lib/" 会解析成 /preview/shared/... 而 404；
                                 # 预览页只在 http 下打开，直接用 /shared/ 路由的绝对路径。
@@ -2440,6 +3064,22 @@ PAGE_HTML = r"""<!DOCTYPE html>
   .radio.on { border-color: var(--gold); color: var(--gold2); background: #32281c; }
   .radio small { display: block; font-size: 11px; color: var(--muted); margin-top: 3px; }
   .row { margin-bottom: 14px; }
+  /* 光栅卡卡面（拼装页） */
+  .lenti-box { border-left: 2px solid var(--line); padding-left: 10px; }
+  .lenti-box[hidden] { display: none; }
+  .lenti-chips { display: flex; flex-direction: column; gap: 4px; margin: 6px 0 10px; }
+  .lenti-chips .lc {
+    display: flex; justify-content: space-between; gap: 8px; font-size: 11px;
+    color: var(--muted); background: var(--panel2); border: 1px solid var(--line);
+    border-radius: 8px; padding: 4px 8px; line-height: 1.4; word-break: break-all;
+  }
+  .lenti-chips .lc b { flex: 0 0 auto; color: #8d8072; cursor: pointer; }
+  .lenti-chips .lc b:hover { color: #e07a5f; }
+  .arearow input[type=range] {
+    flex: 1 1 90px; min-width: 80px; width: auto; height: 16px;
+    accent-color: var(--gold); background: transparent;
+  }
+  .arearow .lval { font-size: 11px; color: var(--gold); font-variant-numeric: tabular-nums; min-width: 30px; }
   .row .checkrow { display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 13px; color: var(--text); }
   .row .checkrow input { width: 16px; height: 16px; accent-color: var(--gold); cursor: pointer; }
   .row .checkrow span { line-height: 1.4; }
@@ -2624,6 +3264,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
 <a class="tab" href="/album.html" target="_blank" style="text-decoration:none">📖 收集册</a>
 <a class="tab" href="/codex.html" target="_blank" style="text-decoration:none">🐾 异兽牌</a>
 <a class="tab" href="/cutout.html" target="_blank" style="text-decoration:none">✂️ 抠图工具</a>
+<a class="tab" href="/lenti.html" target="_blank" style="text-decoration:none">🎞️ 光栅卡</a>
   </nav>
 
   <!-- ============ 1 生成卡牌 ============ -->
@@ -2863,6 +3504,39 @@ PAGE_HTML = r"""<!DOCTYPE html>
             <input type="checkbox" id="asmFaceFg">
             <span>🪟 这张图只作透明前景层（主体）—— 勾选后底图改用「背景」，适合已经抠好的透明图</span>
           </label>
+        </div>
+        <div class="row">
+          <label class="checkrow">
+            <input type="checkbox" id="asmLenti">
+            <span>🎞️ 光栅卡卡面（2~6 张图随视角交替/渐变，取代上面的卡面；边框·卡封·特效照常叠加）</span>
+          </label>
+        </div>
+        <div class="row lenti-box" id="asmLentiBox" hidden>
+          <div class="pickrow" style="margin-bottom:6px">
+            <select id="asmLentiAsset"></select>
+            <button class="btn small ghost" id="asmLentiAssetAdd" type="button" title="把素材库里选中的卡面加进光栅队列">＋ 加入</button>
+          </div>
+          <div class="pickrow" style="margin-bottom:6px">
+            <button class="btn small ghost" id="asmLentiAdd" type="button">⬆️ 上传图片</button>
+            <button class="btn small ghost" id="asmLentiClear" type="button">清空</button>
+            <input type="file" id="asmLentiFile" accept="image/*" multiple hidden>
+          </div>
+          <div class="lenti-chips" id="asmLentiChips"></div>
+          <div class="arearow" style="margin-bottom:6px">
+            <span>条纹方向</span>
+            <input type="range" id="asmLentiAngle" min="0" max="180" step="1" value="0">
+            <span class="lval" id="asmLentiAngleV">0°</span>
+          </div>
+          <div class="arearow" style="margin-bottom:6px">
+            <span>透镜密度</span><input type="number" id="asmLentiLens" min="60" max="420" step="5" value="120">
+            <span>棱纹</span><input type="number" id="asmLentiStripe" min="0" max="1" step="0.05" value="0.48">
+            <span>光泽</span><input type="number" id="asmLentiSheen" min="0" max="2.2" step="0.05" value="0.9">
+          </div>
+          <div class="arearow">
+            <span>柔和</span><input type="number" id="asmLentiSoft" min="0" max="1" step="0.05" value="0.62">
+            <span>错位</span><input type="number" id="asmLentiJitter" min="0" max="0.4" step="0.01" value="0.02">
+            <span>灵敏度</span><input type="number" id="asmLentiGain" min="0.2" max="3" step="0.1" value="1">
+          </div>
         </div>
         <div class="row">
           <label>边框（可选，叠加在卡面之上）</label>
@@ -3422,7 +4096,7 @@ async function updateCardText() {
   const d = await resp.json();
   if (!d.ok) throw new Error(d.error);
   const ts = Date.now();
-  document.getElementById('cardImg').src = '/preview/' + d.id + '/card.png?t=' + ts;
+  document.getElementById('cardImg').src = (d.preview || ('/preview/' + d.id + '/card.png')) + '?t=' + ts;
   const wl = document.getElementById('webcardLink');
   if (wl) wl.href = '/preview/' + d.id + '/card.html';
   setStatus('status', '✅ 文字已重新放置');
@@ -3478,7 +4152,7 @@ goBtn.addEventListener('click', async () => {
 function showResult(d) {
   const ts = Date.now();
   lastCardId = d.id;
-  document.getElementById('cardImg').src = '/preview/' + d.id + '/card.png?t=' + ts;
+  document.getElementById('cardImg').src = (d.preview || ('/preview/' + d.id + '/card.png')) + '?t=' + ts;
   const wb = document.getElementById('webcardBox');
   const wl = document.getElementById('webcardLink');
   if (d.webcard && wb && wl) {
@@ -4225,6 +4899,126 @@ quickImport('asmBackUp', 'asmBackFile', 'backs', name => {
   document.getElementById('asmBack').value = name;
   scheduleAsmPreview();
 });
+// ---------- 光栅卡卡面（拼装页）----------
+// 图源队列最多 6 张；spec 约定：tmp:<上传文件名> / asset:faces:<素材名>
+const asmLentiEl = document.getElementById('asmLenti');
+const asmLentiBox = document.getElementById('asmLentiBox');
+const asmLentiChips = document.getElementById('asmLentiChips');
+const asmLentiAngleEl = document.getElementById('asmLentiAngle');
+const asmLenti = { list: [] };
+
+function asmLentiName(spec) {
+  const t = String(spec || '').split(/[\\/:]/).filter(Boolean).pop() || '图片';
+  return t.replace(/^[0-9a-f]{8}_/, '');   // 去掉临时上传的前缀哈希
+}
+function asmLentiDraw() {
+  if (!asmLenti.list.length) {
+    asmLentiChips.innerHTML = '<span class="lc">还没有图源：上传 2~6 张，或用上面的素材库卡面「加入」</span>';
+    return;
+  }
+  asmLentiChips.innerHTML = asmLenti.list.map((sp, i) =>
+    '<span class="lc"><span>' + (i + 1) + '. ' + asmLentiName(sp) + '</span>' +
+    '<b data-lx="' + i + '">×</b></span>').join('');
+}
+function asmLentiActive() { return asmLentiEl.checked && asmLenti.list.length > 0; }
+function asmLentiOpts() {
+  const num = (id, d) => { const v = parseFloat(document.getElementById(id).value); return isFinite(v) ? v : d; };
+  return {
+    angle: num('asmLentiAngle', 0), lens: num('asmLentiLens', 120),
+    stripe: num('asmLentiStripe', 0.48), sheen: num('asmLentiSheen', 0.9),
+    soft: num('asmLentiSoft', 0.62), jitter: num('asmLentiJitter', 0.02),
+    gain: num('asmLentiGain', 1),
+  };
+}
+function asmLentiAngleLabel() {
+  document.getElementById('asmLentiAngleV').textContent = asmLentiAngleEl.value + '°';
+}
+function asmLentiReset(list, opts) {
+  asmLenti.list.length = 0;
+  (list || []).slice(0, 6).forEach((sp) => asmLenti.list.push(sp));
+  const on = asmLenti.list.length > 0;
+  asmLentiEl.checked = on;
+  asmLentiBox.hidden = !on;
+  if (on && opts) {
+    ['angle', 'lens', 'stripe', 'sheen', 'soft', 'jitter', 'gain'].forEach((k) => {
+      const el = document.getElementById('asmLenti' + k.charAt(0).toUpperCase() + k.slice(1));
+      if (el && opts[k] !== undefined && opts[k] !== null && opts[k] !== '') el.value = opts[k];
+    });
+  }
+  asmLentiAngleLabel();
+  asmLentiDraw();
+}
+
+fillSelect('asmLentiAsset', ASSETS.faces, assetLabels(ASSETS.faces));
+asmLentiEl.addEventListener('change', () => {
+  asmLentiBox.hidden = !asmLentiEl.checked;
+  if (asmLentiEl.checked && asmLenti.list.length < 2) {
+    setStatus('asmStatus', '光栅卡建议 2~6 张图：只有 1 张不会变画');
+  }
+  scheduleAsmPreview(200);
+});
+asmLentiChips.addEventListener('click', (e) => {
+  const i = e.target.dataset && e.target.dataset.lx;
+  if (i === undefined) return;
+  asmLenti.list.splice(+i, 1);
+  asmLentiDraw();
+  scheduleAsmPreview(200);
+});
+asmLentiAngleEl.addEventListener('input', () => {
+  asmLentiAngleLabel();
+  scheduleAsmPreview(260);
+});
+asmLentiBox.addEventListener('change', (e) => {
+  if (e.target && e.target.id !== 'asmLentiAngle') scheduleAsmPreview(400);
+});
+document.getElementById('asmLentiAssetAdd').addEventListener('click', () => {
+  const v = document.getElementById('asmLentiAsset').value;
+  if (!v) return;
+  if (asmLenti.list.length >= 6) { setStatus('asmStatus', '光栅卡最多 6 张图', true); return; }
+  asmLenti.list.push('asset:faces:' + v);
+  asmLentiEl.checked = true;
+  asmLentiBox.hidden = false;
+  asmLentiDraw();
+  scheduleAsmPreview(250);
+});
+document.getElementById('asmLentiAdd').addEventListener('click', () => {
+  document.getElementById('asmLentiFile').click();
+});
+document.getElementById('asmLentiFile').addEventListener('change', async (e) => {
+  const files = [...(e.target.files || [])];
+  e.target.value = '';
+  for (const f of files) {
+    if (!f.type.startsWith('image/')) continue;
+    if (asmLenti.list.length >= 6) { setStatus('asmStatus', '光栅卡最多 6 张图', true); break; }
+    const b64 = await new Promise((res) => {
+      const fr = new FileReader();
+      fr.onload = () => res(String(fr.result).split(',')[1]);
+      fr.readAsDataURL(f);
+    });
+    try {
+      const r = await fetch('/api/tmp_upload', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ b64: b64, name: f.name }),
+      });
+      const d = await r.json();
+      if (d.ok) asmLenti.list.push('tmp:' + d.name);
+    } catch (err) { /* 单张失败就跳过 */ }
+  }
+  if (asmLenti.list.length) {
+    asmLentiEl.checked = true;
+    asmLentiBox.hidden = false;
+  }
+  asmLentiDraw();
+  scheduleAsmPreview(250);
+});
+document.getElementById('asmLentiClear').addEventListener('click', () => {
+  asmLenti.list.length = 0;
+  asmLentiDraw();
+  scheduleAsmPreview(200);
+});
+asmLentiDraw();
+asmLentiAngleLabel();
+
 quickImport('asmBgUp', 'asmBgFile', 'backgrounds', name => {
   if (!ASSETS.backgrounds.includes(name)) ASSETS.backgrounds.push(name);
   const items = ASSETS.backgrounds.slice(1);
@@ -4316,6 +5110,9 @@ asmCardSel.addEventListener('change', () => {
     }
     const backSel = document.getElementById('asmBack');
     if (card.back && [...backSel.options].some(o => o.value === card.back)) backSel.value = card.back;
+    // 光栅卡：这张卡是光栅卡就把图源与参数一起回填（不是就清空）
+    const lc = card.lenti || null;
+    asmLentiReset(lc && Array.isArray(lc.images) ? lc.images : [], lc ? lc.opts : null);
     if (typeof card.seal_strength_front === 'number' && isFinite(card.seal_strength_front)) document.getElementById('asmSealFront').value = card.seal_strength_front;
     if (typeof card.seal_strength_back === 'number' && isFinite(card.seal_strength_back)) document.getElementById('asmSealBack').value = card.seal_strength_back;
     if (typeof card.seal_frame_strength_front === 'number' && isFinite(card.seal_frame_strength_front)) document.getElementById('asmSealFrameFront').value = card.seal_frame_strength_front;
@@ -4440,6 +5237,7 @@ document.getElementById('asmReset').addEventListener('click', () => {
   document.getElementById('asmGlow').value = ASSETS.glows.find(x => x) || '';
   document.getElementById('asmGlowStrength').value = 1;
   document.getElementById('asmName').value = '';
+  asmLentiReset([], null);
   syncAsmMutex();
   setStatus('asmStatus', '已重置为空卡，可自由搭建');
   scheduleAsmPreview(120);
@@ -4498,6 +5296,8 @@ async function postAsmPreview() {
         card: asmCardSel.value,
         face: asmFaceSel.value,
         face_as_fg: asmFaceFgEl.checked,
+        lenti_images: asmLentiActive() ? asmLenti.list.slice(0, 6) : [],
+        lenti: asmLentiOpts(),
         frame: asmFrameSel.value,
         custom_bg: asmBgSel.value,
         back: document.getElementById('asmBack').value,
@@ -4549,6 +5349,8 @@ document.getElementById('asmSave').addEventListener('click', async () => {
         card: asmCardSel.value,
         face: asmFaceSel.value,
         face_as_fg: asmFaceFgEl.checked,
+        lenti_images: asmLentiActive() ? asmLenti.list.slice(0, 6) : [],
+        lenti: asmLentiOpts(),
         frame: asmFrameSel.value,
         custom_bg: asmBgSel.value,
         back: document.getElementById('asmBack').value,

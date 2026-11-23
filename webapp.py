@@ -1014,9 +1014,18 @@ def _card_front_url(card_sel: str):
 
 
 def _lenti_opts_of(data: dict) -> dict:
-    """拼装页的光栅参数（只取认识的键，全部转 float）。"""
+    """拼装页的光栅参数（只取认识的键，数值键全部转 float）。
+
+    fade 是字符串（stripe/whole/cut），单独放过；cards/<id>.json 里 video-lenti
+    卡把参数藏在 lenti.opts 下，这里一并展开。
+    """
     o = data.get("lenti") or {}
+    if isinstance(o.get("opts"), dict):
+        o = {**o, **o["opts"]}
     out = {}
+    fd = str(o.get("fade") or "").strip().lower()
+    if fd in ("stripe", "whole", "cut"):
+        out["fade"] = fd
     for k in ("angle", "lens", "stripe", "sheen", "sheenPow", "soft",
               "jitter", "gain", "bend", "gloss"):
         v = o.get(k)
@@ -3548,6 +3557,14 @@ PAGE_HTML = r"""<!DOCTYPE html>
           </div>
           <div class="lenti-chips" id="asmLentiChips"></div>
           <div class="arearow" style="margin-bottom:6px">
+            <span>换帧方式</span>
+            <select id="asmLentiFade" style="flex:1">
+              <option value="stripe">条纹推进（真光栅卡）</option>
+              <option value="whole">整幅柔和过渡</option>
+              <option value="cut">整幅直接切换</option>
+            </select>
+          </div>
+          <div class="arearow" style="margin-bottom:6px">
             <span>条纹方向</span>
             <input type="range" id="asmLentiAngle" min="0" max="180" step="1" value="0">
             <span class="lval" id="asmLentiAngleV">0°</span>
@@ -4953,6 +4970,7 @@ function asmLentiOpts() {
     stripe: num('asmLentiStripe', 0.48), sheen: num('asmLentiSheen', 0.9),
     soft: num('asmLentiSoft', 0.62), jitter: num('asmLentiJitter', 0.02),
     gain: num('asmLentiGain', 1),
+    fade: document.getElementById('asmLentiFade').value || 'stripe',
   };
 }
 function asmLentiAngleLabel() {
@@ -4964,10 +4982,13 @@ function asmLentiReset(list, opts) {
   const on = asmLenti.list.length > 0;
   asmLentiEl.checked = on;
   asmLentiBox.hidden = !on;
+  // 视频卡的 lenti 是 {atlas,frames,cols,rows,opts:{...}}，参数藏在 opts 里；展开后统一读
+  const o = (opts && opts.opts && typeof opts.opts === 'object')
+    ? Object.assign({}, opts, opts.opts) : (opts || {});
   if (on && opts) {
-    ['angle', 'lens', 'stripe', 'sheen', 'soft', 'jitter', 'gain'].forEach((k) => {
+    ['fade', 'angle', 'lens', 'stripe', 'sheen', 'soft', 'jitter', 'gain'].forEach((k) => {
       const el = document.getElementById('asmLenti' + k.charAt(0).toUpperCase() + k.slice(1));
-      if (el && opts[k] !== undefined && opts[k] !== null && opts[k] !== '') el.value = opts[k];
+      if (el && o[k] !== undefined && o[k] !== null && o[k] !== '') el.value = o[k];
     });
   }
   asmLentiAngleLabel();

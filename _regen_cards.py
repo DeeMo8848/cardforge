@@ -28,7 +28,7 @@ def regen(card_json: Path) -> bool:
         print(f"  [跳过] {cid}: 光栅卡（单独生成）")
         return False
 
-    # 同理：程序化背景（末地传送门）靠 bg_shader 开关，脚本不传这个参数，
+    # 同理：程序化背景（虚空）靠 bg_shader 开关，脚本不传这个参数，
     # 重生成会把实时星空调回静态 PNG。按背景素材旁的 sidecar 判断。
     _bgname = d.get("background_name")
     if _bgname:

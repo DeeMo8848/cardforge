@@ -449,7 +449,7 @@ EFFECT_ENGINE_JS = r"""
       'uniform float uSubject, uOpacity;\n' +
       'uniform vec4 uMeshRect;\n' +
       'uniform vec4 uFaceBox;\n' +
-      // 程序化背景（末地传送门）的函数要放在 uAspect 声明之后 —— GLSL 不允许先用后声明，
+      // 程序化背景（虚空）的函数要放在 uAspect 声明之后 —— GLSL 不允许先用后声明，
       // 放在 uniform 区最前面会报 "'uAspect' : undeclared identifier"，整层静默不渲染。
       __FOIL_BG_GLSL__ +
       'uniform vec4 uDistCtl, uDistCtl2, uGlob, uGlob2, uDistTile, uTone, uSheen;\n' +
@@ -642,7 +642,7 @@ EFFECT_ENGINE_JS = r"""
       // 会把 col 整个重置成 uMain（第 0 帧），放前面等于没写。
       // 透镜合成写 col（不是 base.rgb）、采样已过流动扰动的 fuv。
       __FOIL_LENTI_FACE__ +
-      // 末地传送门背景：同样必须在背景合成之后（那句会把 col 重置回 uMain）
+      // 虚空背景：同样必须在背景合成之后（那句会把 col 重置回 uMain）
       __FOIL_BG_FACE__ +
       '  col = blend(uTex0, uLut, uSlot0, uMove0, uFx0, uCtl0, uF0, uTile0, uPos0, uTint0, uLx0, uBlink0, euv, te, col);\n' +
       '  col = blend(uTex1, uLut, uSlot1, uMove1, uFx1, uCtl1, uF1, uTile1, uPos1, uTint1, uLx1, uBlink1, euv, te, col);\n' +
@@ -1063,8 +1063,8 @@ CARD_HTML_TEMPLATE = r"""<!DOCTYPE html>
       uniform float uFaceAspect;
       // varying 必须写在下面那行 GLSL 注入占位之前（注意：这里不能把占位符名字
       // 原样写进注释 —— 模板是全局字符串替换，注释里的占位符也会被换成真实代码，
-      // 于是多出一份定义在 varying 之前的 eplPortal，整页编译失败）。
-      // 末地传送门背景函数要用 vWorldNormal/vWorldPosition/vWorldXAxis/vWorldYAxis
+      // 于是多出一份定义在 varying 之前的 vpSpace，整页编译失败）。
+      // 虚空背景函数要用 vWorldNormal/vWorldPosition/vWorldXAxis/vWorldYAxis
       // 做视角透视，GLSL 不允许先用后声明。
       varying vec2 vUv;
       varying vec3 vWorldNormal;
@@ -3797,8 +3797,8 @@ def _lenti_glsl_atlas(o: dict) -> str:
     )
 
 
-def _end_portal_glsl() -> str:
-    """末地传送门式背景：纯程序化星空（0 个额外采样器，只吃 float uniform）。
+def _void_space_glsl() -> str:
+    """「虚空」背景：纯程序化星空（0 个额外采样器，只吃 float uniform）。
 
     为什么用着色器而不是贴图：低端机器 MAX_TEXTURE_IMAGE_UNITS 只有 16，特效层已经
     13~14 个，再挂一张背景图就没余量了；程序化星空还能任意分辨率、无缝循环、随视角
@@ -3813,34 +3813,39 @@ def _end_portal_glsl() -> str:
     空间"的感觉。只做平移（第一版）没有缩放与错动，转动卡牌时整片星空纹丝不动。
     星云也按同一套 lk 位移，只是幅度更小（云在更深处）。
 
+    ★★ 角度饱和（第三版）：lk 必须软饱和。它逐像素算，倾斜时卡面两端的梯度被层系数
+    放大几十倍，40~45° 就变成"星点被拉成斜条"的扭曲。原来只 clamp 到 ±1.25 等于没限。
+    现在 lk *= 1/(1+1.5|lk|)：40° 附近就到 0.35 左右，再倾斜几乎不再增长（渐近 0.67），
+    观感变成"视差到一定角度就停住"，不再拉伸。
+
     函数只用 varying（vWorldNormal/vWorldPosition/vWorldXAxis/vWorldYAxis）与内置
     cameraPosition，不碰调用处 main() 的局部变量 —— 它被注入到两个不同的 shader。
     """
     return (
-        "      // ---- 末地传送门背景（程序化，无贴图）----\n"
-        "      uniform float uEPlOn;\n"
-        "      uniform float uEPlTime;\n"
-        "      uniform float uEPlPar;     // 视差强度：0=平贴，越大纵深越强\n"
-        "      uniform float uEPlZoom;    // 纵深缩放：远处图案朝中心收缩的程度\n"
-        "      float eplH(vec2 p) {\n"
+        "      // ---- 虚空背景（程序化，无贴图）----\n"
+        "      uniform float uVoidOn;\n"
+        "      uniform float uVoidTime;\n"
+        "      uniform float uVoidPar;     // 视差强度：0=平贴，越大纵深越强\n"
+        "      uniform float uVoidZoom;    // 纵深缩放：远处图案朝中心收缩的程度\n"
+        "      float vpH(vec2 p) {\n"
         "        p = fract(p * vec2(123.34, 456.21));\n"
         "        p += dot(p, p + 45.32);\n"
         "        return fract(p.x * p.y);\n"
         "      }\n"
-        "      float eplN(vec2 p) {\n"
+        "      float vpN(vec2 p) {\n"
         "        vec2 i = floor(p), f = fract(p);\n"
         "        f = f * f * (3.0 - 2.0 * f);\n"
-        "        float a = eplH(i), b = eplH(i + vec2(1.0, 0.0));\n"
-        "        float c = eplH(i + vec2(0.0, 1.0)), d = eplH(i + vec2(1.0, 1.0));\n"
+        "        float a = vpH(i), b = vpH(i + vec2(1.0, 0.0));\n"
+        "        float c = vpH(i + vec2(0.0, 1.0)), d = vpH(i + vec2(1.0, 1.0));\n"
         "        return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);\n"
         "      }\n"
         "      // 多倍频星云。单层噪声直接叠两层会出斜向摩尔纹（格子是长方形的，两层频率又对齐）\n"
         "      // ⇒ 每级把坐标旋转 37° 再放大 2.07 倍，纹路才自然。\n"
-        "      float eplFbm(vec2 p) {\n"
+        "      float vpFbm(vec2 p) {\n"
         "        float s = 0.0, a = 0.52;\n"
         "        mat2 rot = mat2(0.80, 0.60, -0.60, 0.80);\n"
         "        for (int i = 0; i < 3; i++) {\n"
-        "          s += a * eplN(p);\n"
+        "          s += a * vpN(p);\n"
         "          p = rot * p * 2.07 + 9.7;\n"
         "          a *= 0.5;\n"
         "        }\n"
@@ -3848,55 +3853,57 @@ def _end_portal_glsl() -> str:
         "      }\n"
         "      // 单层星点。qc=卡面局部坐标（单位卡高）lk=视线斜率 dep=深度 0..1\n"
         "      // sc=网格密度 br=亮度 sz=星点尺寸 keep=有星格子的比例\n"
-        "      float eplLayer(vec2 qc, vec2 lk, float t, float dep,\n"
+        "      float vpLayer(vec2 qc, vec2 lk, float t, float dep,\n"
         "                     float sc, float br, float sz, float keep) {\n"
-        "        float zk = 1.0 + dep * uEPlZoom;              // 远处采样范围更大 ⇒ 图案缩小\n"
-        "        float par = 0.85 * (1.0 - 0.86 * dep) * uEPlPar;  // 近层位移大、远层小\n"
+        "        float zk = 1.0 + dep * uVoidZoom;              // 远处采样范围更大 ⇒ 图案缩小\n"
+        "        float par = 0.85 * (1.0 - 0.86 * dep) * uVoidPar;  // 近层位移大、远层小\n"
         "        vec2 p = (qc * zk + lk * par) * sc;\n"
         "        p.y += t * (0.030 - 0.022 * dep);             // 缓慢漂移，远层更慢\n"
         "        vec2 id = floor(p);\n"
         "        vec2 f = fract(p) - 0.5;\n"
-        "        float h = eplH(id + 3.7);\n"
+        "        float h = vpH(id + 3.7);\n"
         "        float sel = step(h, keep);\n"
         "        if (sel < 0.5) return 0.0;\n"
-        "        vec2 off = (vec2(eplH(id + 7.1), eplH(id + 1.3)) - 0.5) * 0.44;\n"
+        "        vec2 off = (vec2(vpH(id + 7.1), vpH(id + 1.3)) - 0.5) * 0.44;\n"
         "        float d = length(f - off) / sc;               // 换回卡面单位，尺寸才可控\n"
         "        // 星点半径必须够小：halo 一旦超过半格就会被格子边界硬切，星星变方块\n"
-        "        float r = mix(0.0032, 0.0090, eplH(id + 11.3)) * sz;\n"
+        "        float r = mix(0.0032, 0.0090, vpH(id + 11.3)) * sz;\n"
         "        float core = smoothstep(r, 0.0, d);\n"
         "        float halo = smoothstep(r * 2.2, 0.0, d) * 0.22;\n"
         "        float tw = 1.0 - 0.28 * dep\n"
         "                 + 0.26 * (1.0 - 0.55 * dep) * sin(t * (0.9 + h * 2.2) + h * 61.0);\n"
         "        return max(core + halo, 0.0) * max(tw, 0.0) * br;\n"
         "      }\n"
-        "      vec3 eplPortal(vec2 uv, float t) {\n"
+        "      vec3 vpSpace(vec2 uv, float t) {\n"
         "        // 视线拆到卡面平面内：lk 越大 = 视线越斜。逐像素算，卡面边缘自然大于中心，\n"
         "        // 于是倾斜时会出现径向的拉伸/收拢（像透过一块厚玻璃看），这是立体感的来源。\n"
         "        vec3 en = normalize(vWorldNormal);\n"
         "        vec3 ex = normalize(vWorldXAxis);\n"
         "        vec3 ey = normalize(vWorldYAxis);\n"
         "        vec3 ev = normalize(cameraPosition - vWorldPosition);\n"
-        "        float evz = max(dot(ev, en), 0.30);\n"
-        "        vec2 lk = -vec2(dot(ev, ex), dot(ev, ey)) / evz;\n"
-        "        lk = clamp(lk, -1.25, 1.25);   // 掠射角时别让整片星空飞出去\n"
+        "        float evz = max(dot(ev, en), 0.34);\n"
+        "        vec2 lkr = -vec2(dot(ev, ex), dot(ev, ey)) / evz;\n"
+        "        // ★ 软饱和：40° 以后视差不再增长。硬 clamp 到 ±1.25 起不到作用（已实测扭曲）。\n"
+        "        float lkm = length(lkr);\n"
+        "        vec2 lk = lkr * (uVoidPar / (1.0 + lkm * 1.5));\n"
         "        vec2 qc = (uv - 0.5) * vec2(uAspect, 1.0);\n"
         "        float r2 = length(qc);\n"
         "        vec3 col = mix(vec3(0.055, 0.014, 0.115), vec3(0.008, 0.002, 0.022),\n"
         "                       smoothstep(0.02, 0.68, r2));\n"
         "        // 星云两层（深处的云，位移比星点更小）\n"
-        "        float neb = eplFbm(qc * 2.3 + lk * 0.075 * uEPlPar + vec2(t * 0.006, -t * 0.004));\n"
+        "        float neb = vpFbm(qc * 2.3 + lk * 0.085 + vec2(t * 0.006, -t * 0.004));\n"
         "        neb = pow(clamp(neb * 1.18, 0.0, 1.0), 2.2);\n"
         "        col += vec3(0.24, 0.075, 0.44) * neb * 0.85;\n"
-        "        float neb2 = eplFbm(qc * 4.6 + lk * 0.140 * uEPlPar + vec2(-t * 0.009, t * 0.006));\n"
+        "        float neb2 = vpFbm(qc * 4.6 + lk * 0.155 + vec2(-t * 0.009, t * 0.006));\n"
         "        col += vec3(0.34, 0.115, 0.62) * pow(clamp(neb2 * 1.10, 0.0, 1.0), 3.4) * 0.45;\n"
         "        // 五层星点：由近及远（近层少而大亮、动得快；远层多而小暗、几乎不动）\n"
-        "        col += vec3(0.95, 0.96, 1.00) * eplLayer(qc, lk, t, 0.00, 8.0, 0.95, 2.40, 0.16);\n"
-        "        col += vec3(0.88, 0.90, 1.00) * eplLayer(qc, lk, t, 0.25, 12.0, 0.72, 1.90, 0.14);\n"
-        "        col += vec3(0.82, 0.86, 1.00) * eplLayer(qc, lk, t, 0.50, 18.0, 0.50, 1.45, 0.12);\n"
-        "        col += vec3(0.76, 0.80, 1.00) * eplLayer(qc, lk, t, 0.75, 27.0, 0.32, 1.10, 0.10);\n"
-        "        col += vec3(0.70, 0.74, 1.00) * eplLayer(qc, lk, t, 1.00, 40.0, 0.20, 0.85, 0.09);\n"
+        "        col += vec3(0.95, 0.96, 1.00) * vpLayer(qc, lk, t, 0.00, 8.0, 0.95, 2.40, 0.16);\n"
+        "        col += vec3(0.88, 0.90, 1.00) * vpLayer(qc, lk, t, 0.25, 12.0, 0.72, 1.90, 0.14);\n"
+        "        col += vec3(0.82, 0.86, 1.00) * vpLayer(qc, lk, t, 0.50, 18.0, 0.50, 1.45, 0.12);\n"
+        "        col += vec3(0.76, 0.80, 1.00) * vpLayer(qc, lk, t, 0.75, 27.0, 0.32, 1.10, 0.10);\n"
+        "        col += vec3(0.70, 0.74, 1.00) * vpLayer(qc, lk, t, 1.00, 40.0, 0.20, 0.85, 0.09);\n"
         "        col *= 1.0 + 0.16 * (1.0 - smoothstep(0.0, 0.55, r2));  // 深处微光\n"
-        "        col *= 1.0 - smoothstep(0.30, 0.95, r2) * 0.45;         // 门框内影\n"
+        "        col *= 1.0 - smoothstep(0.30, 0.95, r2) * 0.45;         // 边缘压暗\n"
         "        return col;\n"
         "      }\n"
     )
@@ -4169,7 +4176,7 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
     主体都能像素级遮盖背景原主体）。
     card_width: 3D 卡体的宽（卡高恒为 3），默认 2.25（3:4）。卡面比例不同
     （如 Rip It! 游戏的 1465×2048 ≈ 5:7 → 2.25）时传入对应值，避免卡面被拉伸。
-    bg_shader: 程序化背景（"end_portal" = 末地传送门式星空）。开启后卡面颜色改由着色器
+    bg_shader: 程序化背景（"void" = 虚空星空；"end_portal" 是旧名别名）。开启后卡面颜色改由着色器
     生成（front 贴图不再提供颜色，只保留 alpha），不占任何纹理单元；2D 成品图仍用
     素材库那张静态 PNG，所以静态/动态观感一致。
     """
@@ -4465,26 +4472,27 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
         foil_lenti_glsl = foil_lenti_face = '""'
         lenti_tick = ""
 
-    # ---- 程序化背景（末地传送门式星空）----
-    # 只加一个 float uniform，不占纹理单元；主卡面与特效层注入同一段函数，两路一致。
-    if str(bg_shader or "") == "end_portal":
-        bg_sh_glsl = _end_portal_glsl()
-        bg_sh_face = ("          if (uEPlOn > 0.5) { base.rgb = eplPortal(uv, uEPlTime); }\n")
-        bg_sh_uniforms = ("      uEPlOn: { value: 1.0 },\n"
-                          "      uEPlTime: { value: 0.0 },\n"
-                          "      uEPlPar: { value: 1.0 },\n"
-                          "      uEPlZoom: { value: 1.0 },\n")
+    # ---- 程序化背景（虚空：纯着色器星空）----
+    # 只加 float uniform，不占纹理单元；主卡面与特效层注入同一段函数，两路一致。
+    # "end_portal" 是旧卡片的兼容别名（那时这个素材还叫末地传送门）。
+    if str(bg_shader or "") in ("void", "end_portal"):
+        bg_sh_glsl = _void_space_glsl()
+        bg_sh_face = ("          if (uVoidOn > 0.5) { base.rgb = vpSpace(uv, uVoidTime); }\n")
+        bg_sh_uniforms = ("      uVoidOn: { value: 1.0 },\n"
+                          "      uVoidTime: { value: 0.0 },\n"
+                          "      uVoidPar: { value: 1.0 },\n"
+                          "      uVoidZoom: { value: 1.0 },\n")
         foil_bg_glsl = _json(bg_sh_glsl)
         # 主体层（foilBuildSubject, uSubject=1）必须跳过：那层只画前景抠图，
         # 不跳过就会把背景色套在人物轮廓上（人变成一块紫色剪影，星点还压在脸上）。
-        foil_bg_face = _json("  if (uEPlOn > 0.5 && uSubject < 0.5) { "
-                             "col = eplPortal(uv, uEPlTime); }\n")
+        foil_bg_face = _json("  if (uVoidOn > 0.5 && uSubject < 0.5) { "
+                             "col = vpSpace(uv, uVoidTime); }\n")
         # 特效层与主卡面共享同一个 uniform 对象 ⇒ 时间推进一次即可，不用逐帧同步
-        bg_share = ("      if (cm && cm.uEPlOn) { U.uEPlOn = cm.uEPlOn; "
-                    "U.uEPlTime = cm.uEPlTime; "
-                    "U.uEPlPar = cm.uEPlPar; U.uEPlZoom = cm.uEPlZoom; }\n")
-        bg_tick = ("  if (cardMaterial.uniforms.uEPlTime) "
-                   "cardMaterial.uniforms.uEPlTime.value += dt;\n")
+        bg_share = ("      if (cm && cm.uVoidOn) { U.uVoidOn = cm.uVoidOn; "
+                    "U.uVoidTime = cm.uVoidTime; "
+                    "U.uVoidPar = cm.uVoidPar; U.uVoidZoom = cm.uVoidZoom; }\n")
+        bg_tick = ("  if (cardMaterial.uniforms.uVoidTime) "
+                   "cardMaterial.uniforms.uVoidTime.value += dt;\n")
     else:
         bg_sh_glsl = bg_sh_face = bg_sh_uniforms = ""
         foil_bg_glsl = foil_bg_face = '""'

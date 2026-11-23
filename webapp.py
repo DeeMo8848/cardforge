@@ -990,6 +990,178 @@ def _lenti_frames(paths: list[Path]):
     return d, names
 
 
+# ---- 视频 / GIF → 光栅图集 ----
+# 帧数上限不是采样器数（图集只占 1 个），而是图集格子数：5×5 = 25。
+LENTI_VIDEO_DIR = lenticular.LENTI_ROOT / "_video"
+LENTI_VIDEO_FRAMES = 24
+LENTI_VIDEO_CELL_W = 288
+LENTI_VIDEO_MAX_BYTES = 60 * 1024 * 1024
+_VIDEO_EXTS = (".mp4", ".webm", ".mov", ".mkv", ".avi", ".m4v",
+               ".gif", ".webp", ".apng")
+
+
+def _even_idx(total: int, want: int) -> list[int]:
+    """在 total 帧里均匀取 want 个下标（含首帧，末帧留一点余量避开收尾黑帧）。"""
+    if total <= 0:
+        return []
+    if total <= want:
+        return list(range(total))
+    span = total - 1
+    return sorted({min(total - 1, int(round(i * span / max(1, want - 1))))
+                   for i in range(want)})
+
+
+def _cover_to(im, w: int, h: int):
+    """等比铺满 + 居中裁剪（不拉伸）。"""
+    from PIL import Image
+    im = im.convert("RGB") if im.mode not in ("RGB", "L") else im
+    sw, sh = im.size
+    if sw <= 0 or sh <= 0:
+        return Image.new("RGB", (w, h), (0, 0, 0))
+    k = max(w / sw, h / sh)
+    nw, nh = max(w, int(round(sw * k))), max(h, int(round(sh * k)))
+    im = im.resize((nw, nh))
+    x, y = (nw - w) // 2, (nh - h) // 2
+    return im.crop((x, y, x + w, y + h))
+
+
+def _video_frames(src: Path, want: int):
+    """均匀抽帧，返回原始分辨率的 PIL 图列表（GIF/动画 WebP 走 PIL，视频走 cv2）。"""
+    from PIL import Image
+    ext = src.suffix.lower()
+    if ext in (".gif", ".webp", ".apng", ".png"):
+        from PIL import ImageSequence
+        with Image.open(src) as im:
+            total = int(getattr(im, "n_frames", 1) or 1)
+            out = []
+            for i in _even_idx(total, want):
+                im.seek(i)
+                out.append(im.convert("RGB").copy())
+            return out
+    try:
+        import cv2
+    except ImportError as e:
+        raise ValueError("处理视频需要 opencv-python：pip install opencv-python") from e
+    cap = cv2.VideoCapture(str(src))
+    if not cap.isOpened():
+        raise ValueError("这个视频打不开（编码不支持？换成 mp4/H.264 再试）")
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    out = []
+    if total > 0:
+        for i in _even_idx(total, want):
+            cap.set(cv2.CAP_PROP_POS_FRAMES, i)
+            ok, fr = cap.read()
+            if ok and fr is not None:
+                out.append(Image.fromarray(cv2.cvtColor(fr, cv2.COLOR_BGR2RGB)))
+    else:
+        # 部分容器读不到帧数：顺序 grab 一遍再回头抽
+        while True:
+            ok = cap.grab()
+            if not ok:
+                break
+            total += 1
+        for i in _even_idx(total, want):
+            cap.set(cv2.CAP_PROP_POS_FRAMES, i)
+            ok, fr = cap.read()
+            if ok and fr is not None:
+                out.append(Image.fromarray(cv2.cvtColor(fr, cv2.COLOR_BGR2RGB)))
+    cap.release()
+    if not out:
+        raise ValueError("抽帧失败：视频是空的或编码无法解码")
+    return out
+
+
+def _make_lenti_video(raw: bytes, name: str) -> dict:
+    """视频/GIF → 光栅图集（5×5 一张图，1 个采样器）。按内容哈希缓存，同文件不重复抽帧。"""
+    from PIL import Image as _I
+    if not raw:
+        raise ValueError("没收到文件内容")
+    if len(raw) > LENTI_VIDEO_MAX_BYTES:
+        raise ValueError("文件太大（>60MB），先压一下或截短")
+    safe = _safe_name((name or "clip.mp4").replace("\\", "/").split("/")[-1])
+    if not safe.lower().endswith(_VIDEO_EXTS):
+        raise ValueError("不支持的格式：%s（支持 mp4/webm/mov/gif）" % Path(safe).suffix)
+    key = hashlib.md5(raw).hexdigest()[:12]
+    d = LENTI_VIDEO_DIR / key
+    info_p = d / "info.json"
+    if not (d / "atlas.webp").exists():
+        LENTI_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
+        work = LENTI_VIDEO_DIR / (key + ".tmp")
+        if work.exists():
+            shutil.rmtree(work, ignore_errors=True)
+        work.mkdir(parents=True)
+        try:
+            src = work / safe
+            src.write_bytes(raw)
+            frames = _video_frames(src, LENTI_VIDEO_FRAMES)
+            n = max(2, min(len(frames), 25))
+            frames = frames[:n]
+            cols = 5 if n > 4 else n
+            rows = max(1, (n + cols - 1) // cols)
+            cw = LENTI_VIDEO_CELL_W
+            ch = max(2, int(round(cw / LENTI_ASPECT)))
+            atlas = _I.new("RGB", (cols * cw, rows * ch), (0, 0, 0))
+            for i, f in enumerate(frames):
+                atlas.paste(_cover_to(f, cw, ch), ((i % cols) * cw, (i // cols) * ch))
+            atlas.save(work / "atlas.webp", "WEBP", quality=86, method=4)
+            fw = 900
+            _cover_to(frames[0], fw, max(2, int(round(fw / LENTI_ASPECT)))).save(
+                work / "frame0.webp", "WEBP", quality=92, method=4)
+            (work / "info.json").write_text(json.dumps(
+                {"name": safe, "frames": n, "cols": cols, "rows": rows, "cell": [cw, ch]},
+                ensure_ascii=False), encoding="utf-8")
+            src.unlink(missing_ok=True)
+            if d.exists():
+                shutil.rmtree(d, ignore_errors=True)
+            work.rename(d)
+        except Exception:
+            # 失败别把半成品留在缓存里，否则下次同文件会「命中」一个坏目录
+            shutil.rmtree(work, ignore_errors=True)
+            raise
+        info_p = d / "info.json"
+    try:
+        meta = json.loads(info_p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        meta = {"name": safe, "frames": 2, "cols": 1, "rows": 2}
+    base = "/lenti/_video/" + key
+    return {"ok": True, "key": key, "atlas": "lvid:" + key, "url": base + "/atlas.webp",
+            "front": base + "/frame0.webp", "frames": int(meta.get("frames") or 2),
+            "atlasCols": int(meta.get("cols") or 1), "atlasRows": int(meta.get("rows") or 1),
+            "name": meta.get("name") or safe}
+
+
+def _lenti_o(data: dict) -> dict:
+    """把 lenti 与内嵌 opts 摊平（视频卡参数在 opts 下，写卡时在顶层）。"""
+    o = data.get("lenti") or {}
+    if not isinstance(o, dict):
+        return {}
+    if isinstance(o.get("opts"), dict):
+        return {**o, **o["opts"]}
+    return o
+
+
+def _lenti_atlas_of(data: dict):
+    """视频/GIF 光栅卡：lenti.atlas = "lvid:<hash>" ⇒ 图集/首帧的本地路径。"""
+    o = _lenti_o(data)
+    spec = str(o.get("atlas") or "")
+    if not spec.startswith("lvid:"):
+        return None
+    key = _safe_name(spec.split(":", 1)[1])
+    d = LENTI_VIDEO_DIR / key
+    if not (d / "atlas.webp").is_file():
+        return None
+    frame0 = d / "frame0.webp"
+    if not frame0.is_file():
+        frame0 = d / "atlas.webp"
+    return {"dir": d, "atlas": d / "atlas.webp", "frame0": frame0,
+            "frames": int(o.get("frames") or 2),
+            "cols": int(o.get("atlasCols") or 1),
+            "rows": int(o.get("atlasRows") or 1),
+            "name": str(o.get("vname") or ""),
+            "atlas_url": "/lenti/_video/" + key + "/atlas.webp",
+            "front_url": "/lenti/_video/" + key + "/frame0.webp"}
+
+
 def _card_front_path(card_sel: str):
     """成品卡卡面实际文件：卡目录 front.webp/front.png 优先，否则按卡定义找回图层
     （光栅卡的卡面是 lenti/f00.webp，目录里没有 front.png）。"""
@@ -1529,7 +1701,7 @@ def _save_assembly(data: dict) -> dict:
     face_used = ""
     face_p = resolve_asset("faces", face_sel)
     bg_p = resolve_asset("backgrounds", custom_bg)
-    # 程序化背景（末地传送门式）：素材旁同名 JSON 声明 shader ⇒ 3D 卡面改由着色器生成
+    # 程序化背景（虚空式）：素材旁同名 JSON 声明 shader ⇒ 3D 卡面改由着色器生成
     bg_shader = _bg_shader_of(bg_p)
     # 背景渲染视图：背景倍率非 1 时按卡牌中心缩放并烘焙成整卡 PNG（深色底避免透明空洞）
     bg_view_p = bg_p
@@ -1561,8 +1733,22 @@ def _save_assembly(data: dict) -> dict:
     lenti_specs = [sp for sp in (data.get("lenti_images") or []) if sp]
     lenti_opts = _lenti_opts_of(data)
     lenti_rel: list[str] = []
-    _lsrc = lenti_src_list(data)
-    if _lsrc:
+    lenti_video = _lenti_atlas_of(data)
+    _lsrc = [] if lenti_video else lenti_src_list(data)
+    if lenti_video:
+        # 视频/GIF：图集 + 首帧拷进卡目录（自包含），card.html 用相对路径引用
+        _ldst = out / "lenti"
+        _ldst.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(lenti_video["atlas"], _ldst / "atlas.webp")
+        shutil.copyfile(lenti_video["frame0"], _ldst / "f00.webp")
+        lenti_rel = ["lenti/f00.webp"]
+        front_rel, front_path = lenti_rel[0], _ldst / "f00.webp"
+        lenti_opts.update({"atlas": "lenti/atlas.webp", "frames": lenti_video["frames"],
+                           "atlasCols": lenti_video["cols"],
+                           "atlasRows": lenti_video["rows"]})
+        fg_url = ""
+        face_as_fg = False
+    elif _lsrc:
         _ldir, _lnames = _lenti_frames(_lsrc)
         _ldst = out / "lenti"
         if _ldst.exists():
@@ -1825,7 +2011,13 @@ def _save_assembly(data: dict) -> dict:
             "glow_strength": glow_strength,
             "effects": [{"name": e["name"], "pos": e["pos"]} for e in effect_instances],
             # 光栅卡：存的是原始图源 spec + 参数（重开时按源图重新规范化，不依赖临时文件）
-            "lenti": {"images": lenti_specs, "opts": lenti_opts} if lenti_rel else None,
+            "lenti": (
+                {"atlas": "lenti/atlas.webp", "atlas_src": "lvid:" + lenti_video["dir"].name,
+                 "frames": lenti_video["frames"], "atlasCols": lenti_video["cols"],
+                 "atlasRows": lenti_video["rows"], "video_name": lenti_video["name"],
+                 "opts": lenti_opts}
+                if lenti_video else
+                {"images": lenti_specs, "opts": lenti_opts} if lenti_rel else None),
         },
     )
     # 卡封叠加层清单（重开这张卡时回填到拼装面板）
@@ -2356,6 +2548,20 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json({"ok": False, "error": "not found"}, 404)
 
     def do_POST(self):
+        # 视频/GIF 走裸字节上传（base64 会把体积放大 1/3，几十 MB 的片子没必要）
+        if self.path in ("/api/lenti/video", "/api/lenti/video_raw"):
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                if length > LENTI_VIDEO_MAX_BYTES:
+                    raise ValueError("文件太大（>60MB），先压一下或截短")
+                raw = self.rfile.read(length) if length else b""
+                name = unquote(self.headers.get("X-File-Name", "") or "clip.mp4")
+                self._send_json(_make_lenti_video(raw, name))
+            except ValueError as e:
+                self._send_json({"ok": False, "error": str(e)}, 400)
+            except Exception as e:
+                self._send_json({"ok": False, "error": str(e)}, 500)
+            return
         try:
             length = int(self.headers.get("Content-Length", 0))
             data = json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
@@ -2718,7 +2924,7 @@ class Handler(BaseHTTPRequestHandler):
             face_floats = face_as_fg or subject_over_frame or text_type == "boxed"
             face_p = resolve_asset("faces", face_sel)
             bg_p = resolve_asset("backgrounds", custom_bg)
-            # 程序化背景（末地传送门式）：素材旁同名 JSON 声明 shader，3D 卡面改由着色器生成
+            # 程序化背景（虚空式）：素材旁同名 JSON 声明 shader，3D 卡面改由着色器生成
             bg_shader = _bg_shader_of(bg_p)
             # 背景渲染视图：背景倍率非 1 时按卡牌中心缩放并烘焙成整卡 PNG（深色底避免透明空洞）
             bg_view_url = f"/assets_abs/backgrounds/{custom_bg}" if bg_p else None
@@ -2782,7 +2988,21 @@ class Handler(BaseHTTPRequestHandler):
             # 光栅卡卡面：N 张图在 shader 里按柱状透镜条带合成，首帧同时当静态卡面/2D 底图。
             # 取代上面选的卡面素材（边框/卡封/特效/文字照常叠加在它之上）。
             lenti_urls = []
-            lenti_paths = self._lenti_src(data)
+            lenti_opts = _lenti_opts_of(data)
+            video = _lenti_atlas_of(data)
+            if video:
+                # 视频/GIF：帧在图集里（1 个采样器），卡面静态图用首帧
+                face_p = video["frame0"]
+                face_as_fg = False
+                face_sel = ""
+                front_url = video["front_url"]
+                fg = blank_url
+                face_floats = subject_over_frame or text_type == "boxed"
+                lenti_opts.update({"atlas": video["atlas_url"], "frames": video["frames"],
+                                   "atlasCols": video["cols"], "atlasRows": video["rows"]})
+                lenti_paths = []
+            else:
+                lenti_paths = self._lenti_src(data)
             if lenti_paths:
                 _ld, _lnames = _lenti_frames(lenti_paths)
                 lenti_urls = ["/preview/_preview/_lenti/" + _ld.name + "/" + n for n in _lnames]
@@ -2869,7 +3089,7 @@ class Handler(BaseHTTPRequestHandler):
                     subject_outline=subject_outline, size=(CARD_W, CARD_H),
                     content_scale=scale,
                     face_scales=face_scales,
-                    face_cover=bool(lenti_urls),
+                    face_cover=bool(lenti_urls or video),
                     mask_clip=mask_clip,
                     subject_offset_x=subject_offset_x,
                     subject_offset_y=subject_offset_y,
@@ -2905,7 +3125,7 @@ class Handler(BaseHTTPRequestHandler):
                                            subject_offset_y=subject_offset_y,
                                 detail_rel=detail_url,
                                 lenti_images=lenti_urls,
-                                lenti_opts=_lenti_opts_of(data),
+                                lenti_opts=lenti_opts,
                                 bg_shader=bg_shader,
                                 # 预览页写在 assets/output/_preview/<token>/，比卡目录深一层，
                                 # "../../shared/lib/" 会解析成 /preview/shared/... 而 404；
@@ -3552,8 +3772,12 @@ PAGE_HTML = r"""<!DOCTYPE html>
           </div>
           <div class="pickrow" style="margin-bottom:6px">
             <button class="btn small ghost" id="asmLentiAdd" type="button">⬆️ 上传图片</button>
+            <button class="btn small ghost" id="asmLentiVideoUp" type="button"
+                    title="视频/GIF 自动抽 24 帧做成图集光栅卡（整幅换帧）">🎬 上传视频 / GIF</button>
             <button class="btn small ghost" id="asmLentiClear" type="button">清空</button>
             <input type="file" id="asmLentiFile" accept="image/*" multiple hidden>
+            <input type="file" id="asmLentiVideoFile"
+                   accept="video/*,image/gif,image/webp,image/apng" hidden>
           </div>
           <div class="lenti-chips" id="asmLentiChips"></div>
           <div class="arearow" style="margin-bottom:4px">
@@ -4944,35 +5168,51 @@ quickImport('asmBackUp', 'asmBackFile', 'backs', name => {
 });
 // ---------- 光栅卡卡面（拼装页）----------
 // 图源队列最多 6 张；spec 约定：tmp:<上传文件名> / asset:faces:<素材名>
+// 视频/GIF：整段抽成一张图集（1 个采样器），state 放 asmLenti.video，与队列互斥
 const asmLentiEl = document.getElementById('asmLenti');
 const asmLentiBox = document.getElementById('asmLentiBox');
 const asmLentiChips = document.getElementById('asmLentiChips');
 const asmLentiAngleEl = document.getElementById('asmLentiAngle');
-const asmLenti = { list: [] };
+const asmLenti = { list: [], video: null };
 
 function asmLentiName(spec) {
   const t = String(spec || '').split(/[\\/:]/).filter(Boolean).pop() || '图片';
   return t.replace(/^[0-9a-f]{8}_/, '');   // 去掉临时上传的前缀哈希
 }
 function asmLentiDraw() {
+  if (asmLenti.video) {
+    const v = asmLenti.video;
+    asmLentiChips.innerHTML =
+      '<span class="lc"><span>🎬 ' + (v.name || '视频') + ' · ' + v.frames + ' 帧（' +
+      v.cols + '×' + v.rows + ' 图集）</span><b id="asmLentiVideoDel" title="移除视频">×</b></span>';
+    return;
+  }
   if (!asmLenti.list.length) {
-    asmLentiChips.innerHTML = '<span class="lc">还没有图源：上传 2~6 张，或用上面的素材库卡面「加入」</span>';
+    asmLentiChips.innerHTML = '<span class="lc">还没有图源：上传 2~6 张，或「🎬 上传视频 / GIF」整段抽帧</span>';
     return;
   }
   asmLentiChips.innerHTML = asmLenti.list.map((sp, i) =>
     '<span class="lc"><span>' + (i + 1) + '. ' + asmLentiName(sp) + '</span>' +
     '<b data-lx="' + i + '">×</b></span>').join('');
 }
-function asmLentiActive() { return asmLentiEl.checked && asmLenti.list.length > 0; }
+function asmLentiActive() {
+  return asmLentiEl.checked && (asmLenti.list.length > 0 || !!asmLenti.video);
+}
 function asmLentiOpts() {
   const num = (id, d) => { const v = parseFloat(document.getElementById(id).value); return isFinite(v) ? v : d; };
-  return {
+  const o = {
     angle: num('asmLentiAngle', 0), lens: num('asmLentiLens', 120),
     stripe: num('asmLentiStripe', 0.48), sheen: num('asmLentiSheen', 0.9),
     soft: num('asmLentiSoft', 0.62), jitter: num('asmLentiJitter', 0.02),
     gain: num('asmLentiGain', 1),
     fade: document.getElementById('asmLentiFade').value || 'stripe',
   };
+  if (asmLenti.video) {
+    const v = asmLenti.video;
+    o.atlas = v.src; o.vname = v.name || '';
+    o.atlasCols = v.cols; o.atlasRows = v.rows; o.frames = v.frames;
+  }
+  return o;
 }
 function asmLentiAngleLabel() {
   document.getElementById('asmLentiAngleV').textContent = asmLentiAngleEl.value + '°';
@@ -4995,16 +5235,25 @@ function asmLentiFadeSync() {
     jit.title = jit.disabled ? '整幅换帧时全卡同步，错位无效' : '';
   }
 }
-function asmLentiReset(list, opts) {
+function asmLentiReset(lc) {
+  lc = lc || {};
   asmLenti.list.length = 0;
-  (list || []).slice(0, 6).forEach((sp) => asmLenti.list.push(sp));
-  const on = asmLenti.list.length > 0;
+  (Array.isArray(lc.images) ? lc.images : []).slice(0, 6).forEach((sp) => asmLenti.list.push(sp));
+  // 视频/GIF 卡：atlas_src 指向抽帧缓存（_video/<hash>），能复原就还原成「视频卡」状态
+  asmLenti.video = lc.atlas_src ? {
+    src: lc.atlas_src,
+    name: lc.video_name || '',
+    frames: lc.frames || 24,
+    cols: lc.atlasCols || 5,
+    rows: lc.atlasRows || 5,
+  } : null;
+  if (asmLenti.video) asmLenti.list.length = 0;
+  const on = asmLenti.list.length > 0 || !!asmLenti.video;
   asmLentiEl.checked = on;
   asmLentiBox.hidden = !on;
-  // 视频卡的 lenti 是 {atlas,frames,cols,rows,opts:{...}}，参数藏在 opts 里；展开后统一读
-  const o = (opts && opts.opts && typeof opts.opts === 'object')
-    ? Object.assign({}, opts, opts.opts) : (opts || {});
-  if (on && opts) {
+  // 参数藏在 opts 里（视频卡顶层还有 atlas/frames/cols/rows），展开后统一读
+  const o = (lc.opts && typeof lc.opts === 'object') ? Object.assign({}, lc, lc.opts) : lc;
+  if (on) {
     ['fade', 'angle', 'lens', 'stripe', 'sheen', 'soft', 'jitter', 'gain'].forEach((k) => {
       const el = document.getElementById('asmLenti' + k.charAt(0).toUpperCase() + k.slice(1));
       if (el && o[k] !== undefined && o[k] !== null && o[k] !== '') el.value = o[k];
@@ -5019,12 +5268,18 @@ fillSelect('asmLentiAsset', ASSETS.faces, assetLabels(ASSETS.faces));
 asmLentiEl.addEventListener('change', () => {
   asmLentiBox.hidden = !asmLentiEl.checked;
   asmLentiFadeSync();
-  if (asmLentiEl.checked && asmLenti.list.length < 2) {
-    setStatus('asmStatus', '光栅卡建议 2~6 张图：只有 1 张不会变画');
+  if (asmLentiEl.checked && !asmLenti.video && asmLenti.list.length < 2) {
+    setStatus('asmStatus', '光栅卡建议 2~6 张图：只有 1 张不会变画；整段视频用「🎬 上传视频 / GIF」');
   }
   scheduleAsmPreview(200);
 });
 asmLentiChips.addEventListener('click', (e) => {
+  if (e.target && e.target.id === 'asmLentiVideoDel') {
+    asmLenti.video = null;
+    asmLentiDraw();
+    scheduleAsmPreview(200);
+    return;
+  }
   const i = e.target.dataset && e.target.dataset.lx;
   if (i === undefined) return;
   asmLenti.list.splice(+i, 1);
@@ -5081,8 +5336,63 @@ document.getElementById('asmLentiFile').addEventListener('change', async (e) => 
 });
 document.getElementById('asmLentiClear').addEventListener('click', () => {
   asmLenti.list.length = 0;
+  asmLenti.video = null;
   asmLentiDraw();
   scheduleAsmPreview(200);
+});
+// 视频 / GIF：整段均匀抽 24 帧 → 一张 5×5 图集（shader 里只占 1 个采样器）
+document.getElementById('asmLentiVideoUp').addEventListener('click', () => {
+  document.getElementById('asmLentiVideoFile').click();
+});
+document.getElementById('asmLentiVideoFile').addEventListener('change', async (e) => {
+  const f = (e.target.files || [])[0];
+  e.target.value = '';
+  if (!f) return;
+  const btn = document.getElementById('asmLentiVideoUp');
+  const label = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '抽帧中…';
+  setStatus('asmStatus', '正在抽帧：' + f.name + '（' + (f.size / 1048576).toFixed(1) + ' MB）…');
+  try {
+    const r = await fetch('/api/lenti/video', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/octet-stream',
+        'X-File-Name': encodeURIComponent(f.name),
+      },
+      body: f,
+    });
+    const d = await r.json();
+    if (!d.ok) throw new Error(d.error || '处理失败');
+    asmLenti.list.length = 0;
+    asmLenti.video = {
+      src: d.atlas, name: d.name,
+      frames: d.frames, cols: d.atlasCols, rows: d.atlasRows,
+    };
+    asmLentiEl.checked = true;
+    asmLentiBox.hidden = false;
+    // 视频天然是「整幅换帧」，默认切到整幅柔和过渡（想要绝对干净可改直接切换）；
+    // 顺手把只适合静态光栅卡的默认值换成视频用的（还停在默认值才覆盖，别冲掉手调）
+    const fd = document.getElementById('asmLentiFade');
+    if (fd.value === 'stripe') fd.value = 'whole';
+    const tune = (id, from, to) => {
+      const el = document.getElementById(id);
+      if (el && String(el.value) === String(from)) el.value = to;
+    };
+    tune('asmLentiSoft', '0.62', '0.18');     // 帧多时窗口一大就成双影糊
+    tune('asmLentiStripe', '0.48', '0.42');
+    tune('asmLentiSheen', '0.9', '0.3');      // 视频卡陡角泛白凶，光泽压低
+    asmLentiFadeSync();
+    asmLentiDraw();
+    setStatus('asmStatus', '已抽 ' + d.frames + ' 帧（' + d.atlasCols + '×' + d.atlasRows +
+              ' 图集）：倾斜或拖动卡牌即换帧');
+    scheduleAsmPreview(250);
+  } catch (err) {
+    setStatus('asmStatus', '视频处理失败：' + err.message, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = label;
+  }
 });
 asmLentiDraw();
 asmLentiAngleLabel();
@@ -5180,7 +5490,7 @@ asmCardSel.addEventListener('change', () => {
     if (card.back && [...backSel.options].some(o => o.value === card.back)) backSel.value = card.back;
     // 光栅卡：这张卡是光栅卡就把图源与参数一起回填（不是就清空）
     const lc = card.lenti || null;
-    asmLentiReset(lc && Array.isArray(lc.images) ? lc.images : [], lc ? lc.opts : null);
+    asmLentiReset(lc);
     if (typeof card.seal_strength_front === 'number' && isFinite(card.seal_strength_front)) document.getElementById('asmSealFront').value = card.seal_strength_front;
     if (typeof card.seal_strength_back === 'number' && isFinite(card.seal_strength_back)) document.getElementById('asmSealBack').value = card.seal_strength_back;
     if (typeof card.seal_frame_strength_front === 'number' && isFinite(card.seal_frame_strength_front)) document.getElementById('asmSealFrameFront').value = card.seal_frame_strength_front;
@@ -5305,7 +5615,7 @@ document.getElementById('asmReset').addEventListener('click', () => {
   document.getElementById('asmGlow').value = ASSETS.glows.find(x => x) || '';
   document.getElementById('asmGlowStrength').value = 1;
   document.getElementById('asmName').value = '';
-  asmLentiReset([], null);
+  asmLentiReset(null);
   syncAsmMutex();
   setStatus('asmStatus', '已重置为空卡，可自由搭建');
   scheduleAsmPreview(120);

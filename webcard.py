@@ -790,7 +790,7 @@ EFFECT_ENGINE_JS = r"""
         ['uT0', 'uT1', 'uT2', 'uT3', 'uT4', 'uT5',
          'uAtlas', 'uAtlasGrid', 'uAtlasSize',
          'uLentiN', 'uLAngle', 'uLLens', 'uLStripe', 'uLSheen', 'uLSheenPow',
-         'uLSoft', 'uLJitter', 'uLGyro', 'uLBend', 'uLPhase', 'uLGloss',
+         'uLSoft', 'uLJitter', 'uLGyro', 'uLBend', 'uLPhase', 'uLGloss', 'uLViewS',
          'uAspect'].forEach(function (k) { if (cm[k]) U[k] = cm[k]; });
       }
       __BG_SHADER_SHARE__
@@ -1723,6 +1723,7 @@ __ENGINE_JS__
     cardMaterial.uniforms.uHover.value = damp(cardMaterial.uniforms.uHover.value, hover.current, 11, dt);
     cardMaterial.uniforms.uPointer.value.copy(pointer);
 __SEAL_TICK__
+__LENTI_TICK__
 __GLOW_TICK__
 
     __fx.tick(dt);
@@ -3774,6 +3775,8 @@ def _lenti_glsl_atlas(o: dict) -> str:
         "      uniform vec2 uAtlasSize;    // 图集像素尺寸（用于内缩防渗色）\n"
         "      uniform float uLentiN, uLAngle, uLLens, uLStripe, uLSheen, uLSheenPow;\n"
         "      uniform float uLSoft, uLJitter, uLGyro, uLBend, uLPhase, uLGloss;\n"
+        "      // 卡面中心处的视角投影（JS 每帧算，全卡同一个值）\n"
+        "      uniform float uLViewS;\n"
         "      float lhash11(float p) {\n"
         "        p = fract(p * 0.1031); p *= p + 33.33; p *= p + p; return fract(p);\n"
         "      }\n"
@@ -3919,6 +3922,8 @@ def _lenti_glsl(n: int, o: dict) -> str:
         "      uniform sampler2D " + decl + ";\n"
         "      uniform float uLentiN, uLAngle, uLLens, uLStripe, uLSheen, uLSheenPow;\n"
         "      uniform float uLSoft, uLJitter, uLGyro, uLBend, uLPhase, uLGloss;\n"
+        "      // 卡面中心处的视角投影（JS 每帧算，全卡同一个值）\n"
+        "      uniform float uLViewS;\n"
         "      float lhash11(float p) {\n"
         "        p = fract(p * 0.1031); p *= p + 33.33; p *= p + p; return fract(p);\n"
         "      }\n"
@@ -3947,10 +3952,13 @@ def _lenti_face_frag(n: int, o: dict, target: str = "base.rgb",
              + target + " = clamp(lcol, 0.0, 1.0);\n")
     fade = str(o.get("fade") or "stripe").strip().lower()
     if fade == "cut":
-        # 整幅硬切：不掺 bend（卡内位置梯度会让边缘先换）、不掺 jitter（条带错位）
+        # 整幅硬切：相位必须全卡同一个值。
+        # ★ 这里绝不能用 dot(viewDirection, axPw)——那是逐像素的，卡一倾斜，左右两端
+        #   视线方向差得多，相位能差好几帧，画面就被切成几竖条不同内容（用户截图里
+        #   同一人物出现两三个姿势就是这个）。整幅换帧只能取卡面中心的那一个值。
         phase = (
-            "            // 整幅硬切：相位只取视角投影，全卡同步 ⇒ 直接换图，无双影竖条\n"
-            "            float sv = dot(viewDirection, axPw);\n"
+            "            // 整幅硬切：相位取卡面中心视角（全卡同步）⇒ 直接换图，无双影竖条\n"
+            "            float sv = uLViewS;\n"
             "            float lt = uLPhase + sv * uLGyro;\n"
             "            float i0 = floor(lt);\n"
             "            float wf = step(0.5, fract(lt));\n"
@@ -3958,7 +3966,7 @@ def _lenti_face_frag(n: int, o: dict, target: str = "base.rgb",
     elif fade == "whole":
         phase = (
             "            // 整幅柔和过渡：同上但不硬切，整卡一起在两帧之间溶解\n"
-            "            float sv = dot(viewDirection, axPw);\n"
+            "            float sv = uLViewS;\n"
             "            float lt = uLPhase + sv * uLGyro;\n"
             "            float i0 = floor(lt);\n"
             "            float wf = fract(lt);\n"
@@ -4408,6 +4416,7 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
             "      uLGyro: { value: " + str(_gyro) + " },\n"
             "      uLBend: { value: " + str(float(_lo["bend"])) + " },\n"
             "      uLPhase: { value: " + str(float(_lo.get("phase") or 0.0)) + " },\n"
+            "      uLViewS: { value: 0.0 },\n"
             "      uLGloss: { value: " + str(float(_lo["gloss"])) + " },\n"
         )
         if _atlas:
@@ -4432,9 +4441,29 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
             _ln, _lo, target="col", uv_var="fuv", guard="uSubject < 0.5",
             head=("            vec3 viewDirection = normalize(cameraPosition - vWorldPosition);\n"
                   "            vec3 normal = normalize(vWorldNormal);\n")))
+        # 整幅换帧（whole/cut）需要一个「全卡唯一」的视角投影：逐像素 viewDirection
+        # 在倾斜时左右两端能差好几帧，正是画面被切成竖条的根因。这里每帧用卡面世界
+        # 矩阵的基向量 + 相机位置算一次，写进 uLViewS（特效层共享同一 uniform 对象）。
+        lenti_tick = (
+            "  if (cardMaterial.uniforms.uLViewS) {\n"
+            "    var _lv = window.__lentiT || (window.__lentiT = {\n"
+            "      ex: new THREE.Vector3(), ey: new THREE.Vector3(),\n"
+            "      c: new THREE.Vector3(), vd: new THREE.Vector3(),\n"
+            "      ax: new THREE.Vector3() });\n"
+            "    var _lm = cardMesh.matrixWorld.elements;\n"
+            "    _lv.ex.set(_lm[0], _lm[1], _lm[2]).normalize();\n"
+            "    _lv.ey.set(_lm[4], _lm[5], _lm[6]).normalize();\n"
+            "    _lv.c.set(_lm[12], _lm[13], _lm[14]);\n"
+            "    _lv.vd.copy(camera.position).sub(_lv.c).normalize();\n"
+            "    var _la = cardMaterial.uniforms.uLAngle.value;\n"
+            "    _lv.ax.copy(_lv.ex).multiplyScalar(Math.cos(_la))\n"
+            "      .addScaledVector(_lv.ey, -Math.sin(_la)).normalize();\n"
+            "    cardMaterial.uniforms.uLViewS.value = _lv.vd.dot(_lv.ax);\n"
+            "  }\n")
     else:
         lenti_glsl = lenti_face = lenti_load = lenti_uniform_values = ""
         foil_lenti_glsl = foil_lenti_face = '""'
+        lenti_tick = ""
 
     # ---- 程序化背景（末地传送门式星空）----
     # 只加一个 float uniform，不占纹理单元；主卡面与特效层注入同一段函数，两路一致。
@@ -4497,6 +4526,7 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
                  + text_layer + smoke_layer + pattern_layer
                  + scale_js + mask_js + offset_js)
         .replace("__SEAL_TICK__", _SEAL_TICK_JS + bg_tick)
+        .replace("__LENTI_TICK__", lenti_tick)
         .replace("__GLOW_TICK__", _GLOW_TICK_JS)
         .replace("__GLOW_INIT__", _glow_init_js(glow_name, glow_strength, glow_boost))
         .replace("__TEXT_LAYER__", _text_layer_js(description, text_type, text_pos))

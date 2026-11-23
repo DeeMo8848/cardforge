@@ -3556,7 +3556,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
             <input type="file" id="asmLentiFile" accept="image/*" multiple hidden>
           </div>
           <div class="lenti-chips" id="asmLentiChips"></div>
-          <div class="arearow" style="margin-bottom:6px">
+          <div class="arearow" style="margin-bottom:4px">
             <span>换帧方式</span>
             <select id="asmLentiFade" style="flex:1">
               <option value="stripe">条纹推进（真光栅卡）</option>
@@ -3564,6 +3564,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
               <option value="cut">整幅直接切换</option>
             </select>
           </div>
+          <div id="asmLentiFadeHint" style="color:#8d8477;font-size:11px;line-height:1.55;margin:0 0 8px"></div>
           <div class="arearow" style="margin-bottom:6px">
             <span>条纹方向</span>
             <input type="range" id="asmLentiAngle" min="0" max="180" step="1" value="0">
@@ -4976,6 +4977,24 @@ function asmLentiOpts() {
 function asmLentiAngleLabel() {
   document.getElementById('asmLentiAngleV').textContent = asmLentiAngleEl.value + '°';
 }
+// 换帧方式的副作用：只有条纹推进用得上「错位」（每条棱纹各自偏移相位），
+// 整幅两种是全卡同步，错位设置会失效——不禁用的话用户会以为参数没生效。
+function asmLentiFadeSync() {
+  const v = document.getElementById('asmLentiFade').value || 'stripe';
+  const hint = document.getElementById('asmLentiFadeHint');
+  const jit = document.getElementById('asmLentiJitter');
+  const txt = {
+    stripe: '相位逐条棱纹推进：倾斜时画面一条条推过去，最像实物光栅卡。静态多图用这个。',
+    whole: '整张卡同时溶解换帧，没有竖条感。视频/GIF 用这个（柔和调小到 0.2 左右更干净）。',
+    cut: '整张卡直接切到下一帧，绝无双影，换帧略顿挫。帧率高时最干净。',
+  };
+  if (hint) hint.textContent = txt[v] || '';
+  if (jit) {
+    jit.disabled = (v !== 'stripe');
+    jit.style.opacity = jit.disabled ? '0.4' : '';
+    jit.title = jit.disabled ? '整幅换帧时全卡同步，错位无效' : '';
+  }
+}
 function asmLentiReset(list, opts) {
   asmLenti.list.length = 0;
   (list || []).slice(0, 6).forEach((sp) => asmLenti.list.push(sp));
@@ -4992,12 +5011,14 @@ function asmLentiReset(list, opts) {
     });
   }
   asmLentiAngleLabel();
+  asmLentiFadeSync();
   asmLentiDraw();
 }
 
 fillSelect('asmLentiAsset', ASSETS.faces, assetLabels(ASSETS.faces));
 asmLentiEl.addEventListener('change', () => {
   asmLentiBox.hidden = !asmLentiEl.checked;
+  asmLentiFadeSync();
   if (asmLentiEl.checked && asmLenti.list.length < 2) {
     setStatus('asmStatus', '光栅卡建议 2~6 张图：只有 1 张不会变画');
   }
@@ -5015,6 +5036,7 @@ asmLentiAngleEl.addEventListener('input', () => {
   scheduleAsmPreview(260);
 });
 asmLentiBox.addEventListener('change', (e) => {
+  if (e.target && e.target.id === 'asmLentiFade') asmLentiFadeSync();
   if (e.target && e.target.id !== 'asmLentiAngle') scheduleAsmPreview(400);
 });
 document.getElementById('asmLentiAssetAdd').addEventListener('click', () => {

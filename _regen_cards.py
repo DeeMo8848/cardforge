@@ -10,7 +10,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from compositor import CARD_H, CARD_W, compose_card  # noqa: E402
-from cardforge import lib_ref, put_layer, save_preview  # noqa: E402
+from cardforge import lib_ref, put_layer, save_preview, _resolve_effects  # noqa: E402
 from webcard import build_card_html  # noqa: E402
 
 
@@ -20,6 +20,12 @@ def regen(card_json: Path) -> bool:
     out_dir = PROJECT_ROOT / "assets" / "output" / cid
     if not out_dir.is_dir():
         print(f"  [跳过] {cid}: 输出目录不存在")
+        return False
+
+    # 光栅卡的卡面来自 lenti/ 下的帧图，本脚本走的是普通 front/foreground 路径，
+    # 硬跑会把光栅记录冲掉。这类卡要用拼装页保存或 CLI 单独生成。
+    if d.get("lenti"):
+        print(f"  [跳过] {cid}: 光栅卡（单独生成）")
         return False
 
     # 整幅风格：front.png 应为整幅原图（source.png），而非抠图主体
@@ -89,11 +95,19 @@ def regen(card_json: Path) -> bool:
     if not front_p.is_file():
         front_p = out_dir / "front.png"
     front_rel = lib_ref(front_p, out_dir) or "front.png"
+    # 卡定义里的 effects 必须传进去：原来漏了这一步，重生成会把特效整个丢掉
+    # （card.html 里没有 __foilObj，卡面只剩静态图）。
+    try:
+        effects = _resolve_effects(d.get("effects"))
+    except Exception as e:  # noqa: BLE001
+        print(f"  [effects] {cid}: 解析失败 {e}")
+        effects = []
     html = build_card_html(
         d.get("name") or cid,
         front_rel,
         "foreground.png",
         back_rel,
+        effects=effects,
         frame_rel=frame_rel,
         seal_rel=seal_rel,
         seal_name=d.get("seal_name") or (Path(seal_path).name if seal_path else None),

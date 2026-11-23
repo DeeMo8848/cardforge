@@ -451,7 +451,8 @@ EFFECT_ENGINE_JS = r"""
       'uniform vec4 uFaceBox;\n' +
       'uniform vec4 uDistCtl, uDistCtl2, uGlob, uGlob2, uDistTile, uTone, uSheen;\n' +
       'uniform vec4 uSheenA, uSheenB, uSheenC, uSheenD;\n' +
-      'uniform sampler2D uFlowMask, uFlowNoise;\n' +
+      // uFlowMask 自第二十七轮起不再采样 —— 不声明它，省一个纹理单元（低端 GPU 只有 16 个）
+      'uniform sampler2D uFlowNoise;\n' +
       'uniform float uFlowAmt, uFlowSpeed;\n' +
       'uniform sampler2D uTex0, uTex1, uTex2, uTex3, uTex4;\n' +
       'uniform vec4 uSlot0, uSlot1, uSlot2, uSlot3, uSlot4;\n' +
@@ -464,7 +465,9 @@ EFFECT_ENGINE_JS = r"""
       'uniform vec4 uTint0, uTint1, uTint2, uTint3, uTint4;\n' +
       'uniform vec4 uLx0, uLx1, uLx2, uLx3, uLx4;\n' +
       'uniform vec4 uBlink0, uBlink1, uBlink2, uBlink3, uBlink4;\n' +
-      'uniform sampler2D uLut0, uLut1, uLut2, uLut3, uLut4;\n' +
+      // 所有特效定义的 lut 都是空（1624 个 JSON 里 0 个配了 LUT）⇒ 五槽共用一个白图，
+      // 省 4 个纹理单元。见 U.uLut 的赋值处。
+      'uniform sampler2D uLut;\n' +
       'varying vec2 vUv;\n' +
       'const float PI = 3.14159265359;\n' +
       'const float INV2PI = 0.15915494309;\n' +
@@ -636,11 +639,11 @@ EFFECT_ENGINE_JS = r"""
       // 会把 col 整个重置成 uMain（第 0 帧），放前面等于没写。
       // 透镜合成写 col（不是 base.rgb）、采样已过流动扰动的 fuv。
       __FOIL_LENTI_FACE__ +
-      '  col = blend(uTex0, uLut0, uSlot0, uMove0, uFx0, uCtl0, uF0, uTile0, uPos0, uTint0, uLx0, uBlink0, euv, te, col);\n' +
-      '  col = blend(uTex1, uLut1, uSlot1, uMove1, uFx1, uCtl1, uF1, uTile1, uPos1, uTint1, uLx1, uBlink1, euv, te, col);\n' +
-      '  col = blend(uTex2, uLut2, uSlot2, uMove2, uFx2, uCtl2, uF2, uTile2, uPos2, uTint2, uLx2, uBlink2, euv, te, col);\n' +
-      '  col = blend(uTex3, uLut3, uSlot3, uMove3, uFx3, uCtl3, uF3, uTile3, uPos3, uTint3, uLx3, uBlink3, euv, te, col);\n' +
-      '  col = blend(uTex4, uLut4, uSlot4, uMove4, uFx4, uCtl4, uF4, uTile4, uPos4, uTint4, uLx4, uBlink4, euv, te, col);\n' +
+      '  col = blend(uTex0, uLut, uSlot0, uMove0, uFx0, uCtl0, uF0, uTile0, uPos0, uTint0, uLx0, uBlink0, euv, te, col);\n' +
+      '  col = blend(uTex1, uLut, uSlot1, uMove1, uFx1, uCtl1, uF1, uTile1, uPos1, uTint1, uLx1, uBlink1, euv, te, col);\n' +
+      '  col = blend(uTex2, uLut, uSlot2, uMove2, uFx2, uCtl2, uF2, uTile2, uPos2, uTint2, uLx2, uBlink2, euv, te, col);\n' +
+      '  col = blend(uTex3, uLut, uSlot3, uMove3, uFx3, uCtl3, uF3, uTile3, uPos3, uTint3, uLx3, uBlink3, euv, te, col);\n' +
+      '  col = blend(uTex4, uLut, uSlot4, uMove4, uFx4, uCtl4, uF4, uTile4, uPos4, uTint4, uLx4, uBlink4, euv, te, col);\n' +
       '  vec3 c = col * uTone.z;\n' +
       '  float knee = clamp(uTone.x, 0.05, 0.999);\n' +
       '  if (uTone.y > 0.5){\n' +
@@ -697,7 +700,6 @@ EFFECT_ENGINE_JS = r"""
       var U = {
         uTime: { value: 0 },
         uMain: { value: mainTex },
-      uFlowMask: { value: (def.flow && def.flow.mask) ? foilLoad(def.flow.mask, true) : foilWhite() },
       uFlowNoise: { value: (def.flow && def.flow.noise) ? foilLoad(def.flow.noise, false) : foilWhite() },
       uFlowAmt: { value: (def.flow && def.flow.amt) ? def.flow.amt : 0.0 },
       uFlowSpeed: { value: (def.flow && def.flow.speed) ? def.flow.speed : 1.0 },
@@ -740,9 +742,9 @@ EFFECT_ENGINE_JS = r"""
       U.uSheenB.value.set(pal[1][0], pal[1][1], pal[1][2], 1);
       U.uSheenC.value.set(pal[2][0], pal[2][1], pal[2][2], 1);
       U.uSheenD.value.set(pal[3][0], pal[3][1], pal[3][2], 1);
+      U.uLut = { value: foilWhite() };
       for (var i = 0; i < 5; i++) {
         U['uTex' + i] = { value: foilWhite() };
-        U['uLut' + i] = { value: foilWhite() };
         U['uSlot' + i] = { value: v4(0, 0, 0, 0) };
         U['uTile' + i] = { value: v4(1, 1, 0, 0) };
         U['uMove' + i] = { value: v4(0, 0, 0, 0) };
@@ -759,7 +761,8 @@ EFFECT_ENGINE_JS = r"""
         var c = s.color || [1, 1, 1, 1];
         var tint = s.tint || [1, 1, 1];
         U['uTex' + i].value = foilLoad(s.tex, s.slot === 'Middle');
-        U['uLut' + i].value = (s.lut && FOIL_LUT[s.lut]) ? foilLut(s.lut) : foilWhite();
+        // lut 五槽共用（现有特效定义全为空），只取第一个非空的
+        if (s.lut && FOIL_LUT[s.lut]) U.uLut.value = foilLut(s.lut);
         U['uSlot' + i].value.set(c[0], c[1], c[2], c[3] == null ? 1 : c[3]);
         U['uTile' + i].value.set(s.tx == null ? 1 : s.tx, s.ty == null ? 1 : s.ty, s.ox || 0, s.oy || 0);
         U['uMove' + i].value.set(s.su || 0, s.sv || 0, s.sa || 0, (s.rot || 0) + (s.spin || 0) * PI_JS / 180);
@@ -3735,10 +3738,20 @@ LENTI_DEFAULTS = {
 
 
 def _lenti_glsl(n: int, o: dict) -> str:
-    """光栅卡卡面：uniform 声明 + 按槽位取图。"""
+    """光栅卡卡面：uniform 声明 + 按槽位取图。
+
+    只声明**实际用到**的帧采样器：低端 GPU 的 MAX_TEXTURE_IMAGE_UNITS 只有 16，
+    而特效层本来就要占十几个，固定声明 6 个会把 2 帧的卡顶爆（实测搜狗浏览器）。
+    """
+    nn = max(1, min(int(n or 1), 6))
+    decl = ", ".join("uT%d" % i for i in range(nn))
+    chain = "".join(
+        "        if (k < %.1f) return texture2D(uT%d, uv).rgb;\n" % (i + 0.5, i)
+        for i in range(nn - 1)
+    )
     return (
         "      // ---- 光栅卡（lenticular）uniform ----\n"
-        "      uniform sampler2D uT0, uT1, uT2, uT3, uT4, uT5;\n"
+        "      uniform sampler2D " + decl + ";\n"
         "      uniform float uLentiN, uLAngle, uLLens, uLStripe, uLSheen, uLSheenPow;\n"
         "      uniform float uLSoft, uLJitter, uLGyro, uLBend, uLPhase, uLGloss;\n"
         "      float lhash11(float p) {\n"
@@ -3746,12 +3759,8 @@ def _lenti_glsl(n: int, o: dict) -> str:
         "      }\n"
         "      vec3 lentiTex(float idx, vec2 uv) {\n"
         "        float k = mod(idx, max(uLentiN, 1.0));\n"
-        "        if (k < 0.5) return texture2D(uT0, uv).rgb;\n"
-        "        if (k < 1.5) return texture2D(uT1, uv).rgb;\n"
-        "        if (k < 2.5) return texture2D(uT2, uv).rgb;\n"
-        "        if (k < 3.5) return texture2D(uT3, uv).rgb;\n"
-        "        if (k < 4.5) return texture2D(uT4, uv).rgb;\n"
-        "        return texture2D(uT5, uv).rgb;\n"
+        + chain +
+        "        return texture2D(uT" + str(nn - 1) + ", uv).rgb;\n"
         "      }\n"
     )
 

@@ -10,7 +10,13 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from compositor import CARD_H, CARD_W, compose_card  # noqa: E402
-from cardforge import lib_ref, put_layer, save_preview, _resolve_effects  # noqa: E402
+from cardforge import (  # noqa: E402
+    lib_ref,
+    put_layer,
+    save_preview,
+    _materialize_effect_images,
+    _resolve_effects,
+)
 from webcard import build_card_html  # noqa: E402
 
 
@@ -111,6 +117,15 @@ def regen(card_json: Path) -> bool:
     except Exception as e:  # noqa: BLE001
         print(f"  [effects] {cid}: 解析失败 {e}")
         effects = []
+    # ★ 解析出来的 def 里贴图还是裸名（tx_foil_smoke / foil_arrow10.png），必须过一遍
+    #   _materialize_effect_images 改写成 lib_ref 引用或复制进 effects/。
+    #   漏了这一步 ⇒ card.html 里全是相对裸名 ⇒ 贴图 404 ⇒ 特效整层静默不渲染
+    #   （卡面正常、完全不动，控制台只有一堆 404）。
+    if effects:
+        try:
+            effects = _materialize_effect_images(effects, out_dir)
+        except Exception as e:  # noqa: BLE001
+            print(f"  [effects] {cid}: 贴图落地失败 {e}")
     html = build_card_html(
         d.get("name") or cid,
         front_rel,

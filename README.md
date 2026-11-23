@@ -212,7 +212,7 @@ CLI 缺省也会自动走 API（显式 `--model` 仍然优先）。
 | 入口 | 用法 |
 |---|---|
 | 拼装页（推荐） | 🧩 卡牌拼装 → 勾选「🎞️ 光栅卡卡面」→ 加 2~6 张图（上传 / 素材库卡面）→ 调参数 → 保存为卡牌 |
-| 拼装页（视频） | 同上，点「🎬 上传视频 / GIF」→ 自动抽 24 帧做图集 → 保存（见下节） |
+| 拼装页（视频） | 同上，点「🎬 上传视频 / GIF」→ 按「视频抽帧数」抽 8~36 帧做图集（默认 24）→ 保存（见下节） |
 | 单页工作台 | 主界面导航「🎞️ 光栅卡」→ 填路径或上传 → 生成预览 |
 | 命令行 | `python lenticular.py --images a.png b.png c.png --name demo` |
 
@@ -267,14 +267,29 @@ CLI 缺省也会自动走 API（显式 `--model` 仍然优先）。
 **视频 / GIF → 光栅卡（图集模式，帧数不受限）**
 
 6 个采样器的上限只在「每帧一张贴图」时成立。把 N 帧**平铺成一张图集**后取帧变成
-uv 偏移，**永远只占 1 个采样器**，帧数上限就变成图集尺寸（1440×1920 能装 25 格）。
+uv 偏移，**永远只占 1 个采样器**，帧数上限就变成图集格子数（6×6 = 36 格）。
 
 ```python
 build_card_html(..., lenti_opts={
-    "atlas": "lenti/atlas.webp", "atlasCols": 5, "atlasRows": 5, "frames": 24,
+    "atlas": "lenti/atlas.webp", "atlasCols": 6, "atlasRows": 6, "frames": 36,
     "lens": 120, "stripe": 0.42, "sheen": 0.30, "soft": 0.18, "gloss": 0.6,
     "fade": "whole"})
 ```
+
+**抽帧数可调（8~36，默认 24）**
+
+拼装页光栅面板里的「视频抽帧数」下拉，7 档：8 / 12 / 16 / 20 / 24 / 30 / 36，
+右侧实时显示图集格子数（8→5×2、24→5×5、30→6×5、36→6×6）。
+
+- **帧多** = 每帧占的倾斜区间更窄、换帧更细腻，但图集更大（24 帧 617KB / 36 帧 746KB）
+- **帧少** = 省体积，但相邻帧差异大、跳帧感明显
+- `uLGyro` 按 `(N-1)*0.72` 自动换算，改 N 不用动别的参数
+- 图集行列由 `_lenti_vgrid(n)` 决定（≤25 用 5 列，>25 用 6 列）；**取帧取模用的是帧数
+  不是格子数**（`mod(idx, uLentiN)`），所以 12 帧 5×3=15 格里空着的 3 格永远不会被采样
+- 缓存 key 是 `<md5>-f<N>`：**同一个视频换帧数不会重抽错**，也不会命中别的帧数
+- 改帧数**不需要重新上传**：原始文件留在 `assets/lenticular/_video/_src/`，
+  前端只要 POST `{"hash": "<md5>", "frames": 36}` 到 `/api/lenti/video/reframe`
+  （原文件名也记在 `_src/<md5>.json`，重抽后显示名不会变成哈希名）
 
 - 每格必须与卡面同比例（**1465/2048 = 0.7153，不是 3:4**；按 3:4 做会横向挤 4.8%），
   横版素材先 cover 裁成卡面比例
@@ -292,13 +307,13 @@ build_card_html(..., lenti_opts={
 - `soft` 是 wf 的混合窗口宽度。`whole` 下 0.30 意味着 30% 的角度区间都在两帧叠影里
   ⇒ 看着像画面在融化；视频卡用 **0.12~0.18**，要绝对干净就 `fade: "cut"`
 - `jitter`（条带错位）只有 `stripe` 用得上；整幅两种是全卡同步，拼装页里会自动禁用
-- **在拼装页直接做**：光栅面板里「🎬 上传视频 / GIF」→ `POST /api/lenti/video`（裸字节，
-  `X-File-Name` 头带文件名）→ 均匀抽 24 帧（cv2 解 mp4/webm，PIL 解 GIF/动画 WebP）→
-  拼 5×5 图集存 `assets/lenticular/_video/<md5>/`（按内容哈希缓存，同文件秒回）→
-  前端存成 `asmLenti.video`，导入时自动把 `fade` 切到 `whole`、`soft` 收到 0.18、
-  `sheen` 压到 0.3（只在还停在默认值时才覆盖）。保存时图集与首帧拷进卡目录
-  `lenti/atlas.webp` + `lenti/f00.webp`，`cards/<id>.json` 记 `atlas_src`（`lvid:<hash>`）
-  供重开回填
+- **在拼装页直接做**：光栅面板里「🎬 上传视频 / GIF」→ `POST /api/lenti/video?frames=N`
+  （裸字节，`X-File-Name` 头带文件名）→ 均匀抽 N 帧（cv2 解 mp4/webm，PIL 解 GIF/
+  动画 WebP）→ 拼图集存 `assets/lenticular/_video/<md5>-f<N>/`（按内容哈希 + 帧数缓存，
+  同参数秒回）→ 前端存成 `asmLenti.video`，导入时自动把 `fade` 切到 `whole`、
+  `soft` 收到 0.18、`sheen` 压到 0.3（只在还停在默认值时才覆盖）。保存时图集与首帧拷进
+  卡目录 `lenti/atlas.webp` + `lenti/f00.webp`，`cards/<id>.json` 记 `atlas_src`
+  （`lvid:<key>`）供重开回填
 - `_mk_video_cards.py`（`工作间/cardrip`）是批量流水线（直接出成品卡 + 五角度截图 +
   倾斜 GIF），与新加的 UI 入口共用同一套图集参数
 - 收集册卡片定义里 `engine: "video-lenti"`，`_regen_cards.py` 会跳过（它只认普通 front 路径）
@@ -548,3 +563,9 @@ sakura-pack/
 :: 按 cards/*.json 批量重建卡片到 assets/output/
 .venv\Scripts\python.exe _regen_cards.py
 ```
+
+> ★ `_regen_cards.py` 重建带特效的卡时，`_resolve_effects()` 之后**必须**再调
+> `_materialize_effect_images(effects, out_dir)`。只解析不落地时，`card.html` 里的
+> `tex` 全是裸名（`tx_foil_smoke`），相对卡目录 404 ⇒ **特效整层静默不渲染**：卡面正常、
+> 完全不动、控制台一堆 404，特别难认出是路径问题。2026-11-23 就因为这个把疾风之箭 /
+> 雪华 / sekka-base 弄哑过一次。

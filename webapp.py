@@ -991,13 +991,37 @@ def _lenti_frames(paths: list[Path]):
 
 
 # ---- 视频 / GIF → 光栅图集 ----
-# 帧数上限不是采样器数（图集只占 1 个），而是图集格子数：5×5 = 25。
+# 帧数上限不是采样器数（图集只占 1 个），而是图集格子数：6×6 = 36。
+# 帧数可调：帧多 ⇒ 每帧占的倾斜区间更窄、换帧更细腻，但图集更大；
+# 帧少 ⇒ 体积小、跳帧感更明显。`uLGyro` 按 (N-1)*0.72 自动换算，改帧数不用动别的。
 LENTI_VIDEO_DIR = lenticular.LENTI_ROOT / "_video"
+LENTI_VIDEO_SRC_DIR = LENTI_VIDEO_DIR / "_src"   # 原始文件留一份，改帧数时直接重抽
 LENTI_VIDEO_FRAMES = 24
+LENTI_VIDEO_FRAME_MIN = 8
+LENTI_VIDEO_FRAME_MAX = 36
+LENTI_VIDEO_FRAME_CHOICES = (8, 12, 16, 20, 24, 30, 36)
 LENTI_VIDEO_CELL_W = 288
 LENTI_VIDEO_MAX_BYTES = 60 * 1024 * 1024
 _VIDEO_EXTS = (".mp4", ".webm", ".mov", ".mkv", ".avi", ".m4v",
                ".gif", ".webp", ".apng")
+
+
+def _lenti_vframes(v) -> int:
+    """帧数参数归一化（非法/缺省走默认 24，夹在 8~36）。"""
+    try:
+        n = int(round(float(v)))
+    except (TypeError, ValueError):
+        return LENTI_VIDEO_FRAMES
+    return min(LENTI_VIDEO_FRAME_MAX, max(LENTI_VIDEO_FRAME_MIN, n))
+
+
+def _lenti_vgrid(n: int) -> tuple[int, int]:
+    """帧数 → 图集行列。25 格以内 5 列，26~36 走 6 列（正方形图集，采样器只要 1 个）。"""
+    n = max(2, int(n))
+    if n <= 4:
+        return n, 1
+    cols = 5 if n <= 25 else 6
+    return cols, (n + cols - 1) // cols
 
 
 def _even_idx(total: int, want: int) -> list[int]:
@@ -1071,9 +1095,62 @@ def _video_frames(src: Path, want: int):
     return out
 
 
-def _make_lenti_video(raw: bytes, name: str) -> dict:
-    """视频/GIF → 光栅图集（5×5 一张图，1 个采样器）。按内容哈希缓存，同文件不重复抽帧。"""
+def _lenti_vresult(key: str, md5: str, safe: str) -> dict:
+    """图集缓存的对外描述（上传与改帧数共用）。"""
+    d = LENTI_VIDEO_DIR / key
+    try:
+        meta = json.loads((d / "info.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        meta = {"name": safe, "frames": 2, "cols": 1, "rows": 2}
+    base = "/lenti/_video/" + key
+    return {"ok": True, "key": key, "hash": md5, "atlas": "lvid:" + key,
+            "url": base + "/atlas.webp", "front": base + "/frame0.webp",
+            "frames": int(meta.get("frames") or 2),
+            "atlasCols": int(meta.get("cols") or 1),
+            "atlasRows": int(meta.get("rows") or 1),
+            "want": int(meta.get("want") or meta.get("frames") or 2),
+            "name": meta.get("name") or safe}
+
+
+def _build_lenti_atlas(src: Path, key: str, want: int, safe: str) -> None:
+    """抽 want 帧 → 拼一张图集存 _video/<key>/（已存在则直接复用）。"""
     from PIL import Image as _I
+    d = LENTI_VIDEO_DIR / key
+    if (d / "atlas.webp").exists():
+        return
+    LENTI_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
+    work = LENTI_VIDEO_DIR / (key + ".tmp")
+    if work.exists():
+        shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(parents=True)
+    try:
+        frames = _video_frames(src, want)
+        n = max(2, min(len(frames), LENTI_VIDEO_FRAME_MAX))
+        frames = frames[:n]
+        cols, rows = _lenti_vgrid(n)
+        cw = LENTI_VIDEO_CELL_W
+        ch = max(2, int(round(cw / LENTI_ASPECT)))
+        atlas = _I.new("RGB", (cols * cw, rows * ch), (0, 0, 0))
+        for i, f in enumerate(frames):
+            atlas.paste(_cover_to(f, cw, ch), ((i % cols) * cw, (i // cols) * ch))
+        atlas.save(work / "atlas.webp", "WEBP", quality=86, method=4)
+        fw = 900
+        _cover_to(frames[0], fw, max(2, int(round(fw / LENTI_ASPECT)))).save(
+            work / "frame0.webp", "WEBP", quality=92, method=4)
+        (work / "info.json").write_text(json.dumps(
+            {"name": safe, "frames": n, "want": want, "cols": cols, "rows": rows,
+             "cell": [cw, ch]}, ensure_ascii=False), encoding="utf-8")
+        if d.exists():
+            shutil.rmtree(d, ignore_errors=True)
+        work.rename(d)
+    except Exception:
+        # 失败别把半成品留在缓存里，否则下次同文件会「命中」一个坏目录
+        shutil.rmtree(work, ignore_errors=True)
+        raise
+
+
+def _make_lenti_video(raw: bytes, name: str, frames=None) -> dict:
+    """视频/GIF → 光栅图集（一张图，1 个采样器）。按内容哈希+帧数缓存，同参数不重复抽帧。"""
     if not raw:
         raise ValueError("没收到文件内容")
     if len(raw) > LENTI_VIDEO_MAX_BYTES:
@@ -1081,53 +1158,46 @@ def _make_lenti_video(raw: bytes, name: str) -> dict:
     safe = _safe_name((name or "clip.mp4").replace("\\", "/").split("/")[-1])
     if not safe.lower().endswith(_VIDEO_EXTS):
         raise ValueError("不支持的格式：%s（支持 mp4/webm/mov/gif）" % Path(safe).suffix)
-    key = hashlib.md5(raw).hexdigest()[:12]
+    want = _lenti_vframes(frames)
+    md5 = hashlib.md5(raw).hexdigest()[:12]
+    key = "%s-f%d" % (md5, want)
+    # 原始文件在 _video/_src 留一份：之后改帧数只要回传 hash，不用把几十 MB 重传一遍
+    src = LENTI_VIDEO_SRC_DIR / (md5 + Path(safe).suffix.lower())
+    if not src.exists():
+        LENTI_VIDEO_SRC_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = LENTI_VIDEO_SRC_DIR / (src.name + ".part")
+        tmp.write_bytes(raw)
+        tmp.replace(src)
+        # 原名也记下来：改帧数时要用它当显示名，不然会变成 "<hash>.mp4"
+        (LENTI_VIDEO_SRC_DIR / (md5 + ".json")).write_text(
+            json.dumps({"name": safe}, ensure_ascii=False), encoding="utf-8")
+    _build_lenti_atlas(src, key, want, safe)
+    return _lenti_vresult(key, md5, safe)
+
+
+def _reframe_lenti_video(hash_or_key: str, frames=None) -> dict:
+    """改帧数重抽（用缓存的原始文件，不用重新上传）。"""
+    md5 = re.sub(r"-f\d+$", "", str(hash_or_key or "").split(":")[-1]).strip()
+    if not re.fullmatch(r"[0-9a-f]{6,32}", md5 or ""):
+        raise ValueError("视频缓存标识无效，请重新上传")
+    want = _lenti_vframes(frames)
+    key = "%s-f%d" % (md5, want)
     d = LENTI_VIDEO_DIR / key
-    info_p = d / "info.json"
     if not (d / "atlas.webp").exists():
-        LENTI_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
-        work = LENTI_VIDEO_DIR / (key + ".tmp")
-        if work.exists():
-            shutil.rmtree(work, ignore_errors=True)
-        work.mkdir(parents=True)
+        # 只认视频扩展名：_src 里同名还有个 .json 存原始文件名，不能当成源
+        cands = ([c for c in sorted(LENTI_VIDEO_SRC_DIR.glob(md5 + ".*"))
+                  if c.suffix.lower() in _VIDEO_EXTS]
+                 if LENTI_VIDEO_SRC_DIR.is_dir() else [])
+        if not cands:
+            raise ValueError("原始视频已不在缓存里（被清理过），请重新上传一次")
         try:
-            src = work / safe
-            src.write_bytes(raw)
-            frames = _video_frames(src, LENTI_VIDEO_FRAMES)
-            n = max(2, min(len(frames), 25))
-            frames = frames[:n]
-            cols = 5 if n > 4 else n
-            rows = max(1, (n + cols - 1) // cols)
-            cw = LENTI_VIDEO_CELL_W
-            ch = max(2, int(round(cw / LENTI_ASPECT)))
-            atlas = _I.new("RGB", (cols * cw, rows * ch), (0, 0, 0))
-            for i, f in enumerate(frames):
-                atlas.paste(_cover_to(f, cw, ch), ((i % cols) * cw, (i // cols) * ch))
-            atlas.save(work / "atlas.webp", "WEBP", quality=86, method=4)
-            fw = 900
-            _cover_to(frames[0], fw, max(2, int(round(fw / LENTI_ASPECT)))).save(
-                work / "frame0.webp", "WEBP", quality=92, method=4)
-            (work / "info.json").write_text(json.dumps(
-                {"name": safe, "frames": n, "cols": cols, "rows": rows, "cell": [cw, ch]},
-                ensure_ascii=False), encoding="utf-8")
-            src.unlink(missing_ok=True)
-            if d.exists():
-                shutil.rmtree(d, ignore_errors=True)
-            work.rename(d)
-        except Exception:
-            # 失败别把半成品留在缓存里，否则下次同文件会「命中」一个坏目录
-            shutil.rmtree(work, ignore_errors=True)
-            raise
-        info_p = d / "info.json"
-    try:
-        meta = json.loads(info_p.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        meta = {"name": safe, "frames": 2, "cols": 1, "rows": 2}
-    base = "/lenti/_video/" + key
-    return {"ok": True, "key": key, "atlas": "lvid:" + key, "url": base + "/atlas.webp",
-            "front": base + "/frame0.webp", "frames": int(meta.get("frames") or 2),
-            "atlasCols": int(meta.get("cols") or 1), "atlasRows": int(meta.get("rows") or 1),
-            "name": meta.get("name") or safe}
+            safe = json.loads((LENTI_VIDEO_SRC_DIR / (md5 + ".json"))
+                              .read_text(encoding="utf-8")).get("name") or ""
+        except (OSError, ValueError):
+            safe = ""
+        safe = _safe_name(safe or cands[0].name)
+        _build_lenti_atlas(cands[0], key, want, safe)
+    return _lenti_vresult(key, md5, "clip")
 
 
 def _lenti_o(data: dict) -> dict:
@@ -2548,15 +2618,18 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json({"ok": False, "error": "not found"}, 404)
 
     def do_POST(self):
+        _path, _, _qs = self.path.partition("?")
         # 视频/GIF 走裸字节上传（base64 会把体积放大 1/3，几十 MB 的片子没必要）
-        if self.path in ("/api/lenti/video", "/api/lenti/video_raw"):
+        if _path in ("/api/lenti/video", "/api/lenti/video_raw"):
             try:
                 length = int(self.headers.get("Content-Length", 0))
                 if length > LENTI_VIDEO_MAX_BYTES:
                     raise ValueError("文件太大（>60MB），先压一下或截短")
                 raw = self.rfile.read(length) if length else b""
                 name = unquote(self.headers.get("X-File-Name", "") or "clip.mp4")
-                self._send_json(_make_lenti_video(raw, name))
+                # ?frames=24：抽帧数（8~36），不传按默认 24
+                want = parse_qs(_qs).get("frames", [None])[0]
+                self._send_json(_make_lenti_video(raw, name, want))
             except ValueError as e:
                 self._send_json({"ok": False, "error": str(e)}, 400)
             except Exception as e:
@@ -2567,6 +2640,17 @@ class Handler(BaseHTTPRequestHandler):
             data = json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
         except Exception as e:
             self._send_json({"ok": False, "error": f"请求解析失败: {e}"}, 400)
+            return
+
+        # 改抽帧数：源文件还在 _video/_src，不用重新上传几十 MB
+        if _path in ("/api/lenti/video/reframe", "/api/lenti/video/frames"):
+            try:
+                self._send_json(_reframe_lenti_video(
+                    data.get("hash") or data.get("src") or "", data.get("frames")))
+            except ValueError as e:
+                self._send_json({"ok": False, "error": str(e)}, 400)
+            except Exception as e:
+                self._send_json({"ok": False, "error": str(e)}, 500)
             return
 
         try:
@@ -3773,11 +3857,24 @@ PAGE_HTML = r"""<!DOCTYPE html>
           <div class="pickrow" style="margin-bottom:6px">
             <button class="btn small ghost" id="asmLentiAdd" type="button">⬆️ 上传图片</button>
             <button class="btn small ghost" id="asmLentiVideoUp" type="button"
-                    title="视频/GIF 自动抽 24 帧做成图集光栅卡（整幅换帧）">🎬 上传视频 / GIF</button>
+                    title="视频/GIF 自动抽帧做成图集光栅卡（整幅换帧）">🎬 上传视频 / GIF</button>
             <button class="btn small ghost" id="asmLentiClear" type="button">清空</button>
             <input type="file" id="asmLentiFile" accept="image/*" multiple hidden>
             <input type="file" id="asmLentiVideoFile"
                    accept="video/*,image/gif,image/webp,image/apng" hidden>
+          </div>
+          <div class="arearow" style="margin-bottom:6px">
+            <span>视频抽帧数</span>
+            <select id="asmLentiVFrames" style="flex:1">
+              <option value="8">8 帧 · 省体积，跳帧明显</option>
+              <option value="12">12 帧</option>
+              <option value="16">16 帧</option>
+              <option value="20">20 帧</option>
+              <option value="24" selected>24 帧 · 默认</option>
+              <option value="30">30 帧</option>
+              <option value="36">36 帧 · 最细腻，图集最大</option>
+            </select>
+            <span class="lval" id="asmLentiVFramesV"></span>
           </div>
           <div class="lenti-chips" id="asmLentiChips"></div>
           <div class="arearow" style="margin-bottom:4px">
@@ -5173,11 +5270,36 @@ const asmLentiEl = document.getElementById('asmLenti');
 const asmLentiBox = document.getElementById('asmLentiBox');
 const asmLentiChips = document.getElementById('asmLentiChips');
 const asmLentiAngleEl = document.getElementById('asmLentiAngle');
+const asmLentiVFramesEl = document.getElementById('asmLentiVFrames');
 const asmLenti = { list: [], video: null };
 
 function asmLentiName(spec) {
   const t = String(spec || '').split(/[\\/:]/).filter(Boolean).pop() || '图片';
   return t.replace(/^[0-9a-f]{8}_/, '');   // 去掉临时上传的前缀哈希
+}
+// 帧数下拉取值（8~36）；选项外的手工值补一个 option，免得设不上变空
+function asmLentiVFramesVal() {
+  const n = parseInt(asmLentiVFramesEl.value, 10);
+  return isFinite(n) ? n : 24;
+}
+function asmLentiVFramesSet(n) {
+  n = parseInt(n, 10) || 24;
+  if (![...asmLentiVFramesEl.options].some(o => +o.value === n)) {
+    const o = document.createElement('option');
+    o.value = String(n);
+    o.textContent = n + ' 帧（自定义）';
+    asmLentiVFramesEl.appendChild(o);
+  }
+  asmLentiVFramesEl.value = String(n);
+  asmLentiVFramesLabel();
+}
+function asmLentiVFramesLabel() {
+  const el = document.getElementById('asmLentiVFramesV');
+  if (!el) return;
+  const n = asmLentiVFramesVal();
+  const cols = n <= 4 ? n : (n <= 25 ? 5 : 6);
+  el.textContent = cols + '×' + Math.max(1, Math.ceil(n / cols));
+  el.title = '图集格子数（只占 1 个纹理单元）';
 }
 function asmLentiDraw() {
   if (asmLenti.video) {
@@ -5239,15 +5361,20 @@ function asmLentiReset(lc) {
   lc = lc || {};
   asmLenti.list.length = 0;
   (Array.isArray(lc.images) ? lc.images : []).slice(0, 6).forEach((sp) => asmLenti.list.push(sp));
-  // 视频/GIF 卡：atlas_src 指向抽帧缓存（_video/<hash>），能复原就还原成「视频卡」状态
+  // 视频/GIF 卡：atlas_src 指向抽帧缓存（_video/<key>），能复原就还原成「视频卡」状态
   asmLenti.video = lc.atlas_src ? {
     src: lc.atlas_src,
+    // key 形如 "<md5>-f24"：拆出纯哈希，之后改帧数只要传 hash 不用重传视频
+    hash: String(lc.atlas_src).split(':').pop().replace(/-f\d+$/, ''),
     name: lc.video_name || '',
     frames: lc.frames || 24,
     cols: lc.atlasCols || 5,
     rows: lc.atlasRows || 5,
   } : null;
-  if (asmLenti.video) asmLenti.list.length = 0;
+  if (asmLenti.video) {
+    asmLenti.list.length = 0;
+    asmLentiVFramesSet(asmLenti.video.frames);
+  }
   const on = asmLenti.list.length > 0 || !!asmLenti.video;
   asmLentiEl.checked = on;
   asmLentiBox.hidden = !on;
@@ -5340,7 +5467,8 @@ document.getElementById('asmLentiClear').addEventListener('click', () => {
   asmLentiDraw();
   scheduleAsmPreview(200);
 });
-// 视频 / GIF：整段均匀抽 24 帧 → 一张 5×5 图集（shader 里只占 1 个采样器）
+// 视频 / GIF：整段均匀抽 N 帧 → 一张图集（shader 里只占 1 个采样器）
+// N 由「视频抽帧数」下拉决定（8~36，默认 24）：帧多换帧更细腻但图集更大
 document.getElementById('asmLentiVideoUp').addEventListener('click', () => {
   document.getElementById('asmLentiVideoFile').click();
 });
@@ -5350,11 +5478,13 @@ document.getElementById('asmLentiVideoFile').addEventListener('change', async (e
   if (!f) return;
   const btn = document.getElementById('asmLentiVideoUp');
   const label = btn.textContent;
+  const want = asmLentiVFramesVal();
   btn.disabled = true;
   btn.textContent = '抽帧中…';
-  setStatus('asmStatus', '正在抽帧：' + f.name + '（' + (f.size / 1048576).toFixed(1) + ' MB）…');
+  setStatus('asmStatus', '正在抽 ' + want + ' 帧：' + f.name +
+            '（' + (f.size / 1048576).toFixed(1) + ' MB）…');
   try {
-    const r = await fetch('/api/lenti/video', {
+    const r = await fetch('/api/lenti/video?frames=' + want, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/octet-stream',
@@ -5366,7 +5496,7 @@ document.getElementById('asmLentiVideoFile').addEventListener('change', async (e
     if (!d.ok) throw new Error(d.error || '处理失败');
     asmLenti.list.length = 0;
     asmLenti.video = {
-      src: d.atlas, name: d.name,
+      src: d.atlas, hash: d.hash || '', name: d.name,
       frames: d.frames, cols: d.atlasCols, rows: d.atlasRows,
     };
     asmLentiEl.checked = true;
@@ -5394,8 +5524,43 @@ document.getElementById('asmLentiVideoFile').addEventListener('change', async (e
     btn.textContent = label;
   }
 });
+// 改帧数：源文件还留在服务端缓存里，按 hash 重抽，不用重新上传几十 MB
+asmLentiVFramesEl.addEventListener('change', async () => {
+  asmLentiVFramesLabel();
+  const v = asmLenti.video;
+  const want = asmLentiVFramesVal();
+  if (!v || v.frames === want) return;
+  const btn = document.getElementById('asmLentiVideoUp');
+  const label = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '重抽中…';
+  setStatus('asmStatus', '按 ' + want + ' 帧重新抽帧…');
+  try {
+    const r = await fetch('/api/lenti/video/reframe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ hash: v.hash || v.src, frames: want }),
+    });
+    const d = await r.json();
+    if (!d.ok) throw new Error(d.error || '重抽失败');
+    asmLenti.video = {
+      src: d.atlas, hash: d.hash || v.hash, name: d.name || v.name,
+      frames: d.frames, cols: d.atlasCols, rows: d.atlasRows,
+    };
+    asmLentiDraw();
+    setStatus('asmStatus', '已改为 ' + d.frames + ' 帧（' + d.atlasCols + '×' + d.atlasRows + ' 图集）');
+    scheduleAsmPreview(250);
+  } catch (err) {
+    setStatus('asmStatus', '改帧数失败：' + err.message, true);
+    asmLentiVFramesSet(v.frames);   // 回退到实际生效的帧数
+  } finally {
+    btn.disabled = false;
+    btn.textContent = label;
+  }
+});
 asmLentiDraw();
 asmLentiAngleLabel();
+asmLentiVFramesLabel();
 
 quickImport('asmBgUp', 'asmBgFile', 'backgrounds', name => {
   if (!ASSETS.backgrounds.includes(name)) ASSETS.backgrounds.push(name);

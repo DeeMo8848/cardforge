@@ -449,6 +449,9 @@ EFFECT_ENGINE_JS = r"""
       'uniform float uSubject, uOpacity;\n' +
       'uniform vec4 uMeshRect;\n' +
       'uniform vec4 uFaceBox;\n' +
+      // 程序化背景（末地传送门）的函数要放在 uAspect 声明之后 —— GLSL 不允许先用后声明，
+      // 放在 uniform 区最前面会报 "'uAspect' : undeclared identifier"，整层静默不渲染。
+      __FOIL_BG_GLSL__ +
       'uniform vec4 uDistCtl, uDistCtl2, uGlob, uGlob2, uDistTile, uTone, uSheen;\n' +
       'uniform vec4 uSheenA, uSheenB, uSheenC, uSheenD;\n' +
       // uFlowMask 自第二十七轮起不再采样 —— 不声明它，省一个纹理单元（低端 GPU 只有 16 个）
@@ -639,6 +642,8 @@ EFFECT_ENGINE_JS = r"""
       // 会把 col 整个重置成 uMain（第 0 帧），放前面等于没写。
       // 透镜合成写 col（不是 base.rgb）、采样已过流动扰动的 fuv。
       __FOIL_LENTI_FACE__ +
+      // 末地传送门背景：同样必须在背景合成之后（那句会把 col 重置回 uMain）
+      __FOIL_BG_FACE__ +
       '  col = blend(uTex0, uLut, uSlot0, uMove0, uFx0, uCtl0, uF0, uTile0, uPos0, uTint0, uLx0, uBlink0, euv, te, col);\n' +
       '  col = blend(uTex1, uLut, uSlot1, uMove1, uFx1, uCtl1, uF1, uTile1, uPos1, uTint1, uLx1, uBlink1, euv, te, col);\n' +
       '  col = blend(uTex2, uLut, uSlot2, uMove2, uFx2, uCtl2, uF2, uTile2, uPos2, uTint2, uLx2, uBlink2, euv, te, col);\n' +
@@ -783,10 +788,12 @@ EFFECT_ENGINE_JS = r"""
       // 这样特效层算出来的透镜合成与下面卡面网格逐像素一致，不会互相错位。
       if (cm) {
         ['uT0', 'uT1', 'uT2', 'uT3', 'uT4', 'uT5',
+         'uAtlas', 'uAtlasGrid', 'uAtlasSize',
          'uLentiN', 'uLAngle', 'uLLens', 'uLStripe', 'uLSheen', 'uLSheenPow',
          'uLSoft', 'uLJitter', 'uLGyro', 'uLBend', 'uLPhase', 'uLGloss',
          'uAspect'].forEach(function (k) { if (cm[k]) U[k] = cm[k]; });
       }
+      __BG_SHADER_SHARE__
       var mat = new THREE.ShaderMaterial({
         uniforms: U,
         vertexShader: FOIL_VS,
@@ -873,14 +880,19 @@ EFFECT_ENGINE_JS = r"""
 """
 
 
-def _engine_js(foil_lenti_glsl: str = '""', foil_lenti_face: str = '""') -> str:
-    """把特效引擎 JS 里预留的两个光栅占位换成 JS 字符串字面量。
+def _engine_js(foil_lenti_glsl: str = '""', foil_lenti_face: str = '""',
+               foil_bg_glsl: str = '""', foil_bg_face: str = '""',
+               bg_share: str = "") -> str:
+    """把特效引擎 JS 里预留的占位换成 JS 字符串字面量 / 语句。
 
     非光栅页传默认的 `""`（否则占位符原样留在 JS 里 → 整页 SyntaxError）。
     """
     return (EFFECT_ENGINE_JS
             .replace("__FOIL_LENTI_GLSL__", foil_lenti_glsl)
-            .replace("__FOIL_LENTI_FACE__", foil_lenti_face))
+            .replace("__FOIL_LENTI_FACE__", foil_lenti_face)
+            .replace("__FOIL_BG_GLSL__", foil_bg_glsl)
+            .replace("__FOIL_BG_FACE__", foil_bg_face)
+            .replace("__BG_SHADER_SHARE__", bg_share))
 
 
 # 前景组（透明主体）两种渲染顺序：
@@ -1017,6 +1029,7 @@ CARD_HTML_TEMPLATE = r"""<!DOCTYPE html>
       uFaceAspect: { value: 1.0 },
       __FLOW_UNIFORM_VALUES__
       __LENTI_UNIFORM_VALUES__
+      __BG_SHADER_UNIFORM_VALUES__
     },
     vertexShader: `
       varying vec2 vUv;
@@ -1048,7 +1061,7 @@ CARD_HTML_TEMPLATE = r"""<!DOCTYPE html>
       uniform float uFaceContain;
       uniform vec4 uFaceBox;
       uniform float uFaceAspect;
-      __FLOW_GLSL____LENTI_GLSL__
+      __FLOW_GLSL____LENTI_GLSL____BG_SHADER_GLSL__
       varying vec2 vUv;
       varying vec3 vWorldNormal;
       varying vec3 vWorldPosition;
@@ -1106,6 +1119,7 @@ CARD_HTML_TEMPLATE = r"""<!DOCTYPE html>
           }
           __FLOW_WARP__
           base = texture2D(uFrontTexture, flowUv);
+          __BG_SHADER_FACE__
           __LENTI_FACE__
           // 边框内区域蒙版：正面内容仅绘制在边框外围以内（含中空）；卡背不受蒙版限制。
           // 卡面随 content_scale 缩放时（网格在 cardContent 组内），UV 需反算回卡片坐标，
@@ -3737,12 +3751,109 @@ LENTI_DEFAULTS = {
 }
 
 
+def _lenti_glsl_atlas(o: dict) -> str:
+    """图集（sprite sheet）版光栅取图：**1 个采样器装任意帧数**。
+
+    多槽路径的帧数被采样器数量卡在 6（低端 GPU 总共只给 16 个纹理单元），
+    而视频抽帧动辄二三十帧。把 N 帧平铺成一张大图后，取帧变成 uv 偏移，
+    采样器恒定 1 个 —— 帧数上限只受图集尺寸约束（2048² 能装 36 格 256×341）。
+
+    与多槽版语义完全一致：idx 仍是「第几帧」，仍由视角投影决定；
+    多出来的 uAtlasGrid / uAtlasSize 只用于换算格子坐标。
+    """
+    return (
+        "      // ---- 光栅卡（图集模式）uniform ----\n"
+        "      uniform sampler2D uAtlas;\n"
+        "      uniform vec3 uAtlasGrid;    // x=列 y=行 z=帧数\n"
+        "      uniform vec2 uAtlasSize;    // 图集像素尺寸（用于内缩防渗色）\n"
+        "      uniform float uLentiN, uLAngle, uLLens, uLStripe, uLSheen, uLSheenPow;\n"
+        "      uniform float uLSoft, uLJitter, uLGyro, uLBend, uLPhase, uLGloss;\n"
+        "      float lhash11(float p) {\n"
+        "        p = fract(p * 0.1031); p *= p + 33.33; p *= p + p; return fract(p);\n"
+        "      }\n"
+        "      vec3 lentiTex(float idx, vec2 uv) {\n"
+        "        float nf = max(uLentiN, 1.0);\n"
+        "        float k = mod(mod(idx, nf) + nf, nf);   // 负数也要落到 0..nf-1\n"
+        "        float c = mod(k, uAtlasGrid.x);\n"
+        "        float r = floor(k / uAtlasGrid.x + 0.0001);\n"
+        "        vec2 cell = 1.0 / uAtlasGrid.xy;\n"
+        "        // 图集第 0 行在顶部，纹理 v 向上 ⇒ 行号翻转\n"
+        "        vec2 base = vec2(c, uAtlasGrid.y - 1.0 - r) * cell;\n"
+        "        vec2 texel = 1.0 / max(uAtlasSize, vec2(1.0));\n"
+        "        vec2 p = clamp(uv, 0.0, 1.0);\n"
+        "        // 每格四周内缩 1.5 像素：线性过滤在格边会取到邻帧像素，缝会显出来\n"
+        "        vec2 luv = base + texel * 1.5 + p * (cell - texel * 3.0);\n"
+        "        return texture2D(uAtlas, luv).rgb;\n"
+        "      }\n"
+    )
+
+
+def _end_portal_glsl() -> str:
+    """末地传送门式背景：纯程序化星空（0 个额外采样器，只吃一个时间 uniform）。
+
+    为什么用着色器而不是贴图：低端机器 MAX_TEXTURE_IMAGE_UNITS 只有 16，特效层已经
+    13~14 个，再挂一张背景图就没余量了；程序化星空还能任意分辨率、无缝循环、随视角
+    不做接缝。三层星点尺度/速度递变，倾斜时有前后错动（伪视差）。
+    """
+    return (
+        "      // ---- 末地传送门背景（程序化，无贴图）----\n"
+        "      uniform float uEPlOn;\n"
+        "      uniform float uEPlTime;\n"
+        "      float eplH(vec2 p) {\n"
+        "        p = fract(p * vec2(123.34, 456.21));\n"
+        "        p += dot(p, p + 45.32);\n"
+        "        return fract(p.x * p.y);\n"
+        "      }\n"
+        "      float eplN(vec2 p) {\n"
+        "        vec2 i = floor(p), f = fract(p);\n"
+        "        f = f * f * (3.0 - 2.0 * f);\n"
+        "        float a = eplH(i), b = eplH(i + vec2(1.0, 0.0));\n"
+        "        float c = eplH(i + vec2(0.0, 1.0)), d = eplH(i + vec2(1.0, 1.0));\n"
+        "        return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);\n"
+        "      }\n"
+        "      float eplStars(vec2 uv, float t, float sc, float spd, float keep, float sizeK) {\n"
+        "        vec2 g = uv * sc + vec2(t * spd, -t * spd * 0.62);\n"
+        "        vec2 id = floor(g);\n"
+        "        vec2 f = fract(g) - 0.5;\n"
+        "        float h = eplH(id);\n"
+        "        if (h > keep) return 0.0;\n"
+        "        vec2 off = (vec2(eplH(id + 7.1), eplH(id + 3.7)) - 0.5) * 0.72;\n"
+        "        off += vec2(sin(t * spd * 9.0 + h * 41.0),\n"
+        "                    cos(t * spd * 7.0 + h * 23.0)) * 0.30;\n"
+        "        float d = length(f - off);\n"
+        "        float r = mix(0.020, 0.062, eplH(id + 11.3)) * sizeK;\n"
+        "        float core = smoothstep(r, 0.0, d);\n"
+        "        float halo = smoothstep(r * 5.0, 0.0, d) * 0.30;\n"
+        "        float tw = 0.62 + 0.38 * sin(t * (1.1 + h * 2.6) + h * 61.0);\n"
+        "        return (core + halo) * tw;\n"
+        "      }\n"
+        "      vec3 eplPortal(vec2 uv, float t) {\n"
+        "        vec2 c = (uv - 0.5) * vec2(uAspect, 1.0);\n"
+        "        float r2 = length(c);\n"
+        "        vec3 col = mix(vec3(0.105, 0.036, 0.190), vec3(0.022, 0.006, 0.048),\n"
+        "                       smoothstep(0.02, 0.60, r2));\n"
+        "        float n1 = eplN(uv * vec2(2.6, 3.4) + vec2(t * 0.021, -t * 0.014));\n"
+        "        float n2 = eplN(uv * vec2(5.4, 4.2) + vec2(-t * 0.030, t * 0.019));\n"
+        "        float neb = pow(clamp(n1 * 0.65 + n2 * 0.45, 0.0, 1.0), 2.2);\n"
+        "        col += vec3(0.20, 0.075, 0.34) * neb * 0.55;\n"
+        "        col += vec3(0.92, 0.94, 1.00) * eplStars(uv, t, 26.0, 0.026, 0.93, 1.0);\n"
+        "        col += vec3(0.82, 0.88, 1.00) * eplStars(uv + 0.37, t, 13.0, 0.014, 0.86, 1.7);\n"
+        "        col += vec3(1.00, 0.96, 1.00) * eplStars(uv + 0.71, t, 6.5, 0.008, 0.74, 2.4);\n"
+        "        col *= 1.0 - smoothstep(0.30, 0.95, r2) * 0.42;\n"
+        "        return col;\n"
+        "      }\n"
+    )
+
+
 def _lenti_glsl(n: int, o: dict) -> str:
     """光栅卡卡面：uniform 声明 + 按槽位取图。
 
     只声明**实际用到**的帧采样器：低端 GPU 的 MAX_TEXTURE_IMAGE_UNITS 只有 16，
     而特效层本来就要占十几个，固定声明 6 个会把 2 帧的卡顶爆（实测搜狗浏览器）。
+    传了 lenti_opts["atlas"] 时走图集版（1 个采样器，帧数不限）。
     """
+    if o.get("atlas"):
+        return _lenti_glsl_atlas(o)
     nn = max(1, min(int(n or 1), 6))
     decl = ", ".join("uT%d" % i for i in range(nn))
     chain = "".join(
@@ -3828,6 +3939,29 @@ def _lenti_face_frag(n: int, o: dict, target: str = "base.rgb",
 
 def _lenti_load_js(urls, n: int, o: dict) -> str:
     """贴图加载 + uniform 赋值（放在 cardMaterial 定义之后）。"""
+    if o.get("atlas"):
+        cols = max(1, int(o.get("atlasCols") or 1))
+        rows = max(1, int(o.get("atlasRows") or 1))
+        frames = max(2, int(o.get("frames") or 2))
+        # 图集关 mipmap：卡面在屏幕上基本是放大取样，而 mip 会把相邻格混进来（帧缝）
+        return (
+            "  // ---- 光栅卡图集（1 个采样器，任意帧数）----\n"
+            "  (function () {\n"
+            "    cardMaterial.uniforms.uAtlasGrid.value.set(" + str(cols) + ", " + str(rows) + ", " + str(frames) + ");\n"
+            "    cardMaterial.uniforms.uLentiN.value = " + str(float(frames)) + ";\n"
+            "    var t = loader.load(" + _json(o.get("atlas")) + ", function (tt) {\n"
+            "      if ('colorSpace' in tt) tt.colorSpace = THREE.NoColorSpace;\n"
+            "      tt.generateMipmaps = false;\n"
+            "      tt.minFilter = THREE.LinearFilter;\n"
+            "      tt.magFilter = THREE.LinearFilter;\n"
+            "      tt.anisotropy = 8;\n"
+            "      if (tt.image && tt.image.width) {\n"
+            "        cardMaterial.uniforms.uAtlasSize.value.set(tt.image.width, tt.image.height);\n"
+            "      }\n"
+            "    });\n"
+            "    cardMaterial.uniforms.uAtlas.value = t;\n"
+            "  })();\n"
+        )
     return (
         "  // ---- 光栅卡贴图（最多 6 张；空槽绑 1x1 黑图，取样器必须都有值）----\n"
         "  (function () {\n"
@@ -3907,7 +4041,8 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
                     card_width: float = 2.25,
                     three_rel: str = THREE_SRC_REL,
                     lenti_images: list | None = None,
-                    lenti_opts: dict | None = None) -> str:
+                    lenti_opts: dict | None = None,
+                    bg_shader: str | None = None) -> str:
     """生成自包含 3D 卡网页 HTML。
 
     three_rel: three.js 的 script src。默认是"上两级"的 ../../shared/lib/，
@@ -3943,6 +4078,9 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
     主体都能像素级遮盖背景原主体）。
     card_width: 3D 卡体的宽（卡高恒为 3），默认 2.25（3:4）。卡面比例不同
     （如 Rip It! 游戏的 1465×2048 ≈ 5:7 → 2.25）时传入对应值，避免卡面被拉伸。
+    bg_shader: 程序化背景（"end_portal" = 末地传送门式星空）。开启后卡面颜色改由着色器
+    生成（front 贴图不再提供颜色，只保留 alpha），不占任何纹理单元；2D 成品图仍用
+    素材库那张静态 PNG，所以静态/动态观感一致。
     """
     fg_js = (
         # 浮于边框之上：前景组整体提升到边框层之上、卡封之下
@@ -4031,7 +4169,8 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
     frame_fit = bool(frame_fit_subject and not subject_over_frame and text_type != "boxed" and adapt_limit is None)
     # 光栅卡面是整幅插画：不 contain 到边框窗口（否则窗口里会留出一圈透明边），
     # 直接 cover 整卡、由边框内蒙版裁掉边框环 —— 与 2D 的 face_cover 语义一致。
-    _lenti_on = bool([u for u in (lenti_images or []) if u])
+    _lenti_on = (bool([u for u in (lenti_images or []) if u])
+                 or bool((lenti_opts or {}).get("atlas")))
     frame_layer = _frame_layer_js(
         frame_rel, 0.012, 4, frame_fit, None, interior_rel,
         # ① 卡面素材（face_scales）随边框包围盒 fit —— 原有行为，未改
@@ -4157,17 +4296,24 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
         )
     # ---- 光栅卡卡面（可选）----
     _li = [u for u in (lenti_images or []) if u]
-    _ln = min(6, max(1, len(_li))) if _li else 0
-    _lenti_on = bool(_li)
     _lo = dict(LENTI_DEFAULTS)
     _lo.update({k: v for k, v in (lenti_opts or {}).items() if v is not None})
+    _atlas = str(_lo.get("atlas") or "")
+    if _atlas:
+        _ln = max(2, int(_lo.get("frames") or 2))
+    else:
+        _ln = min(6, max(1, len(_li))) if _li else 0
+    _lenti_on = bool(_li or _atlas)
     if _ln:
         lenti_glsl = _lenti_glsl(_ln, _lo)
         lenti_face = _lenti_face_frag(_ln, _lo)
         lenti_load = _lenti_load_js(_li, _ln, _lo)
-        lenti_uniform_values = (
-            "      uT0: { value: null }, uT1: { value: null }, uT2: { value: null },\n"
-            "      uT3: { value: null }, uT4: { value: null }, uT5: { value: null },\n"
+        # 两种模式共用的参数 uniform（取帧方式不同，参数完全一样）
+        # 相位行程：视图倾斜极限约 ±0.7，图集要在这段里走完 N-1 帧 ⇒ (N-1)/1.4；
+        # 多槽保持原公式（2 帧时 = 1.0），不改已存卡的手感。
+        _gyro = (max(1.0, (_ln - 1) * 0.72) if _atlas else max(1, _ln - 1)) \
+            * float(_lo["gain"])
+        _lenti_par = (
             "      uLentiN: { value: " + str(float(_ln)) + " },\n"
             "      uLAngle: { value: " + str(float(_lo["angle"]) * 3.141592653589793 / 180.0) + " },\n"
             "      uLLens: { value: " + str(float(_lo["lens"])) + " },\n"
@@ -4176,11 +4322,26 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
             "      uLSheenPow: { value: " + str(float(_lo["sheenPow"])) + " },\n"
             "      uLSoft: { value: " + str(float(_lo["soft"])) + " },\n"
             "      uLJitter: { value: " + str(float(_lo["jitter"])) + " },\n"
-            "      uLGyro: { value: " + str(max(1, _ln - 1) * float(_lo["gain"])) + " },\n"
+            "      uLGyro: { value: " + str(_gyro) + " },\n"
             "      uLBend: { value: " + str(float(_lo["bend"])) + " },\n"
-            "      uLPhase: { value: 0 },\n"
+            "      uLPhase: { value: " + str(float(_lo.get("phase") or 0.0)) + " },\n"
             "      uLGloss: { value: " + str(float(_lo["gloss"])) + " },\n"
         )
+        if _atlas:
+            # 图集模式：帧数换成 1 个采样器，其余参数照旧
+            lenti_uniform_values = (
+                "      uAtlas: { value: null },\n"
+                "      uAtlasGrid: { value: new THREE.Vector3(1, 1, "
+                + str(float(_ln)) + ") },\n"
+                "      uAtlasSize: { value: new THREE.Vector2(1, 1) },\n"
+                + _lenti_par
+            )
+        else:
+            lenti_uniform_values = (
+                "      uT0: { value: null }, uT1: { value: null }, uT2: { value: null },\n"
+                "      uT3: { value: null }, uT4: { value: null }, uT5: { value: null },\n"
+                + _lenti_par
+            )
         # 特效层（FOIL_FS）里也要做透镜合成：那层是不透明平面、用的是 uMain，
         # 不补这段就会把卡面盖回第 0 帧（光栅看起来「不切换」）。注入成 JS 字面量。
         foil_lenti_glsl = _json(lenti_glsl)
@@ -4192,13 +4353,39 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
         lenti_glsl = lenti_face = lenti_load = lenti_uniform_values = ""
         foil_lenti_glsl = foil_lenti_face = '""'
 
-    engine_js = _engine_js(foil_lenti_glsl, foil_lenti_face)
+    # ---- 程序化背景（末地传送门式星空）----
+    # 只加一个 float uniform，不占纹理单元；主卡面与特效层注入同一段函数，两路一致。
+    if str(bg_shader or "") == "end_portal":
+        bg_sh_glsl = _end_portal_glsl()
+        bg_sh_face = ("          if (uEPlOn > 0.5) { base.rgb = eplPortal(uv, uEPlTime); }\n")
+        bg_sh_uniforms = ("      uEPlOn: { value: 1.0 },\n"
+                          "      uEPlTime: { value: 0.0 },\n")
+        foil_bg_glsl = _json(bg_sh_glsl)
+        # 主体层（foilBuildSubject, uSubject=1）必须跳过：那层只画前景抠图，
+        # 不跳过就会把背景色套在人物轮廓上（人变成一块紫色剪影，星点还压在脸上）。
+        foil_bg_face = _json("  if (uEPlOn > 0.5 && uSubject < 0.5) { "
+                             "col = eplPortal(uv, uEPlTime); }\n")
+        # 特效层与主卡面共享同一个 uniform 对象 ⇒ 时间推进一次即可，不用逐帧同步
+        bg_share = ("      if (cm && cm.uEPlOn) { U.uEPlOn = cm.uEPlOn; "
+                    "U.uEPlTime = cm.uEPlTime; }\n")
+        bg_tick = ("  if (cardMaterial.uniforms.uEPlTime) "
+                   "cardMaterial.uniforms.uEPlTime.value += dt;\n")
+    else:
+        bg_sh_glsl = bg_sh_face = bg_sh_uniforms = ""
+        foil_bg_glsl = foil_bg_face = '""'
+        bg_share = bg_tick = ""
+
+    engine_js = _engine_js(foil_lenti_glsl, foil_lenti_face,
+                           foil_bg_glsl, foil_bg_face, bg_share)
 
     return (
         CARD_HTML_TEMPLATE
         .replace("__THREE_SRC__", three_rel)
         .replace("__LENTI_GLSL__", lenti_glsl)
         .replace("__LENTI_FACE__", lenti_face)
+        .replace("__BG_SHADER_GLSL__", bg_sh_glsl)
+        .replace("__BG_SHADER_FACE__", bg_sh_face)
+        .replace("__BG_SHADER_UNIFORM_VALUES__", bg_sh_uniforms)
         .replace("__LENTI_UNIFORM_VALUES__", lenti_uniform_values)
         .replace("__LENTI_LOAD__", lenti_load)
         .replace("__CARD_WIDTH__", ("%g" % round(card_width, 6)))
@@ -4223,7 +4410,7 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
                  + deco_border_layer + badge_layers
                  + text_layer + smoke_layer + pattern_layer
                  + scale_js + mask_js + offset_js)
-        .replace("__SEAL_TICK__", _SEAL_TICK_JS)
+        .replace("__SEAL_TICK__", _SEAL_TICK_JS + bg_tick)
         .replace("__GLOW_TICK__", _GLOW_TICK_JS)
         .replace("__GLOW_INIT__", _glow_init_js(glow_name, glow_strength, glow_boost))
         .replace("__TEXT_LAYER__", _text_layer_js(description, text_type, text_pos))

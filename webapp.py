@@ -198,6 +198,25 @@ def resolve_asset(atype: str, name: str | None):
     return packs.resolve_asset(atype, name)
 
 
+def _bg_shader_of(p) -> str | None:
+    """背景素材旁的 <同名>.json 若声明了 shader，返回着色器名（如 "end_portal"）。
+
+    这样「程序化背景」是**素材**而不是硬编码卡型：把 PNG + 同名 JSON 丢进
+    assets/backgrounds/ 就能在拼装页背景下拉里选中；3D 页由着色器实时生成，
+    2D 成品图仍用那张 PNG（静态/动态观感一致）。
+    """
+    if not p:
+        return None
+    try:
+        meta = json.loads(Path(p).with_suffix(".json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    if not isinstance(meta, dict):
+        return None
+    name = str(meta.get("shader") or "").strip()
+    return name or None
+
+
 def _remove_builtin_seal(stem: str) -> str | None:
     """同步删除内置卡封：SEAL_EFFECTS 定义（内存 + webcard.py 源文件）与
     _generate_seals.py 的 GENERATORS 条目（防止重新生成复活）。
@@ -1501,6 +1520,8 @@ def _save_assembly(data: dict) -> dict:
     face_used = ""
     face_p = resolve_asset("faces", face_sel)
     bg_p = resolve_asset("backgrounds", custom_bg)
+    # 程序化背景（末地传送门式）：素材旁同名 JSON 声明 shader ⇒ 3D 卡面改由着色器生成
+    bg_shader = _bg_shader_of(bg_p)
     # 背景渲染视图：背景倍率非 1 时按卡牌中心缩放并烘焙成整卡 PNG（深色底避免透明空洞）
     bg_view_p = bg_p
     # 背景素材直接引用素材库（相对路径，file:// 双击也能显示；/assets_abs 只在 HTTP 下有效）
@@ -1746,7 +1767,8 @@ def _save_assembly(data: dict) -> dict:
                                 subject_offset_x=subject_offset_x,
                                 subject_offset_y=subject_offset_y,
                                 lenti_images=lenti_rel,
-                                lenti_opts=lenti_opts),
+                                lenti_opts=lenti_opts,
+                                bg_shader=bg_shader),
         encoding="utf-8",
     )
 
@@ -2687,6 +2709,8 @@ class Handler(BaseHTTPRequestHandler):
             face_floats = face_as_fg or subject_over_frame or text_type == "boxed"
             face_p = resolve_asset("faces", face_sel)
             bg_p = resolve_asset("backgrounds", custom_bg)
+            # 程序化背景（末地传送门式）：素材旁同名 JSON 声明 shader，3D 卡面改由着色器生成
+            bg_shader = _bg_shader_of(bg_p)
             # 背景渲染视图：背景倍率非 1 时按卡牌中心缩放并烘焙成整卡 PNG（深色底避免透明空洞）
             bg_view_url = f"/assets_abs/backgrounds/{custom_bg}" if bg_p else None
             bg_view_p = bg_p
@@ -2873,6 +2897,7 @@ class Handler(BaseHTTPRequestHandler):
                                 detail_rel=detail_url,
                                 lenti_images=lenti_urls,
                                 lenti_opts=_lenti_opts_of(data),
+                                bg_shader=bg_shader,
                                 # 预览页写在 assets/output/_preview/<token>/，比卡目录深一层，
                                 # "../../shared/lib/" 会解析成 /preview/shared/... 而 404；
                                 # 预览页只在 http 下打开，直接用 /shared/ 路由的绝对路径。

@@ -7,7 +7,7 @@
   "source": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\描边测试\\source.png",
   "front": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\backgrounds\\sample-1.png",
   "foreground": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\output\\描边测试\\foreground.png",
-  "back": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\backgrounds\\sample-1.png",
+  "back": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\backs\\sample-1.png",
   "layers": {
     "background": "D:\\略夹\\ai\\ai工具\\cardforge\\assets\\backgrounds\\sample-1.png",
     "face": null,

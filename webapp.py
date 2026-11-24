@@ -1035,13 +1035,21 @@ def _even_idx(total: int, want: int) -> list[int]:
                    for i in range(want)})
 
 
-def _cover_to(im, w: int, h: int):
-    """等比铺满 + 居中裁剪（不拉伸）。"""
+def _cover_to(im, w: int, h: int, keep_alpha: bool = False):
+    """等比铺满 + 居中裁剪（不拉伸）。
+
+    keep_alpha=True 时保留透明通道（透明 GIF / 带 alpha 的 WebP）——光栅卡要靠这个
+    alpha 叠到背景着色器上，否则透明区域会被填成黑色把背景整片盖住。
+    """
     from PIL import Image
-    im = im.convert("RGB") if im.mode not in ("RGB", "L") else im
+    if keep_alpha:
+        im = im.convert("RGBA")
+    else:
+        im = im.convert("RGB") if im.mode not in ("RGB", "L") else im
     sw, sh = im.size
     if sw <= 0 or sh <= 0:
-        return Image.new("RGB", (w, h), (0, 0, 0))
+        return Image.new("RGBA" if keep_alpha else "RGB", (w, h),
+                         (0, 0, 0, 0) if keep_alpha else (0, 0, 0))
     k = max(w / sw, h / sh)
     nw, nh = max(w, int(round(sw * k))), max(h, int(round(sh * k)))
     im = im.resize((nw, nh))
@@ -1049,18 +1057,45 @@ def _cover_to(im, w: int, h: int):
     return im.crop((x, y, x + w, y + h))
 
 
+def _gif_clear_black_bg(im):
+    """修 disposal=2 的透明 GIF：Pillow 合成时会用**不透明黑**填充「恢复背景」的区域，
+    于是抽出来的帧带大片黑块（透明 GIF 叠背景时就是三道黑缝）。
+
+    只在黑块占比 > 5% 时才做色键，避免误伤本来就有黑底/黑发的素材。
+    """
+    try:
+        import numpy as np
+        from PIL import Image
+        a = np.asarray(im).copy()
+        dark = (a[..., 3] > 200) & (a[..., :3].max(axis=2) < 6)
+        if dark.mean() < 0.05:
+            return im
+        a[dark] = (0, 0, 0, 0)
+        return Image.fromarray(a)
+    except Exception:  # noqa: BLE001
+        return im
+
+
 def _video_frames(src: Path, want: int):
-    """均匀抽帧，返回原始分辨率的 PIL 图列表（GIF/动画 WebP 走 PIL，视频走 cv2）。"""
+    """均匀抽帧，返回原始分辨率的 PIL 图列表（GIF/动画 WebP 走 PIL，视频走 cv2）。
+
+    ★ GIF / 动画 WebP 必须按 RGBA 抽：透明底的 GIF 是「主体贴片」用法，
+      一旦 convert("RGB") 透明区域就变黑，卡面会整片盖住背景着色器。
+    """
     from PIL import Image
     ext = src.suffix.lower()
     if ext in (".gif", ".webp", ".apng", ".png"):
-        from PIL import ImageSequence
         with Image.open(src) as im:
             total = int(getattr(im, "n_frames", 1) or 1)
+            alpha = (im.mode in ("RGBA", "LA", "PA", "P")
+                     or "transparency" in im.info)
             out = []
             for i in _even_idx(total, want):
                 im.seek(i)
-                out.append(im.convert("RGB").copy())
+                fr = im.convert("RGBA" if alpha else "RGB")
+                if alpha:
+                    fr = _gif_clear_black_bg(fr)
+                out.append(fr.copy())
             return out
     try:
         import cv2
@@ -1109,6 +1144,7 @@ def _lenti_vresult(key: str, md5: str, safe: str) -> dict:
             "atlasCols": int(meta.get("cols") or 1),
             "atlasRows": int(meta.get("rows") or 1),
             "want": int(meta.get("want") or meta.get("frames") or 2),
+            "alpha": bool(meta.get("alpha")),
             "name": meta.get("name") or safe}
 
 
@@ -1130,16 +1166,33 @@ def _build_lenti_atlas(src: Path, key: str, want: int, safe: str) -> None:
         cols, rows = _lenti_vgrid(n)
         cw = LENTI_VIDEO_CELL_W
         ch = max(2, int(round(cw / LENTI_ASPECT)))
-        atlas = _I.new("RGB", (cols * cw, rows * ch), (0, 0, 0))
+        # 有透明像素就走 RGBA 图集：shader 用 alpha 把帧叠在背景上（透明处露背景），
+        # 全不透明的视频仍存 RGB，体积小 1/3。
+        has_a = False
+        for f in frames:
+            if f.mode == "RGBA":
+                try:
+                    if f.getchannel("A").getextrema()[0] < 250:
+                        has_a = True
+                        break
+                except (OSError, ValueError):
+                    pass
+        cell = _cover_to(frames[0], cw, ch, keep_alpha=has_a)
+        atlas = _I.new(cell.mode, (cols * cw, rows * ch),
+                       (0, 0, 0, 0) if has_a else (0, 0, 0))
         for i, f in enumerate(frames):
-            atlas.paste(_cover_to(f, cw, ch), ((i % cols) * cw, (i // cols) * ch))
-        atlas.save(work / "atlas.webp", "WEBP", quality=86, method=4)
+            atlas.paste(_cover_to(f, cw, ch, keep_alpha=has_a),
+                        ((i % cols) * cw, (i // cols) * ch))
+        atlas.save(work / "atlas.webp", "WEBP", quality=86, method=4,
+                   **({"alpha_quality": 100} if has_a else {}))
         fw = 900
-        _cover_to(frames[0], fw, max(2, int(round(fw / LENTI_ASPECT)))).save(
-            work / "frame0.webp", "WEBP", quality=92, method=4)
+        _cover_to(frames[0], fw, max(2, int(round(fw / LENTI_ASPECT))),
+                  keep_alpha=has_a).save(
+            work / "frame0.webp", "WEBP", quality=92, method=4,
+            **({"alpha_quality": 100} if has_a else {}))
         (work / "info.json").write_text(json.dumps(
             {"name": safe, "frames": n, "want": want, "cols": cols, "rows": rows,
-             "cell": [cw, ch]}, ensure_ascii=False), encoding="utf-8")
+             "alpha": has_a, "cell": [cw, ch]}, ensure_ascii=False), encoding="utf-8")
         if d.exists():
             shutil.rmtree(d, ignore_errors=True)
         work.rename(d)
@@ -1211,25 +1264,79 @@ def _lenti_o(data: dict) -> dict:
 
 
 def _lenti_atlas_of(data: dict):
-    """视频/GIF 光栅卡：lenti.atlas = "lvid:<hash>" ⇒ 图集/首帧的本地路径。"""
+    """视频/GIF 光栅卡：找到图集与首帧的实际文件。
+
+    两种来源：
+      lenti.atlas = "lvid:<key>"      → 抽帧缓存 assets/lenticular/_video/<key>/
+      lenti.atlas = "lenti/atlas.webp"→ 卡目录自持（批量脚本出的卡 / 旧卡，没有 atlas_src）
+    后者要靠 data["card"] 定位卡目录；两处都没有就返回 None（当普通卡处理）。
+    """
     o = _lenti_o(data)
-    spec = str(o.get("atlas") or "")
-    if not spec.startswith("lvid:"):
-        return None
-    key = _safe_name(spec.split(":", 1)[1])
-    d = LENTI_VIDEO_DIR / key
-    if not (d / "atlas.webp").is_file():
-        return None
-    frame0 = d / "frame0.webp"
-    if not frame0.is_file():
-        frame0 = d / "atlas.webp"
-    return {"dir": d, "atlas": d / "atlas.webp", "frame0": frame0,
-            "frames": int(o.get("frames") or 2),
-            "cols": int(o.get("atlasCols") or 1),
-            "rows": int(o.get("atlasRows") or 1),
-            "name": str(o.get("vname") or ""),
-            "atlas_url": "/lenti/_video/" + key + "/atlas.webp",
-            "front_url": "/lenti/_video/" + key + "/frame0.webp"}
+    spec = str(o.get("atlas") or "").strip()
+    frames = int(o.get("frames") or 0) or 2
+    cols = int(o.get("atlasCols") or 0) or 1
+    rows = int(o.get("atlasRows") or 0) or 1
+    if spec.startswith("lvid:"):
+        key = _safe_name(spec.split(":", 1)[1])
+        d = LENTI_VIDEO_DIR / key
+        if not (d / "atlas.webp").is_file():
+            return None
+        frame0 = d / "frame0.webp"
+        if not frame0.is_file():
+            frame0 = d / "atlas.webp"
+        try:
+            meta = json.loads((d / "info.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            meta = {}
+        return {"dir": d, "atlas": d / "atlas.webp", "frame0": frame0,
+                "frames": int(meta.get("frames") or frames),
+                "cols": int(meta.get("cols") or cols),
+                "rows": int(meta.get("rows") or rows),
+                "alpha": bool(meta.get("alpha")),
+                "name": str(o.get("vname") or ""),
+                "atlas_url": "/lenti/_video/" + key + "/atlas.webp",
+                "front_url": "/lenti/_video/" + key + "/frame0.webp"}
+    if spec.startswith("lenti/"):
+        card = str(data.get("card") or "").strip()
+        if not card or "/" in card or "\\" in card or card in (".", ".."):
+            return None
+        d = ASSETS / "output" / card / "lenti"
+        atlas = d / "atlas.webp"
+        if not atlas.is_file():
+            return None
+        frame0 = d / "f00.webp"
+        if not frame0.is_file():
+            # 老卡（批量脚本出的）只存了图集：先从图集左上角裁一格当首帧，落地缓存
+            frame0 = _atlas_first_cell(atlas, cols, rows, d / "f00.webp")
+        try:
+            meta = json.loads((d / "info.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            meta = {}
+        return {"dir": d, "atlas": atlas, "frame0": frame0,
+                "frames": int(meta.get("frames") or frames),
+                "cols": int(meta.get("cols") or cols),
+                "rows": int(meta.get("rows") or rows),
+                "alpha": bool(meta.get("alpha")),
+                "name": str(o.get("vname") or card),
+                "atlas_url": f"/preview/{card}/lenti/atlas.webp",
+                "front_url": (f"/preview/{card}/lenti/f00.webp"
+                              if (d / "f00.webp").is_file() else f"/preview/{card}/lenti/atlas.webp")}
+    return None
+
+
+def _atlas_first_cell(atlas: Path, cols: int, rows: int, dst: Path) -> Path:
+    """从图集裁出第 0 格（左上）当首帧；失败就退回整张图集。"""
+    try:
+        from PIL import Image
+        cols = max(1, int(cols))
+        rows = max(1, int(rows))
+        with Image.open(atlas) as im:
+            cw = im.width // cols
+            ch = im.height // rows
+            im.crop((0, 0, cw, ch)).save(dst, "WEBP", quality=92, method=4)
+        return dst
+    except Exception:  # noqa: BLE001
+        return atlas
 
 
 def _card_front_path(card_sel: str):
@@ -1806,11 +1913,24 @@ def _save_assembly(data: dict) -> dict:
     lenti_video = _lenti_atlas_of(data)
     _lsrc = [] if lenti_video else lenti_src_list(data)
     if lenti_video:
-        # 视频/GIF：图集 + 首帧拷进卡目录（自包含），card.html 用相对路径引用
+        # 视频/GIF：图集 + 首帧拷进卡目录（自包含），card.html 用相对路径引用。
+        # ★ 源可能就是这张卡自己的 lenti/（重开旧卡再保存）⇒ 同路径不能 copyfile（会抛
+        #   SameFileError），必须比 resolve 后跳过。
         _ldst = out / "lenti"
         _ldst.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(lenti_video["atlas"], _ldst / "atlas.webp")
-        shutil.copyfile(lenti_video["frame0"], _ldst / "f00.webp")
+        _asrc = Path(lenti_video["atlas"]).resolve()
+        _adst = (_ldst / "atlas.webp").resolve()
+        if _asrc != _adst:
+            shutil.copyfile(_asrc, _adst)
+        _fsrc = Path(lenti_video["frame0"]).resolve()
+        _fdst = (_ldst / "f00.webp").resolve()
+        if _fsrc != _fdst:
+            shutil.copyfile(_fsrc, _fdst)
+        # info.json 让这张卡以后被「读取」时能复原帧数/行列/透明标记
+        (_ldst / "info.json").write_text(json.dumps(
+            {"name": lenti_video.get("name") or "", "frames": lenti_video["frames"],
+             "cols": lenti_video["cols"], "rows": lenti_video["rows"],
+             "alpha": bool(lenti_video.get("alpha"))}, ensure_ascii=False), encoding="utf-8")
         lenti_rel = ["lenti/f00.webp"]
         front_rel, front_path = lenti_rel[0], _ldst / "f00.webp"
         lenti_opts.update({"atlas": "lenti/atlas.webp", "frames": lenti_video["frames"],
@@ -2082,9 +2202,14 @@ def _save_assembly(data: dict) -> dict:
             "effects": [{"name": e["name"], "pos": e["pos"]} for e in effect_instances],
             # 光栅卡：存的是原始图源 spec + 参数（重开时按源图重新规范化，不依赖临时文件）
             "lenti": (
-                {"atlas": "lenti/atlas.webp", "atlas_src": "lvid:" + lenti_video["dir"].name,
+                {"atlas": "lenti/atlas.webp",
+                 # atlas_src 只给「抽帧缓存」来源：它能支撑改帧数重抽。
+                 # 源本身就是这张卡的 lenti/ 时不能写（否则重开会把 "lenti" 当缓存 key）。
+                 **({"atlas_src": "lvid:" + lenti_video["dir"].name}
+                    if lenti_video["dir"].parent == LENTI_VIDEO_DIR else {}),
                  "frames": lenti_video["frames"], "atlasCols": lenti_video["cols"],
                  "atlasRows": lenti_video["rows"], "video_name": lenti_video["name"],
+                 "alpha": bool(lenti_video.get("alpha")),
                  "opts": lenti_opts}
                 if lenti_video else
                 {"images": lenti_specs, "opts": lenti_opts} if lenti_rel else None),
@@ -5301,12 +5426,25 @@ function asmLentiVFramesLabel() {
   el.textContent = cols + '×' + Math.max(1, Math.ceil(n / cols));
   el.title = '图集格子数（只占 1 个纹理单元）';
 }
+// 没有源视频缓存（旧卡/脚本出的卡只有卡内图集）时锁住帧数下拉：
+// 改帧数要回源重抽，这种卡做不到，留着可点会让人以为能改。
+function asmLentiVFramesLock(locked) {
+  if (!asmLentiVFramesEl) return;
+  asmLentiVFramesEl.disabled = !!locked;
+  asmLentiVFramesEl.title = locked ? '这张卡只存了图集，没有源视频可重抽；想换帧数请重新上传' : '';
+  const v = document.getElementById('asmLentiVFramesV');
+  if (v) v.style.opacity = locked ? '0.4' : '';
+}
 function asmLentiDraw() {
   if (asmLenti.video) {
     const v = asmLenti.video;
+    const tags = [];
+    if (v.alpha) tags.push('透明');
+    if (!v.hash) tags.push('卡内图集');
     asmLentiChips.innerHTML =
       '<span class="lc"><span>🎬 ' + (v.name || '视频') + ' · ' + v.frames + ' 帧（' +
-      v.cols + '×' + v.rows + ' 图集）</span><b id="asmLentiVideoDel" title="移除视频">×</b></span>';
+      v.cols + '×' + v.rows + ' 图集' + (tags.length ? ' · ' + tags.join(' · ') : '') +
+      '）</span><b id="asmLentiVideoDel" title="移除视频">×</b></span>';
     return;
   }
   if (!asmLenti.list.length) {
@@ -5357,11 +5495,15 @@ function asmLentiFadeSync() {
     jit.title = jit.disabled ? '整幅换帧时全卡同步，错位无效' : '';
   }
 }
-function asmLentiReset(lc) {
+function asmLentiReset(lc, cardId) {
   lc = lc || {};
   asmLenti.list.length = 0;
   (Array.isArray(lc.images) ? lc.images : []).slice(0, 6).forEach((sp) => asmLenti.list.push(sp));
-  // 视频/GIF 卡：atlas_src 指向抽帧缓存（_video/<key>），能复原就还原成「视频卡」状态
+  // 视频/GIF 卡有两种来历，都要能复原成「视频卡」状态：
+  //   1) atlas_src = "lvid:<md5>-f<N>" —— 抽帧缓存还在，改帧数也能重抽
+  //   2) 只有 atlas = "lenti/atlas.webp" —— 批量脚本出的卡/旧卡，图集就在卡目录里，
+  //      没有源视频可重抽（hash 置空，帧数下拉改成只读提示）
+  const fromCard = !lc.atlas_src && String(lc.atlas || '').startsWith('lenti/');
   asmLenti.video = lc.atlas_src ? {
     src: lc.atlas_src,
     // key 形如 "<md5>-f24"：拆出纯哈希，之后改帧数只要传 hash 不用重传视频
@@ -5370,7 +5512,14 @@ function asmLentiReset(lc) {
     frames: lc.frames || 24,
     cols: lc.atlasCols || 5,
     rows: lc.atlasRows || 5,
-  } : null;
+    alpha: !!lc.alpha,
+  } : (fromCard ? {
+    src: lc.atlas, hash: '', name: lc.video_name || cardId || '卡内图集',
+    // 脚本出的卡写的是 cols/rows，拼装页存的是 atlasCols/atlasRows —— 两种都认
+    frames: lc.frames || 24,
+    cols: lc.atlasCols || lc.cols || 5, rows: lc.atlasRows || lc.rows || 5,
+    alpha: !!lc.alpha,
+  } : null);
   if (asmLenti.video) {
     asmLenti.list.length = 0;
     asmLentiVFramesSet(asmLenti.video.frames);
@@ -5386,6 +5535,7 @@ function asmLentiReset(lc) {
       if (el && o[k] !== undefined && o[k] !== null && o[k] !== '') el.value = o[k];
     });
   }
+  asmLentiVFramesLock(!!asmLenti.video && !asmLenti.video.hash);
   asmLentiAngleLabel();
   asmLentiFadeSync();
   asmLentiDraw();
@@ -5498,7 +5648,9 @@ document.getElementById('asmLentiVideoFile').addEventListener('change', async (e
     asmLenti.video = {
       src: d.atlas, hash: d.hash || '', name: d.name,
       frames: d.frames, cols: d.atlasCols, rows: d.atlasRows,
+      alpha: !!d.alpha,
     };
+    asmLentiVFramesLock(false);
     asmLentiEl.checked = true;
     asmLentiBox.hidden = false;
     // 视频天然是「整幅换帧」，默认切到整幅柔和过渡（想要绝对干净可改直接切换）；
@@ -5515,7 +5667,7 @@ document.getElementById('asmLentiVideoFile').addEventListener('change', async (e
     asmLentiFadeSync();
     asmLentiDraw();
     setStatus('asmStatus', '已抽 ' + d.frames + ' 帧（' + d.atlasCols + '×' + d.atlasRows +
-              ' 图集）：倾斜或拖动卡牌即换帧');
+              ' 图集' + (d.alpha ? '，保留透明' : '') + '）：倾斜或拖动卡牌即换帧');
     scheduleAsmPreview(250);
   } catch (err) {
     setStatus('asmStatus', '视频处理失败：' + err.message, true);
@@ -5530,6 +5682,12 @@ asmLentiVFramesEl.addEventListener('change', async () => {
   const v = asmLenti.video;
   const want = asmLentiVFramesVal();
   if (!v || v.frames === want) return;
+  if (!v.hash) {
+    // 卡内图集（旧卡/脚本出的卡）没有源视频，重抽不了
+    setStatus('asmStatus', '这张卡只存了图集、没有源视频，改不了帧数；想换请重新上传一次', true);
+    asmLentiVFramesSet(v.frames);
+    return;
+  }
   const btn = document.getElementById('asmLentiVideoUp');
   const label = btn.textContent;
   btn.disabled = true;
@@ -5546,6 +5704,7 @@ asmLentiVFramesEl.addEventListener('change', async () => {
     asmLenti.video = {
       src: d.atlas, hash: d.hash || v.hash, name: d.name || v.name,
       frames: d.frames, cols: d.atlasCols, rows: d.atlasRows,
+      alpha: !!d.alpha,
     };
     asmLentiDraw();
     setStatus('asmStatus', '已改为 ' + d.frames + ' 帧（' + d.atlasCols + '×' + d.atlasRows + ' 图集）');
@@ -5655,7 +5814,7 @@ asmCardSel.addEventListener('change', () => {
     if (card.back && [...backSel.options].some(o => o.value === card.back)) backSel.value = card.back;
     // 光栅卡：这张卡是光栅卡就把图源与参数一起回填（不是就清空）
     const lc = card.lenti || null;
-    asmLentiReset(lc);
+    asmLentiReset(lc, card.id);
     if (typeof card.seal_strength_front === 'number' && isFinite(card.seal_strength_front)) document.getElementById('asmSealFront').value = card.seal_strength_front;
     if (typeof card.seal_strength_back === 'number' && isFinite(card.seal_strength_back)) document.getElementById('asmSealBack').value = card.seal_strength_back;
     if (typeof card.seal_frame_strength_front === 'number' && isFinite(card.seal_frame_strength_front)) document.getElementById('asmSealFrameFront').value = card.seal_frame_strength_front;

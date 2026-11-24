@@ -3780,7 +3780,8 @@ def _lenti_glsl_atlas(o: dict) -> str:
         "      float lhash11(float p) {\n"
         "        p = fract(p * 0.1031); p *= p + 33.33; p *= p + p; return fract(p);\n"
         "      }\n"
-        "      vec3 lentiTex(float idx, vec2 uv) {\n"
+        "      // 返回 vec4：视频/GIF 可能是透明底（主体贴片），alpha 用来把帧叠到背景上\n"
+        "      vec4 lentiTex(float idx, vec2 uv) {\n"
         "        float nf = max(uLentiN, 1.0);\n"
         "        float k = mod(mod(idx, nf) + nf, nf);   // 负数也要落到 0..nf-1\n"
         "        float c = mod(k, uAtlasGrid.x);\n"
@@ -3792,7 +3793,7 @@ def _lenti_glsl_atlas(o: dict) -> str:
         "        vec2 p = clamp(uv, 0.0, 1.0);\n"
         "        // 每格四周内缩 1.5 像素：线性过滤在格边会取到邻帧像素，缝会显出来\n"
         "        vec2 luv = base + texel * 1.5 + p * (cell - texel * 3.0);\n"
-        "        return texture2D(uAtlas, luv).rgb;\n"
+        "        return texture2D(uAtlas, luv);\n"
         "      }\n"
     )
 
@@ -3921,7 +3922,7 @@ def _lenti_glsl(n: int, o: dict) -> str:
     nn = max(1, min(int(n or 1), 6))
     decl = ", ".join("uT%d" % i for i in range(nn))
     chain = "".join(
-        "        if (k < %.1f) return texture2D(uT%d, uv).rgb;\n" % (i + 0.5, i)
+        "        if (k < %.1f) return texture2D(uT%d, uv);\n" % (i + 0.5, i)
         for i in range(nn - 1)
     )
     return (
@@ -3934,10 +3935,10 @@ def _lenti_glsl(n: int, o: dict) -> str:
         "      float lhash11(float p) {\n"
         "        p = fract(p * 0.1031); p *= p + 33.33; p *= p + p; return fract(p);\n"
         "      }\n"
-        "      vec3 lentiTex(float idx, vec2 uv) {\n"
+        "      vec4 lentiTex(float idx, vec2 uv) {\n"
         "        float k = mod(idx, max(uLentiN, 1.0));\n"
         + chain +
-        "        return texture2D(uT" + str(nn - 1) + ", uv).rgb;\n"
+        "        return texture2D(uT" + str(nn - 1) + ", uv);\n"
         "      }\n"
     )
 
@@ -3956,7 +3957,7 @@ def _lenti_face_frag(n: int, o: dict, target: str = "base.rgb",
       cut    = 同上但在半程硬切，整幅直接换图、绝无双影
     """
     write = ("            " + (("if (" + guard + ") ") if guard else "")
-             + target + " = clamp(lcol, 0.0, 1.0);\n")
+             + target + " = mix(" + target + ", clamp(lcol, 0.0, 1.0), lal);\n")
     fade = str(o.get("fade") or "stripe").strip().lower()
     if fade == "cut":
         # 整幅硬切：相位必须全卡同一个值。
@@ -4006,9 +4007,13 @@ def _lenti_face_frag(n: int, o: dict, target: str = "base.rgb",
         "            vec3 axPw = normalize(vWorldXAxis * axP.x + vWorldYAxis * axP.y);\n"
         "            vec3 axLw = normalize(vWorldXAxis * axL.x + vWorldYAxis * axL.y);\n"
         + phase +
-        "            vec3 lc0 = lentiTex(i0, " + uv_var + ");\n"
-        "            vec3 lc1 = lentiTex(i0 + 1.0, " + uv_var + ");\n"
-        "            vec3 lcol = mix(lc0, lc1, wf);\n"
+        "            vec4 lc0 = lentiTex(i0, " + uv_var + ");\n"
+        "            vec4 lc1 = lentiTex(i0 + 1.0, " + uv_var + ");\n"
+        "            // ★ 预乘 alpha 再插值：透明帧的 rgb 在 WebP/GIF 里是黑的，直接 mix(rgb)\n"
+        "            //   会在两帧过渡区把画面拉成黑块（透明 GIF + 背景时肉眼可见三条黑缝）。\n"
+        "            vec4 lcp = mix(lc0 * lc0.a, lc1 * lc1.a, wf);\n"
+        "            float lal = clamp(mix(lc0.a, lc1.a, wf), 0.0, 1.0);\n"
+        "            vec3 lcol = lcp.rgb / max(lcp.a, 1e-4);\n"
         "            // 棱纹（AA 后过密退化成平场，避免摩尔纹反噬）\n"
         "            float laa = clamp(fwidth(lx) * 0.70, 0.0, 1.0);\n"
         "            float lline = 0.5 + 0.5 * cos(6.28318530718 * lsub);\n"
@@ -4477,7 +4482,13 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
     # "end_portal" 是旧卡片的兼容别名（那时这个素材还叫末地传送门）。
     if str(bg_shader or "") in ("void", "end_portal"):
         bg_sh_glsl = _void_space_glsl()
-        bg_sh_face = ("          if (uVoidOn > 0.5) { base.rgb = vpSpace(uv, uVoidTime); }\n")
+        # 卡面带 alpha（透明 GIF 当主体）时：先把帧叠在星空上，再把 alpha 抬到 1。
+        # 不做这一步的话，透明区域会连背景一起透掉 ⇒ 整张卡开洞（用户报过：选了背景却看不到）。
+        bg_sh_face = ("          if (uVoidOn > 0.5) {\n"
+                      "            vec3 vbc = vpSpace(uv, uVoidTime);\n"
+                      "            base.rgb = mix(vbc, base.rgb, base.a);\n"
+                      "            base.a = 1.0;\n"
+                      "          }\n")
         bg_sh_uniforms = ("      uVoidOn: { value: 1.0 },\n"
                           "      uVoidTime: { value: 0.0 },\n"
                           "      uVoidPar: { value: 1.0 },\n"

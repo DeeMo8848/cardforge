@@ -318,6 +318,43 @@ build_card_html(..., lenti_opts={
   倾斜 GIF），与新加的 UI 入口共用同一套图集参数
 - 收集册卡片定义里 `engine: "video-lenti"`，`_regen_cards.py` 会跳过（它只认普通 front 路径）
 
+**透明 GIF / 动画 WebP → 主体贴片（可以叠背景）**
+
+透明底的 GIF/WebP 不只是「换帧」，它同时是**主体层**：alpha 决定帧覆盖背景的程度，
+所以配「虚空」这类程序化背景时，透明处直接露出星空（就是「虚空·精灵」那种观感），
+不用再抠图。
+
+- 抽帧就按 RGBA 抽（`_video_frames`），图集存 **RGBA WebP**（`alpha_quality=100`），
+  `info.json` 记 `alpha: true`；全不透明的视频仍存 RGB（体积小 1/3）
+- shader 侧 `lentiTex()` 返回 **vec4**，合成 `target = mix(target, lcol.rgb, lcol.a)`；
+  不透明时 alpha=1，等价于直接替换（老卡行为不变）
+- ★ **两帧之间必须预乘 alpha 再插值**：`mix(c0*c0.a, c1*c1.a, wf)` 之后除回 alpha。
+  直接 `mix(rgb)` 会把透明帧的黑 rgb 混进过渡区，出现**纯黑竖块**（实测过）
+- ★ 背景着色器改成 `base.rgb = mix(星空, base.rgb, base.a); base.a = 1.0;` ——
+  只铺 rgb 不动 alpha 的话，透明卡面会连背景一起透掉（整张卡开洞）
+- ★★ **disposal=2 的 GIF 有坑**：Pillow 合成时用**不透明黑**填「恢复背景」的区域，
+  抽出来的帧带大片黑块。`_gif_clear_black_bg()` 在黑块 > 5% 时做色键（只清纯黑），
+  阈值用来避免误伤黑底/黑发素材。验证脚本 `工作间/cardrip/_chk_alpha.py`
+  （含「怎么造一张真透明 GIF」——RGBA→P 直接 quantize 会把 alpha 丢掉，白测一轮）
+- alpha 场景建议 `fade: "cut"`：柔和过渡时两个姿势会同时出现
+
+**重开成品卡也能继续编辑（卡内图集）**
+
+`lenti.atlas` 有两种来源，`_lenti_atlas_of()` 都认：
+
+| `atlas` | 含义 | 改帧数 |
+|---|---|---|
+| `lvid:<md5>-f<N>` | 抽帧缓存，源视频还在 | 能（回源重抽） |
+| `lenti/atlas.webp` | 图集就在卡目录里（批量脚本出的卡 / 旧卡） | 不能（下拉自动置灰） |
+
+- 后者靠 `data["card"]` 定位卡目录；没有 `f00.webp` 时用 `_atlas_first_cell()`
+  从图集左上角裁一格当首帧
+- ★ 保存时源可能**就是这张卡自己的** `lenti/`（重开再存）⇒ `copyfile` 前要比
+  `resolve()`，否则抛 `SameFileError`
+- ★ `cards/<id>.json` 的 `atlas_src` **只在缓存来源时写**，否则下次重开会把 `"lenti"`
+  当成缓存 key
+- 卡目录会多一份 `lenti/info.json`（frames/cols/rows/alpha），重开时就靠它复原
+
 ## 程序化背景（虚空）
 
 `assets/backgrounds/虚空.png` + 同名 `.json`：
@@ -569,3 +606,9 @@ sakura-pack/
 > `tex` 全是裸名（`tx_foil_smoke`），相对卡目录 404 ⇒ **特效整层静默不渲染**：卡面正常、
 > 完全不动、控制台一堆 404，特别难认出是路径问题。2026-11-23 就因为这个把疾风之箭 /
 > 雪华 / sekka-base 弄哑过一次。
+>
+> ★★ **手写脚本别自己拼 `../../`**：`card.html` 在 `assets/output/<id>/`，到项目根是
+> **三层**（`../../../`）。写成两层会变成 `/assets/assets/...`、`/assets/fx2/...`（多一层
+> `assets/`），同样是 404 + 特效静默不渲染。优先用 `cardforge.lib_ref(src, out_dir)`
+> 算，别硬编码 —— `_mk_video_cards.py` / `_mk_portal_demo.py` 都在这里踩过。
+> 自查：`grep -o "\\.\\./[^\"]*fx2" assets/output/*/card.html`，出现 `../../fx2` 就是错的。

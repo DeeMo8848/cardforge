@@ -1740,7 +1740,9 @@ def build_page() -> str:
     packs_json = json.dumps(_packs_for_ui(), ensure_ascii=False)
     models_json = json.dumps(model_options, ensure_ascii=False)
     effects_json = json.dumps(list_effects(), ensure_ascii=False)
-    cards_json = json.dumps(list_cards(), ensure_ascii=False)
+    # 拼装页成品下拉只列收集册可见的卡（assets/output）。异兽牌那 1800 版住在
+    # assets/ripit，按约定只在「图鉴」里展示，不进成品选择 —— 否则下拉被上千项冲垮。
+    cards_json = json.dumps(album_cards(), ensure_ascii=False)
     return (
         PAGE_HTML
         .replace("__ASSETS_JSON__", assets_json)
@@ -2831,7 +2833,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/cards":
             # scope=album：只返回收集册可见的卡（assets/output）。
-            # 收集册页面用这个；主编辑器仍要不带 scope 的全量（含异兽牌，便于打开编辑）。
+            # ★ 拼装页成品下拉也吃这个 scope：异兽牌（assets/ripit，1800 版）按约定
+            #   只进图鉴，不进成品选择。需要全量（含异兽牌）的脚本自己不带 scope。
             _q = self.path.split("?", 1)[1] if "?" in self.path else ""
             _album_only = any(kv == "scope=album" for kv in _q.split("&"))
             self._send_json({"ok": True,
@@ -4806,7 +4809,7 @@ function showResult(d) {
 // 生成结果 → 拼装页：刷新卡片列表（新生成的卡进下拉），选中并触发加载配置
 function openInAssembly(id) {
   setStatus('asmStatus', '⏳ 正在载入拼装页…');
-  fetch('/api/cards').then(r => r.json()).then(dc => {
+  fetch('/api/cards?scope=album').then(r => r.json()).then(dc => {
     if (!dc.ok) throw new Error(dc.error || '刷新卡片列表失败');
     CARDS.length = 0;
     CARDS.push(...(dc.cards || []));
@@ -6227,7 +6230,7 @@ document.getElementById('asmSave').addEventListener('click', async () => {
     persistSealStrengths();
     // 刷新成品列表：新卡/被编辑的卡立即出现在下拉中，方便继续编辑
     try {
-      const rc = await fetch('/api/cards');
+      const rc = await fetch('/api/cards?scope=album');
       const dc = await rc.json();
       if (dc.ok) {
         CARDS.length = 0;

@@ -1444,7 +1444,7 @@ def _lenti_opts_of(data: dict) -> dict:
     fd = str(o.get("fade") or "").strip().lower()
     if fd in ("stripe", "whole", "cut"):
         out["fade"] = fd
-    for k in ("angle", "lens", "stripe", "sheen", "sheenPow", "soft",
+    for k in ("angle", "trans", "lens", "stripe", "sheen", "sheenPow", "soft",
               "jitter", "gain", "bend", "gloss"):
         v = o.get(k)
         if v is None or v == "":
@@ -4376,6 +4376,15 @@ PAGE_HTML = r"""<!DOCTYPE html>
             <span class="lval" id="asmLentiAngleV">0°</span>
           </div>
           <div class="arearow" style="margin-bottom:6px">
+            <span>换帧方向</span>
+            <input type="range" id="asmLentiTrans" min="0" max="180" step="1" value="0" disabled>
+            <span class="lval" id="asmLentiTransV">跟随条纹</span>
+            <label class="checkrow" style="flex:0 0 auto;margin-left:6px"
+                   title="勾上＝帧图沿条纹推进方向切换（真光栅卡行为）；取消后可单独设，比如条纹竖直、帧图斜向过渡">
+              <input type="checkbox" id="asmLentiTransFollow" checked><span>跟随</span>
+            </label>
+          </div>
+          <div class="arearow" style="margin-bottom:6px">
             <span>透镜密度</span><input type="number" id="asmLentiLens" min="60" max="420" step="5" value="120">
             <span>棱纹</span><input type="number" id="asmLentiStripe" min="0" max="1" step="0.05" value="0.48">
             <span>光泽</span><input type="number" id="asmLentiSheen" min="0" max="2.2" step="0.05" value="0.9">
@@ -5771,6 +5780,8 @@ const asmLentiEl = document.getElementById('asmLenti');
 const asmLentiBox = document.getElementById('asmLentiBox');
 const asmLentiChips = document.getElementById('asmLentiChips');
 const asmLentiAngleEl = document.getElementById('asmLentiAngle');
+const asmLentiTransEl = document.getElementById('asmLentiTrans');
+const asmLentiTransFollowEl = document.getElementById('asmLentiTransFollow');
 const asmLentiVFramesEl = document.getElementById('asmLentiVFrames');
 const asmLenti = { list: [], video: null, framePara: [] };
 const escHtml = (s) => String(s == null ? '' : s).replace(/[&<>"]/g,
@@ -5885,6 +5896,8 @@ function asmLentiOpts() {
     gain: num('asmLentiGain', 1),
     fade: document.getElementById('asmLentiFade').value || 'stripe',
   };
+  // 换帧方向：不跟随条纹时才单独传（后端 None ⇒ 用 angle，旧卡行为不变）
+  if (!asmLentiTransFollowEl.checked) o.trans = num('asmLentiTrans', 0);
   if (asmLenti.video) {
     const v = asmLenti.video;
     o.atlas = v.src; o.vname = v.name || '';
@@ -5894,6 +5907,11 @@ function asmLentiOpts() {
 }
 function asmLentiAngleLabel() {
   document.getElementById('asmLentiAngleV').textContent = asmLentiAngleEl.value + '°';
+  const follow = asmLentiTransFollowEl.checked;
+  asmLentiTransEl.disabled = follow;
+  if (follow) asmLentiTransEl.value = asmLentiAngleEl.value;
+  document.getElementById('asmLentiTransV').textContent =
+    follow ? '跟随条纹' : (asmLentiTransEl.value + '°');
 }
 // 换帧方式的副作用：只有条纹推进用得上「错位」（每条棱纹各自偏移相位），
 // 整幅两种是全卡同步，错位设置会失效——不禁用的话用户会以为参数没生效。
@@ -5955,10 +5973,15 @@ function asmLentiReset(lc, cardId) {
   // 参数藏在 opts 里（视频卡顶层还有 atlas/frames/cols/rows），展开后统一读
   const o = (lc.opts && typeof lc.opts === 'object') ? Object.assign({}, lc, lc.opts) : lc;
   if (on) {
+    asmLentiTransFollowEl.checked = true;
     ['fade', 'angle', 'lens', 'stripe', 'sheen', 'soft', 'jitter', 'gain'].forEach((k) => {
       const el = document.getElementById('asmLenti' + k.charAt(0).toUpperCase() + k.slice(1));
       if (el && o[k] !== undefined && o[k] !== null && o[k] !== '') el.value = o[k];
     });
+    if (o.trans !== undefined && o.trans !== null && o.trans !== '') {
+      asmLentiTransFollowEl.checked = false;
+      asmLentiTransEl.value = Math.round(+o.trans);
+    }
   }
   asmLentiVFramesLock(!!asmLenti.video && !asmLenti.video.hash);
   asmLentiAngleLabel();
@@ -5994,9 +6017,20 @@ asmLentiAngleEl.addEventListener('input', () => {
   asmLentiAngleLabel();
   scheduleAsmPreview(260);
 });
+asmLentiTransEl.addEventListener('input', () => {
+  asmLentiAngleLabel();
+  scheduleAsmPreview(260);
+});
+asmLentiTransFollowEl.addEventListener('change', () => {
+  asmLentiAngleLabel();
+  scheduleAsmPreview(260);
+});
 asmLentiBox.addEventListener('change', (e) => {
   if (e.target && e.target.id === 'asmLentiFade') asmLentiFadeSync();
-  if (e.target && e.target.id !== 'asmLentiAngle') scheduleAsmPreview(400);
+  // 这三个有各自的监听器（要同步读数/联动），别再排一次预览
+  if (e.target && !['asmLentiAngle', 'asmLentiTrans', 'asmLentiTransFollow'].includes(e.target.id)) {
+    scheduleAsmPreview(400);
+  }
 });
 document.getElementById('asmLentiAssetAdd').addEventListener('click', () => {
   const v = document.getElementById('asmLentiAsset').value;

@@ -791,6 +791,7 @@ EFFECT_ENGINE_JS = r"""
          'uAtlas', 'uAtlasGrid', 'uAtlasSize',
          'uLentiN', 'uLAngle', 'uLLens', 'uLStripe', 'uLSheen', 'uLSheenPow',
          'uLSoft', 'uLJitter', 'uLGyro', 'uLBend', 'uLPhase', 'uLGloss', 'uLViewS',
+         'uLTransAngle',
          'uAspect'].forEach(function (k) { if (cm[k]) U[k] = cm[k]; });
       }
       __BG_SHADER_SHARE__
@@ -1582,7 +1583,12 @@ __ENGINE_JS__
     }
   });
   canvas.addEventListener('pointercancel', endPointer);
-  canvas.addEventListener('pointerleave', endPointer);
+  canvas.addEventListener('pointerleave', (e) => {
+    endPointer(e);
+    // 鼠标移出画布才归零（在画布内任意位置都保持视角，不然转到 90° 会自己弹回）
+    hoverTarget.set(0, 0);
+    hover.current = 0;
+  });
 
   function pinchDistance() {
     const pts = [...pointers.values()];
@@ -1656,11 +1662,16 @@ __ENGINE_JS__
     if (hits.length) {
       pointer.copy(hits[0].uv);
       hover.current = 1;
-      hoverTarget.set((hits[0].uv.x - 0.5) * 0.4, -(hits[0].uv.y - 0.5) * 0.34);
     } else {
       hover.current = 0;
-      hoverTarget.set(0, 0);
     }
+    // ★ 倾斜/视差按**画布内位置**算，不用 raycast 的 uv：卡一旦倾斜到接近 90°，
+    //   它在屏幕上的命中面积趋近于 0，指针必然滑出卡面 ⇒ uv 归零 ⇒ 卡又弹回正，
+    //   在 0° 和 90° 之间来回跳。画布比卡大得多，用它才稳。
+    //   ×2.36（= 1/0.42）让指针走到画面 8% 处就吃满 ±1，不必贴边。
+    const ux = Math.max(-1, Math.min(1, ((px - rect.left) / rect.width - 0.5) * 2.36));
+    const uy = Math.max(-1, Math.min(1, ((py - rect.top) / rect.height - 0.5) * 2.36));
+    hoverTarget.set(ux, -uy);
   }
 
   // ---- 相机响应式（移动端用 visualViewport，避免地址栏伸缩触发缩放重置） ----
@@ -1713,8 +1724,9 @@ __ENGINE_JS__
 
     hoverCurrent.x = damp(hoverCurrent.x, hoverTarget.x, 8.5, dt);
     hoverCurrent.y = damp(hoverCurrent.y, hoverTarget.y, 8.5, dt);
-    tiltGroup.rotation.x = hoverCurrent.y * 0.72;
-    tiltGroup.rotation.y = hoverCurrent.x * 0.72;
+    // 左右倾斜满量程 = __TILT_Y__ 弧度（光栅卡给到 90°，普通卡沿用原来的 ~8°）
+    tiltGroup.rotation.y = hoverCurrent.x * __TILT_Y__;
+    tiltGroup.rotation.x = hoverCurrent.y * __TILT_X__;
 
     // 视差安全限制：主体可见包围盒（含位移）不越过边框内沿，窄边框自动收窄位移；
     // 主体偏移（用户手动调位）叠加进视差目标——仅偏移图像位置，蒙版随 syncWorld 钉在卡片坐标
@@ -1722,17 +1734,20 @@ __ENGINE_JS__
       subjectBoxScan++;
       subjectBox = computeSubjectBox();
     }
-    const par = clampParallax(hoverCurrent.x * __PARA_AMP__ + __SUBJ_OFFSET_X__ * CARD_WIDTH,
-                              -hoverCurrent.y * 0.14 + __SUBJ_OFFSET_Y__ * CARD_HEIGHT,
+    // 视差的量程从 hover 里单独夹出来（旧口径 hover 只有 ±0.2）：倾角上限放大到 90° 后
+    // 直接吃全量程会让位移乘 5 倍、一倾就冲出边框。
+    var hx = Math.max(-0.2, Math.min(0.2, hoverCurrent.x));
+    var hy = Math.max(-0.17, Math.min(0.17, hoverCurrent.y));
+    const par = clampParallax(hx * __PARA_AMP__ + __SUBJ_OFFSET_X__ * CARD_WIDTH,
+                              -hy * 0.14 + __SUBJ_OFFSET_Y__ * CARD_HEIGHT,
                               lentiParaGroups.length > 0);
     foregroundGroup.position.x = damp(foregroundGroup.position.x, par.x, 9.5, dt);
     foregroundGroup.position.y = damp(foregroundGroup.position.y, par.y, 9.5, dt);
     foregroundGroup.position.z = damp(foregroundGroup.position.z, 0.024, 9.5, dt);
-    foregroundGroup.rotation.x = hoverCurrent.y * 0.18;
-    foregroundGroup.rotation.y = hoverCurrent.x * 0.18;
-    // 视差主体：每层再按自己的深度错开（group 已有 par 的位移，这里只补差额）。
-    // 层绝对位移 = par × 深度 ÷ 最大深度 ⇒ 最前那层刚好等于 par，clampParallax 的
-    // 边界对最远层成立，更靠后的层只会更小，不会露边。
+    foregroundGroup.rotation.x = hy * 0.18;
+    foregroundGroup.rotation.y = hx * 0.18;
+    // 视差主体：每层再按自己的幅度错开（group 已有 par 的位移，这里只补差额）。
+    // 层绝对位移 = par × 层幅度（线性，PARA_MAXD 恒 1.0）⇒ 幅度 ≤1 的层不会超 par。
     // 必须在 __syncFgMask 之前更新：蒙版矩阵按 mesh 当前位置反算。
     if (paraLayers.length) {
       for (var _pi = 0; _pi < paraLayers.length; _pi++) {
@@ -1779,6 +1794,20 @@ __GLOW_TICK__
     },
     unlockView: function () {
       viewLock = false;
+    },
+    // 调试用：当前卡片倾斜（弧度，rotation.y / rotation.x）—— 验证倾斜量程
+    getTilt: function () {
+      return { y: tiltGroup.rotation.y, x: tiltGroup.rotation.x };
+    },
+    // 调试用：光栅方向参数（度）。trans 缺省 = 跟随 angle
+    getLenti: function () {
+      var u = cardMaterial.uniforms;
+      if (!u.uLAngle) return null;
+      var R = 180 / Math.PI;
+      return {
+        angle: u.uLAngle.value * R,
+        trans: (u.uLTransAngle ? u.uLTransAngle.value : u.uLAngle.value) * R,
+      };
     },
     flipCard: function () {
       doFlip();
@@ -3771,6 +3800,7 @@ def _subject_offset_js(off_x: float, off_y: float) -> str:
 
 LENTI_DEFAULTS = {
     "angle": 0.0,      # 条纹方向（度）：0=竖直 90=水平
+    "trans": None,     # 换帧推进方向（度）：None = 跟随 angle（旧卡行为不变）
     "fade": "stripe",  # 换帧方式：stripe=条纹推进 / whole=整幅柔和过渡 / cut=整幅直接换
     "lens": 120,       # 每卡宽度的透镜条数
     "stripe": 0.48,    # 棱纹强度
@@ -3801,6 +3831,7 @@ def _lenti_glsl_atlas(o: dict) -> str:
         "      uniform vec2 uAtlasSize;    // 图集像素尺寸（用于内缩防渗色）\n"
         "      uniform float uLentiN, uLAngle, uLLens, uLStripe, uLSheen, uLSheenPow;\n"
         "      uniform float uLSoft, uLJitter, uLGyro, uLBend, uLPhase, uLGloss;\n"
+        "      uniform float uLTransAngle;   // 换帧方向（弧度），可与 uLAngle 不同\n"
         "      // 卡面中心处的视角投影（JS 每帧算，全卡同一个值）\n"
         "      uniform float uLViewS;\n"
         "      float lhash11(float p) {\n"
@@ -3956,6 +3987,7 @@ def _lenti_glsl(n: int, o: dict) -> str:
         "      uniform sampler2D " + decl + ";\n"
         "      uniform float uLentiN, uLAngle, uLLens, uLStripe, uLSheen, uLSheenPow;\n"
         "      uniform float uLSoft, uLJitter, uLGyro, uLBend, uLPhase, uLGloss;\n"
+        "      uniform float uLTransAngle;   // 换帧方向（弧度），可与 uLAngle 不同\n"
         "      // 卡面中心处的视角投影（JS 每帧算，全卡同一个值）\n"
         "      uniform float uLViewS;\n"
         "      float lhash11(float p) {\n"
@@ -4009,9 +4041,11 @@ def _lenti_face_frag(n: int, o: dict, target: str = "base.rgb",
         )
     else:
         phase = (
-            "            // 相位 = 视角在条纹推进方向上的有符号投影（±1）+ 卡内位置梯度\n"
-            "            float sv = dot(viewDirection, axPw);\n"
-            "            float ph = uLPhase + sv * uLGyro + dot(qc, axP) * uLBend;\n"
+            "            // 相位 = 视角在**换帧推进方向**上的有符号投影（±1）+ 卡内位置梯度\n"
+            "            // ★ 用 axTw/axT 而不是 axPw/axP：条纹走向与换帧方向解耦，可以\n"
+            "            //   条纹竖直却让帧图斜着推进（逆光/斜切光下的观感）\n"
+            "            float sv = dot(viewDirection, axTw);\n"
+            "            float ph = uLPhase + sv * uLGyro + dot(qc, axT) * uLBend;\n"
             "            float lt = ph + (lh - 0.5) * uLJitter;\n"
             "            float i0 = floor(lt);\n"
             "            float wf = fract(lt);\n"
@@ -4025,6 +4059,10 @@ def _lenti_face_frag(n: int, o: dict, target: str = "base.rgb",
         "            float lca = cos(uLAngle), lsa = sin(uLAngle);\n"
         "            vec2 axP = vec2(lca, -lsa);   // 条纹推进方向（垂直于透镜轴）\n"
         "            vec2 axL = vec2(lsa, lca);    // 透镜轴（条纹走向）\n"
+        "            // 换帧方向单独一条轴：默认等于条纹方向（uLTransAngle = uLAngle），\n"
+        "            // 也可以不同 ⇒ 条纹竖直、帧图斜向推进\n"
+        "            float lta = uLTransAngle;\n"
+        "            vec2 axT = vec2(cos(lta), -sin(lta));\n"
         "            vec2 qc = (vUv - 0.5) * vec2(uAspect, 1.0);\n"
         "            float lx = dot(qc, axP) * (uLLens / uAspect);\n"
         "            float lid = floor(lx);\n"
@@ -4032,6 +4070,7 @@ def _lenti_face_frag(n: int, o: dict, target: str = "base.rgb",
         "            float lh = lhash11(lid + 0.5);\n"
         "            vec3 axPw = normalize(vWorldXAxis * axP.x + vWorldYAxis * axP.y);\n"
         "            vec3 axLw = normalize(vWorldXAxis * axL.x + vWorldYAxis * axL.y);\n"
+        "            vec3 axTw = normalize(vWorldXAxis * axT.x + vWorldYAxis * axT.y);\n"
         + phase +
         "            vec4 lc0 = lentiTex(i0, " + uv_var + ");\n"
         "            vec4 lc1 = lentiTex(i0 + 1.0, " + uv_var + ");\n"
@@ -4671,6 +4710,9 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
         _lenti_par = (
             "      uLentiN: { value: " + str(float(_ln)) + " },\n"
             "      uLAngle: { value: " + str(float(_lo["angle"]) * 3.141592653589793 / 180.0) + " },\n"
+            "      uLTransAngle: { value: "
+            + str(float(_lo["angle"] if _lo.get("trans") is None else _lo["trans"])
+                  * 3.141592653589793 / 180.0) + " },\n"
             "      uLLens: { value: " + str(float(_lo["lens"])) + " },\n"
             "      uLStripe: { value: " + str(float(_lo["stripe"])) + " },\n"
             "      uLSheen: { value: " + str(float(_lo["sheen"])) + " },\n"
@@ -4719,7 +4761,10 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
             "    _lv.ey.set(_lm[4], _lm[5], _lm[6]).normalize();\n"
             "    _lv.c.set(_lm[12], _lm[13], _lm[14]);\n"
             "    _lv.vd.copy(camera.position).sub(_lv.c).normalize();\n"
-            "    var _la = cardMaterial.uniforms.uLAngle.value;\n"
+            "    // ★ 用**换帧方向**轴（uLTransAngle）而不是条纹方向：条纹竖直、帧图斜向\n"
+            "    //   过渡时，整幅换帧与逐帧视差层都要按帧图那条轴走。\n"
+            "    var _la = (cardMaterial.uniforms.uLTransAngle ? cardMaterial.uniforms.uLTransAngle.value\n"
+            "      : cardMaterial.uniforms.uLAngle.value);\n"
             "    _lv.ax.copy(_lv.ex).multiplyScalar(Math.cos(_la))\n"
             "      .addScaledVector(_lv.ey, -Math.sin(_la)).normalize();\n"
             "    cardMaterial.uniforms.uLViewS.value = _lv.vd.dot(_lv.ax);\n"
@@ -4777,9 +4822,19 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
     else:
         para_amp = 0.2
 
+    # 鼠标跟随的倾斜上限（弧度）。光栅卡要转到侧面才看得清层间距/透镜行程，
+    # 给到左右各 90°；普通卡沿用旧观感（旧 hover 量程 ±0.2 × 0.72 ≈ ±8°），
+    # 免得所有已存卡一碰鼠标就大幅翻面。上下永远小一些 —— 90° 会翻到卡背后面。
+    if _lenti_on:
+        tilt_y, tilt_x = 1.5707963267948966, 0.62
+    else:
+        tilt_y, tilt_x = 0.144, 0.1224
+
     return (
         CARD_HTML_TEMPLATE
         .replace("__THREE_SRC__", three_rel)
+        .replace("__TILT_Y__", "%.6f" % tilt_y)
+        .replace("__TILT_X__", "%.6f" % tilt_x)
         .replace("__LENTI_GLSL__", lenti_glsl)
         .replace("__LENTI_FACE__", lenti_face)
         .replace("__BG_SHADER_GLSL__", bg_sh_glsl)

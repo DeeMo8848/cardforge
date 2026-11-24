@@ -94,12 +94,22 @@ def normalize_layer(raw: dict, idx: int = 0) -> dict:
 def normalize_meta(raw: dict, pid: str | None = None) -> dict:
     layers = [normalize_layer(x, i) for i, x in enumerate(raw.get("layers") or [])
               if isinstance(x, dict)]
+    # 旧数据迁移：以前有个「整体幅度 amp」，每层 depth 只是相对它的倍率。
+    # 现在每层幅度就是绝对值（整体那个概念去掉了）⇒ 把旧 amp 折算进 depth，
+    # 画面完全等效；折算后 amp 恒为 DEFAULT_AMP，再读一次比例就是 1（幂等）。
+    amp_in = _clamp(raw.get("amp", DEFAULT_AMP), 0.0, 0.5, DEFAULT_AMP)
+    k = amp_in / DEFAULT_AMP if DEFAULT_AMP > 0 else 1.0
+    if abs(k - 1.0) > 1e-6:
+        for L in layers:
+            L["depth"] = _clamp(L["depth"] * k, -3.0, 3.0, L["depth"])
     return {
         "id": pid or _slug(raw.get("id") or raw.get("name") or "subject"),
         "name": str(raw.get("name") or (pid or "视差主体")).strip()[:40],
         "card_w": int(_clamp(raw.get("card_w", BASE_W), 200, 4000, BASE_W)),
         "card_h": int(_clamp(raw.get("card_h", BASE_H), 200, 6000, BASE_H)),
-        "amp": _clamp(raw.get("amp", DEFAULT_AMP), 0.0, 0.5, DEFAULT_AMP),
+        # amp 恒为 DEFAULT_AMP：它只是「满视角基准位移占卡宽的比例」，不再对外暴露；
+        # 每层实际位移 = amp × depth（depth 就是该层幅度，界面按百分比显示）。
+        "amp": DEFAULT_AMP,
         "layers": layers[:MAX_LAYERS],
         "updated": int(raw.get("updated") or time.time()),
     }
@@ -617,15 +627,10 @@ PARALLAX_HTML = r"""<!DOCTYPE html>
     </div>
 
     <div class="sec">
-      <h3>视差 <span class="n">总幅度（所有层的基准）</span></h3>
-      <div class="row">
-        <label>幅度</label>
-        <input type="range" id="ampRange" min="0" max="0.4" step="0.005" value="0.16">
-        <span class="val" id="ampVal">0.16</span>
-      </div>
-      <div class="mini">每层实际位移 = <b>总幅度 × 该层幅度</b>（占卡宽比例）。总幅度是所有层共用的基准，
-        想单独调某一层就改下面的「幅度」（<b style="color:#c9a86a">可以设负数 = 反方向</b>，
-        倾斜时往里沉）；改一层不会影响别层。</div>
+      <h3>视差 <span class="n">每层各管各的</span></h3>
+      <div class="mini">每层的位移 = <b>该层「幅度」× 卡宽 × 16%</b>（满视角时）。
+        幅度 1.00 = 偏移卡宽的 16%，列表里每层后面标的就是结果；
+        <b style="color:#c9a86a">负数 = 反方向</b>（倾斜时往里沉）。改一层不影响别层。</div>
     </div>
 
     <div class="sec">
@@ -1027,12 +1032,6 @@ PARALLAX_HTML = r"""<!DOCTYPE html>
     if (!follow) msg('已暂停跟随鼠标：视角只用滑杆 / 摆动 / 卡牌模式拖动来调', '');
   };
   $('cardChk').onchange = () => setCardMode($('cardChk').checked);
-  $('ampRange').addEventListener('input', () => {
-    META.amp = +$('ampRange').value;
-    $('ampVal').textContent = META.amp.toFixed(3).replace(/0+$/, '').replace(/\.$/, '');
-    renderList(); syncPanel();      // 层后面那个百分比是绝对位移，总幅度一动就得跟着变
-    requestDraw();
-  });
 
   // ---------- 导入 ----------
   $('addBtn').onclick = () => $('fileIn').click();
@@ -1106,7 +1105,7 @@ PARALLAX_HTML = r"""<!DOCTYPE html>
   // ---------- 存取 ----------
   function metaPayload() {
     return {
-      id: META.id, name: META.name || '视差主体', amp: META.amp,
+      id: META.id, name: META.name || '视差主体',
       card_w: CW, card_h: CH,
       layers: META.layers.map((L) => ({
         file: L.file, name: L.name, x: L.x, y: L.y, scale: L.scale,
@@ -1159,8 +1158,7 @@ PARALLAX_HTML = r"""<!DOCTYPE html>
     if (!id) {
       META = { id: '', name: '', amp: 0.16, card_w: CW, card_h: CH, layers: [] };
       window.__pid = '';
-      sel = -1; IMGS = {}; $('pName').value = ''; $('ampRange').value = 0.16;
-      $('ampVal').textContent = '0.16';
+      sel = -1; IMGS = {}; $('pName').value = '';
       renderList(); syncPanel(); requestDraw();
       return;
     }
@@ -1175,7 +1173,7 @@ PARALLAX_HTML = r"""<!DOCTYPE html>
       // 服务端返回的 file 是主体目录内的纯文件名（L00.webp），urlOf() 会补上 /parallax/<id>/
       sel = META.layers.length ? META.layers.length - 1 : -1;
       $('pName').value = META.name;
-      $('ampRange').value = META.amp; $('ampVal').textContent = (+META.amp).toFixed(3);
+      if (!META.amp) META.amp = 0.16;   // 老数据可能没这个字段，公式要用
       // 预热：先加载一遍，避免首帧空白
       META.layers.forEach((L) => imgOf(L));
       renderList(); syncPanel(); requestDraw();
@@ -1224,6 +1222,8 @@ PARALLAX_HTML = r"""<!DOCTYPE html>
     offsetXOf: (i) => offsetX(META.layers[i] || { depth: 0 }),
     setCardMode: (on) => setCardMode(on), setFollow: (on) => { follow = !!on; $('followChk').checked = follow; $('followTog').classList.toggle('on', follow); },
     addLayer: (rec) => { META.layers.push(rec); renderList(); requestDraw(); },
+    // 外部脚本直接改 META 后重绘列表/面板（改 META 不会自动刷新 UI）
+    refresh: () => { renderList(); syncPanel(); requestDraw(); },
     save: saveItem, load: loadItem,
   };
 })();

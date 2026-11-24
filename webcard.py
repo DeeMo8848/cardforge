@@ -4221,7 +4221,7 @@ def _lenti_para_layers_js(payload: dict | None, round_foreground: bool = False) 
       按着色器同一条相位公式切组 ⇒ 倾斜时各层错动、换帧时整套跟着换。
     ★ 贴图懒加载（_lentiParaEnsure）：6 帧 × 4 层全预载要几百 MB 显存，
       而任意时刻最多两帧在过渡 —— 用到哪帧才传哪帧。
-    ★ 位移 = par × (d / maxd) × (该帧幅度 / 最大幅度)，group 已经吃了 par，
+    ★ 位移 = par × d × (该帧幅度 / 最大幅度)（d 线性，maxd 恒 1.0），group 已经吃了 par，
       所以每层只补差额（和单主体同一套公式）。
     """
     frames = (payload or {}).get("frames") or []
@@ -4325,7 +4325,7 @@ def _lenti_para_tick_js(fade: str) -> str:
         "        var _it = _lg.items[_lj];\n"
         "        _it.m.visible = _lon;\n"
         "        if (_lon) _it.mat.opacity = _lw;\n"
-        "        // 层的总位移 = par × k × d/maxd；group 已经吃了 par，这里只补差额\n"
+        "        // 层的总位移 = par × k × d（maxd 恒 1.0）；group 已经吃了 par，这里只补差额\n"
         "        var _lk = (_it.d / _lg.maxd) * _lg.k - 1.0;\n"
         "        _it.m.position.x = damp(_it.m.position.x, par.x * _lk, 9.5, dt);\n"
         "        _it.m.position.y = damp(_it.m.position.y, par.y * _lk, 9.5, dt);\n"

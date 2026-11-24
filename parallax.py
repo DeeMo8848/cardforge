@@ -79,8 +79,10 @@ def normalize_layer(raw: dict, idx: int = 0) -> dict:
         "scale": _clamp(raw.get("scale", 1.0), 0.02, 6.0, 1.0),
         "opacity": _clamp(raw.get("opacity", 1.0), 0.0, 1.0, 1.0),
         "visible": bool(raw.get("visible", True)),
-        # 视差倍率：0 = 钉在卡面不动，1 = 与原主体一样，2 = 两倍（越靠前越大）；
-        # 负数 = 反方向偏移（比如「陷进卡面里」的一层，倾斜时与主体反向走）
+        # 层幅度：满视角时这一层的水平位移 = 组的 amp × 本值（占卡宽比例再乘卡宽）。
+        # ★ 线性、**互不影响**：改一层的幅度不会像以前那样连带改变别层（旧版按
+        #   可见层最大深度归一化，动一层等于换基准，全组一起变）。
+        #   负值 = 反方向偏移（比如「陷进卡面里」的一层，倾斜时与主体反向走）。
         "depth": _clamp(raw.get("depth", 1.0), -3.0, 3.0, 1.0),
         # 层自身投影（卡雕的「厚度」主要靠它）
         "shadow": _clamp(raw.get("shadow", 0.0), 0.0, 1.0, 0.0),
@@ -104,10 +106,11 @@ def normalize_meta(raw: dict, pid: str | None = None) -> dict:
 
 
 def max_depth(meta: dict) -> float:
-    """归一化用的基准深度 = 可见层里深度的最大绝对值。
+    """可见层里 |depth| 的最大值 —— 只作诊断/展示用。
 
-    ★ 必须取绝对值：depth 允许负数（反方向偏移），若按最大值算，全是负数时
-      最大值为负，除以负数会把所有层的方向再翻一次。
+    ★ 层幅度现在是**线性**的（位移 = amp × depth），不再按这个值归一化，
+      所以 payload 里的 `max_depth` 恒写 1.0（见 prepare_for_card）。
+      留这个函数是为了脚本/文档里还能看到「最大幅度是几倍」。
     """
     ds = [abs(L["depth"]) for L in meta.get("layers") or [] if L.get("visible")]
     d = max(ds) if ds else 0.0
@@ -431,7 +434,10 @@ def prepare_for_card(pid: str, out_dir: Path, sub: str = "") -> dict:
     if not layers:
         raise ValueError("这个视差主体没有可见图层")
 
-    payload = {"amp": meta["amp"], "max_depth": max_depth(meta),
+    # ★ max_depth 恒 1.0：层幅度是线性的（位移 = amp × depth），
+    #   webcard 里那条 `d / maxd` 就退化成恒等 —— 想单独调某层只改它自己的 depth，
+    #   不会牵动别层。（旧版按最大深度归一化，动一层等于换基准，全组一起变。）
+    payload = {"amp": meta["amp"], "max_depth": 1.0,
                "card_w": meta["card_w"], "card_h": meta["card_h"],
                "layers": layers}
     (dst / "meta.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2),
@@ -611,13 +617,15 @@ PARALLAX_HTML = r"""<!DOCTYPE html>
     </div>
 
     <div class="sec">
-      <h3>视差 <span class="n">整体幅度</span></h3>
+      <h3>视差 <span class="n">总幅度（所有层的基准）</span></h3>
       <div class="row">
         <label>幅度</label>
         <input type="range" id="ampRange" min="0" max="0.4" step="0.005" value="0.16">
         <span class="val" id="ampVal">0.16</span>
       </div>
-      <div class="mini">各层实际位移 = 幅度 × 层深度 ÷ 最大深度。深度 0 = 钉在卡面不动，1 = 随卡面一起动，越大越靠前；<b style="color:#c9a86a">负数是反方向</b>（倾斜时往里沉）。</div>
+      <div class="mini">每层实际位移 = <b>总幅度 × 该层幅度</b>（占卡宽比例）。总幅度是所有层共用的基准，
+        想单独调某一层就改下面的「幅度」（<b style="color:#c9a86a">可以设负数 = 反方向</b>，
+        倾斜时往里沉）；改一层不会影响别层。</div>
     </div>
 
     <div class="sec">
@@ -642,7 +650,7 @@ PARALLAX_HTML = r"""<!DOCTYPE html>
       <div class="row"><label>Y</label><input type="range" id="ly" min="-50" max="150" step="0.5"><span class="val" id="lyv"></span></div>
       <div class="row"><label>缩放</label><input type="range" id="ls" min="2" max="300" step="0.5"><span class="val" id="lsv"></span></div>
       <div class="row"><label>透明度</label><input type="range" id="lo" min="0" max="100" step="1"><span class="val" id="lov"></span></div>
-      <div class="row"><label>深度</label><input type="range" id="ld" min="-300" max="300" step="1"><span class="val" id="ldv"></span></div>
+      <div class="row"><label>幅度</label><input type="range" id="ld" min="-300" max="300" step="1"><span class="val" id="ldv"></span></div>
       <div class="row"><label>投影</label><input type="range" id="lsh" min="0" max="100" step="1"><span class="val" id="lshv"></span></div>
       <div class="row">
         <button class="sm" id="upBtn" style="flex:1">↑ 上移一层</button>
@@ -672,12 +680,10 @@ PARALLAX_HTML = r"""<!DOCTYPE html>
   const msg = (t, cls) => { const m = $('msg'); m.textContent = t; m.className = cls || ''; };
 
   // ---------- 工具 ----------
-  function maxDepth() {
-    // ★ 绝对值：深度可为负（反向偏移），按最大值算会让「全负」的一组整体掉头
-    let d = 0;
-    for (const L of META.layers) if (L.visible) d = Math.max(d, Math.abs(L.depth));
-    return d > 1e-6 ? d : 1;
-  }
+  // 位移 = view × 组幅度 × 卡宽 × 该层幅度 —— **线性、各层独立**。
+  // 旧版是 `÷ maxDepth`（可见层最大深度）：那样动一层的幅度会换掉基准值，
+  // 全组一起变，等于「只有全局幅度能调」。现在点对点，改一层只影响它自己。
+  function offsetX(L) { return view * META.amp * CW * L.depth; }
   // 层的素材地址有三种来源：
   //   _uploads/xxx.webp —— 刚上传、还没归档（/parallax/_uploads/xxx.webp）
   //   L00.webp          —— 已保存进某个主体（/parallax/<id>/L00.webp）
@@ -704,8 +710,6 @@ PARALLAX_HTML = r"""<!DOCTYPE html>
              : (im && im.naturalWidth ? im.naturalHeight / im.naturalWidth : CH / CW);
     return layerW(L) * ar;
   }
-  // 与 card.html 同一公式：位移 = view × amp × 卡宽 ÷ 最大深度 × 层深度
-  function offsetX(L) { return view * META.amp * CW / maxDepth() * L.depth; }
 
   function draw() {
     ctx.clearRect(0, 0, CW, CH);
@@ -769,22 +773,41 @@ PARALLAX_HTML = r"""<!DOCTYPE html>
   }
 
   // 视角（-1..1）统一入口：滑杆、鼠标、摆动、卡牌拖拽都走这里，免得各改各的
+  function setViewLabel() {
+    // 卡牌模式下显示角度（view ±1 = ±CARD_MAX_DEG），平面模式显示 -100..100 的偏移量
+    $('viewVal').textContent = cardMode
+      ? Math.round(view * CARD_MAX_DEG) + '°'
+      : Math.round(view * 100);
+  }
   function setView(v) {
     view = Math.max(-1, Math.min(1, v));
     $('viewRange').value = Math.round(view * 100);
-    $('viewVal').textContent = Math.round(view * 100);
+    setViewLabel();
     requestDraw();
   }
 
   // 卡牌模式：把画布当成一张斜着的卡。
-  // 41° ≈ card.html 里 tiltGroup.rotation.y = hover.x * 0.72（rad）的最大值，
-  // 层内位移也是同一条公式（view × 幅度 × 卡宽）⇒ 这里就是成品卡上的观感。
+  // 满视角（view = ±1）= **左右各 90°**（用户要求能转到侧面看厚度）。
+  // 参考：card.html 里 tiltGroup.rotation.y = hover.x × 0.72 rad，极限约 41°，
+  // 所以 ±20° 以内的观感就是成品卡翻卡时的样子；再往大转只是方便检查层间距。
+  // ★ 90° 时卡面与视线平行 ⇒ 只剩一条线，这是正确的（实物也这样），不是没渲染。
+  const CARD_MAX_DEG = 90;
+  const CARD_PERSP = 1600;   // px：比 1200 柔和些，倾斜时梯形畸变没那么夸张
   function applyTilt() {
-    if (cardMode) {
-      CV.style.transform = 'perspective(1200px) rotateY(' + (view * 41).toFixed(2) + 'deg)';
-    } else if (CV.style.transform) {
-      CV.style.transform = '';
+    if (!cardMode) {
+      if (CV.style.transform) CV.style.transform = '';
+      return;
     }
+    const deg = view * CARD_MAX_DEG;
+    // ★ 透视会把「近侧」放大 d/(d − w/2·sinθ)，画布本来就是按高度刚好塞满的
+    //   ⇒ 一转就撑出容器（上下被切）。这里让整体缩回同一个比例：
+    //   解 s·d/(d − w/2·s·sinθ) = 1 ⇒ s = d/(d + w/2·sinθ)，
+    //   近侧投影刚好等于原始尺寸，永远不溢出。
+    const rad = Math.abs(deg) * Math.PI / 180;
+    const w = CV.clientWidth || 1;
+    const s = CARD_PERSP / (CARD_PERSP + (w * 0.5) * Math.sin(rad));
+    CV.style.transform = 'perspective(' + CARD_PERSP + 'px) rotateY(' + deg.toFixed(2) +
+                         'deg) scale(' + s.toFixed(4) + ')';
   }
   function setCardMode(on) {
     cardMode = !!on;
@@ -796,8 +819,9 @@ PARALLAX_HTML = r"""<!DOCTYPE html>
     dragging = false;
     cardDrag = null;
     $('hintbar').textContent = cardMode
-      ? '卡牌模式：左右拖动画面 = 转动卡牌 · 滚轮/拖动图层需切回平面模式 · 视角滑杆同样可用'
-      : '拖动图层移动 · 滚轮缩放 · 鼠标左右移画面看视差 · 选中层可调深度/投影';
+      ? '卡牌模式：左右拖动画面 = 转动卡牌（±90°）· 滚轮/拖动图层需切回平面模式 · 视角滑杆同样可用'
+      : '拖动图层移动 · 滚轮缩放 · 鼠标左右移画面看视差 · 选中层可调幅度/投影';
+    setView(view);            // 顺手把角度读数切过来
     requestDraw();
   }
 
@@ -807,7 +831,7 @@ PARALLAX_HTML = r"""<!DOCTYPE html>
       swayT += 0.012;
       view = Math.sin(swayT) * 0.95;
       $('viewRange').value = Math.round(view * 100);
-      $('viewVal').textContent = Math.round(view * 100);
+      setViewLabel();
       requestDraw();
     }
     requestAnimationFrame(tick);
@@ -872,7 +896,7 @@ PARALLAX_HTML = r"""<!DOCTYPE html>
       const v = Math.max(-1, Math.min(1, (p.x / CW - 0.5) * 2.4));
       view = v;
       $('viewRange').value = Math.round(v * 100);
-      $('viewVal').textContent = Math.round(v * 100);
+      setViewLabel();
       requestDraw();
     }
   });
@@ -905,7 +929,7 @@ PARALLAX_HTML = r"""<!DOCTYPE html>
         '<div class="lyr' + (i === sel ? ' on' : '') + (L.visible ? '' : ' hid') + '" data-i="' + i + '">' +
         '<img src="' + urlOf(L) + '" alt="">' +
         '<span class="nm">' + esc(L.name) + '</span>' +
-        '<span class="dp">×' + L.depth.toFixed(1) + '</span>' +
+        '<span class="dp" title="满视角时的位移（占卡宽）">' + ampTxt(L) + '</span>' +
         '<span class="eye" data-eye="' + i + '" title="显示/隐藏">' + (L.visible ? '👁' : '🚫') + '</span>' +
         '</div>');
     }
@@ -928,6 +952,12 @@ PARALLAX_HTML = r"""<!DOCTYPE html>
     const n = META.layers.filter((L) => L.visible).length;
     $('statTag').textContent = META.layers.length + ' 层（' + n + ' 可见）';
   }
+  // 层幅度 → 实际位移（满视角时占卡宽的比例）。列表里显示这个，比「×1.0」直观：
+  // 用户要的就是「这一层能偏多少」，不是「它是第几倍」。
+  function ampTxt(L) {
+    const a = META.amp * (L.depth || 0) * 100;
+    return (a < 0 ? '-' : '') + Math.abs(a).toFixed(1) + '%';
+  }
   function esc(s) {
     return String(s == null ? '' : s).replace(/[&<>"]/g, (c) =>
       ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -942,7 +972,8 @@ PARALLAX_HTML = r"""<!DOCTYPE html>
     $('ly').value = L.y * 100; $('lyv').textContent = (L.y * 100).toFixed(1);
     $('ls').value = L.scale * 100; $('lsv').textContent = (L.scale * 100).toFixed(0) + '%';
     $('lo').value = L.opacity * 100; $('lov').textContent = Math.round(L.opacity * 100);
-    $('ld').value = L.depth * 100; $('ldv').textContent = L.depth.toFixed(2);
+    $('ld').value = L.depth * 100;
+    $('ldv').textContent = '×' + L.depth.toFixed(2) + ' · ' + ampTxt(L);
     $('lsh').value = L.shadow * 100; $('lshv').textContent = Math.round(L.shadow * 100);
   }
 
@@ -959,7 +990,8 @@ PARALLAX_HTML = r"""<!DOCTYPE html>
   bindRange('ly', 'lyv', (L, v) => { L.y = v / 100; }, (L) => (L.y * 100).toFixed(1));
   bindRange('ls', 'lsv', (L, v) => { L.scale = Math.max(0.02, v / 100); }, (L) => Math.round(L.scale * 100) + '%');
   bindRange('lo', 'lov', (L, v) => { L.opacity = v / 100; }, (L) => Math.round(L.opacity * 100));
-  bindRange('ld', 'ldv', (L, v) => { L.depth = v / 100; }, (L) => L.depth.toFixed(2));
+  bindRange('ld', 'ldv', (L, v) => { L.depth = v / 100; },
+            (L) => '×' + L.depth.toFixed(2) + ' · ' + ampTxt(L));
   bindRange('lsh', 'lshv', (L, v) => { L.shadow = v / 100; }, (L) => Math.round(L.shadow * 100));
 
   $('upBtn').onclick = () => {
@@ -998,6 +1030,7 @@ PARALLAX_HTML = r"""<!DOCTYPE html>
   $('ampRange').addEventListener('input', () => {
     META.amp = +$('ampRange').value;
     $('ampVal').textContent = META.amp.toFixed(3).replace(/0+$/, '').replace(/\.$/, '');
+    renderList(); syncPanel();      // 层后面那个百分比是绝对位移，总幅度一动就得跟着变
     requestDraw();
   });
 
@@ -1184,9 +1217,11 @@ PARALLAX_HTML = r"""<!DOCTYPE html>
   requestDraw();
   tick();
   window.__parallaxAPI = {
-    meta: () => META, sel: () => sel, view: (v) => { view = v; requestDraw(); },
+    meta: () => META, sel: () => sel, view: (v) => setView(v),
     // 只读：当前视角 / 是否卡牌模式（自动验证与外部脚调用）
     getView: () => view, cardMode: () => cardMode,
+    // 只读：第 i 层在当前视角下的水平位移（画布像素）—— 验证「每层幅度独立」用
+    offsetXOf: (i) => offsetX(META.layers[i] || { depth: 0 }),
     setCardMode: (on) => setCardMode(on), setFollow: (on) => { follow = !!on; $('followChk').checked = follow; $('followTog').classList.toggle('on', follow); },
     addLayer: (rec) => { META.layers.push(rec); renderList(); requestDraw(); },
     save: saveItem, load: loadItem,

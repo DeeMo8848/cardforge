@@ -79,8 +79,9 @@ def normalize_layer(raw: dict, idx: int = 0) -> dict:
         "scale": _clamp(raw.get("scale", 1.0), 0.02, 6.0, 1.0),
         "opacity": _clamp(raw.get("opacity", 1.0), 0.0, 1.0, 1.0),
         "visible": bool(raw.get("visible", True)),
-        # 视差倍率：0 = 钉在卡面不动，1 = 与原主体一样，2 = 两倍（越靠前越大）
-        "depth": _clamp(raw.get("depth", 1.0), 0.0, 3.0, 1.0),
+        # 视差倍率：0 = 钉在卡面不动，1 = 与原主体一样，2 = 两倍（越靠前越大）；
+        # 负数 = 反方向偏移（比如「陷进卡面里」的一层，倾斜时与主体反向走）
+        "depth": _clamp(raw.get("depth", 1.0), -3.0, 3.0, 1.0),
         # 层自身投影（卡雕的「厚度」主要靠它）
         "shadow": _clamp(raw.get("shadow", 0.0), 0.0, 1.0, 0.0),
         "src_w": int(_clamp(raw.get("src_w", 0), 0, 20000, 0)),
@@ -103,8 +104,14 @@ def normalize_meta(raw: dict, pid: str | None = None) -> dict:
 
 
 def max_depth(meta: dict) -> float:
-    ds = [L["depth"] for L in meta.get("layers") or [] if L.get("visible")]
-    return max(ds) if ds else 1.0
+    """归一化用的基准深度 = 可见层里深度的最大绝对值。
+
+    ★ 必须取绝对值：depth 允许负数（反方向偏移），若按最大值算，全是负数时
+      最大值为负，除以负数会把所有层的方向再翻一次。
+    """
+    ds = [abs(L["depth"]) for L in meta.get("layers") or [] if L.get("visible")]
+    d = max(ds) if ds else 0.0
+    return d if d > 1e-6 else 1.0   # 全 0（都钉死）时给 1.0，别让下游除 0
 
 
 def meta_of(pid: str) -> Path:
@@ -378,7 +385,7 @@ def _bake_pre(pid: str) -> None:
     _bake_layers(meta, dst)
 
 
-def prepare_for_card(pid: str, out_dir: Path) -> dict:
+def prepare_for_card(pid: str, out_dir: Path, sub: str = "") -> dict:
     """把视差主体落到成品卡目录，返回 {} 供 build_card_html(parallax=...)。
 
     产物：
@@ -386,15 +393,21 @@ def prepare_for_card(pid: str, out_dir: Path) -> dict:
         <out_dir>/parallax/meta.json      层顺序 / depth / opacity
         <out_dir>/foreground.png          各层合成（2D 预览与老逻辑兜底）
 
+    sub: 落到 <out_dir>/parallax/<sub>/ 下。光栅卡「每帧一个视差主体」要用它 ——
+         一帧一套层图，各自独立目录；src 里也带上子目录。
+
     返回的 layers 是「后 → 前」，src 是相对卡目录的路径，直接进 card.html。
     """
     meta = load_item(pid)
     if not meta:
         raise ValueError("视差主体不存在：%s" % pid)
-    dst = Path(out_dir) / "parallax"
+    sub = _slug(sub) if sub else ""
+    base = Path(out_dir) / "parallax"
+    dst = (base / sub) if sub else base
     if dst.exists():
         shutil.rmtree(dst, ignore_errors=True)
     dst.mkdir(parents=True, exist_ok=True)
+    rel = ("parallax/" + sub + "/") if sub else "parallax/"
 
     # 优先用保存时烤好的 pre/ 缓存；缺失或与当前层数/尺寸对不上就现场重烤
     pre = PARALLAX_ROOT / pid / "pre"
@@ -408,11 +421,11 @@ def prepare_for_card(pid: str, out_dir: Path) -> dict:
             if im.size != (meta["card_w"], meta["card_h"]):
                 im = im.resize((meta["card_w"], meta["card_h"]), Image.LANCZOS)
             im.save(dst / r["file"], "WEBP", lossless=True, method=6)
-            layers.append({"src": "parallax/" + r["file"], "depth": r["depth"],
+            layers.append({"src": rel + r["file"], "depth": r["depth"],
                            "opacity": 1.0, "name": r["name"]})
     else:
         for rec in _bake_layers(meta, dst):
-            layers.append({"src": "parallax/" + rec["file"], "depth": rec["depth"],
+            layers.append({"src": rel + rec["file"], "depth": rec["depth"],
                            "opacity": 1.0, "name": rec["name"]})
 
     if not layers:
@@ -537,6 +550,21 @@ PARALLAX_HTML = r"""<!DOCTYPE html>
   #msg.ok { color: #93b878; }
   .mini { color: #6d5f4a; font-size: 11px; line-height: 1.6; }
   .sway { display: flex; gap: 6px; align-items: center; }
+  /* 顶栏开关（跟随鼠标 / 卡牌模式）：label 包 checkbox，点文字也能切 */
+  .tog {
+    display: flex; align-items: center; gap: 5px; font-size: 11.5px; color: #a4947a;
+    background: #1c1610; border: 1px solid #33291d; border-radius: 6px;
+    padding: 3px 8px; cursor: pointer; user-select: none; white-space: nowrap;
+  }
+  .tog:hover { border-color: #4a3927; color: #cdbb9c; }
+  .tog input { accent-color: #c9a86a; margin: 0; }
+  .tog.on { color: #f2e5c8; border-color: #6b4d21; background: #2b2015; }
+  /* 卡牌模式：画面按 3D 倾斜，阴影跟着卡面轮廓（圆角外是透明的，所以用 drop-shadow） */
+  #cv.card3d {
+    filter: drop-shadow(0 18px 34px rgba(0,0,0,.75));
+    cursor: grab;
+  }
+  #cv.card3d.drag { cursor: grabbing; }
 </style>
 </head>
 <body>
@@ -547,9 +575,16 @@ PARALLAX_HTML = r"""<!DOCTYPE html>
       <span id="statTag" class="mini">0 层</span>
       <span class="sp"></span>
       <button id="swayBtn" class="sm" title="自动左右摆动，检查视差层次">▶ 摆动预览</button>
+      <label class="tog on" id="followTog" title="鼠标左右移动就换视角；关掉后视角只由滑杆/拖动决定（对齐构图时先关掉）">
+        <input type="checkbox" id="followChk" checked><span>🖱 跟随鼠标</span>
+      </label>
+      <label class="tog" id="cardTog" title="把画面按 3D 卡牌倾斜显示（约 41°，与 card.html 的翻卡角度一致）">
+        <input type="checkbox" id="cardChk"><span>🃏 卡牌模式</span>
+      </label>
       <span class="mini">视角</span>
-      <input type="range" id="viewRange" min="-100" max="100" value="0" style="width:130px">
+      <input type="range" id="viewRange" min="-100" max="100" value="0" style="width:110px">
       <span class="val" id="viewVal">0</span>
+      <button id="viewReset" class="sm" title="视角回到正面（0°）">⟲ 复位</button>
     </div>
     <div id="canvasBox"><canvas id="cv" width="900" height="1200"></canvas></div>
     <div id="hintbar">拖动图层移动 · 滚轮缩放 · 鼠标左右移画面看视差 · 选中层可调深度/投影</div>
@@ -582,7 +617,7 @@ PARALLAX_HTML = r"""<!DOCTYPE html>
         <input type="range" id="ampRange" min="0" max="0.4" step="0.005" value="0.16">
         <span class="val" id="ampVal">0.16</span>
       </div>
-      <div class="mini">各层实际位移 = 幅度 × 层深度 ÷ 最大深度。深度 0 = 钉在卡面不动，1 = 随卡面一起动，越大越靠前。</div>
+      <div class="mini">各层实际位移 = 幅度 × 层深度 ÷ 最大深度。深度 0 = 钉在卡面不动，1 = 随卡面一起动，越大越靠前；<b style="color:#c9a86a">负数是反方向</b>（倾斜时往里沉）。</div>
     </div>
 
     <div class="sec">
@@ -607,7 +642,7 @@ PARALLAX_HTML = r"""<!DOCTYPE html>
       <div class="row"><label>Y</label><input type="range" id="ly" min="-50" max="150" step="0.5"><span class="val" id="lyv"></span></div>
       <div class="row"><label>缩放</label><input type="range" id="ls" min="2" max="300" step="0.5"><span class="val" id="lsv"></span></div>
       <div class="row"><label>透明度</label><input type="range" id="lo" min="0" max="100" step="1"><span class="val" id="lov"></span></div>
-      <div class="row"><label>深度</label><input type="range" id="ld" min="0" max="300" step="1"><span class="val" id="ldv"></span></div>
+      <div class="row"><label>深度</label><input type="range" id="ld" min="-300" max="300" step="1"><span class="val" id="ldv"></span></div>
       <div class="row"><label>投影</label><input type="range" id="lsh" min="0" max="100" step="1"><span class="val" id="lshv"></span></div>
       <div class="row">
         <button class="sm" id="upBtn" style="flex:1">↑ 上移一层</button>
@@ -627,6 +662,9 @@ PARALLAX_HTML = r"""<!DOCTYPE html>
   let sel = -1;
   let view = 0;           // -1..1，模拟视角水平偏移
   let sway = false, swayT = 0;
+  let follow = true;      // 鼠标跟随（关掉后鼠标移动不改视角，方便对齐构图）
+  let cardMode = false;   // 卡牌模式：画面按 3D 倾斜显示，拖动=转卡
+  let cardDrag = null;    // 卡牌模式下拖拽起点的 { x, v0 }
   let dragging = false, dragOff = { x: 0, y: 0 };
   let bgImg = null;
 
@@ -635,9 +673,10 @@ PARALLAX_HTML = r"""<!DOCTYPE html>
 
   // ---------- 工具 ----------
   function maxDepth() {
+    // ★ 绝对值：深度可为负（反向偏移），按最大值算会让「全负」的一组整体掉头
     let d = 0;
-    for (const L of META.layers) if (L.visible) d = Math.max(d, L.depth);
-    return Math.max(d, 1);
+    for (const L of META.layers) if (L.visible) d = Math.max(d, Math.abs(L.depth));
+    return d > 1e-6 ? d : 1;
   }
   // 层的素材地址有三种来源：
   //   _uploads/xxx.webp —— 刚上传、还没归档（/parallax/_uploads/xxx.webp）
@@ -719,6 +758,7 @@ PARALLAX_HTML = r"""<!DOCTYPE html>
       ctx.strokeRect(x, y, w, h);
       ctx.restore();
     }
+    applyTilt();
   }
 
   let pending = false;
@@ -726,6 +766,39 @@ PARALLAX_HTML = r"""<!DOCTYPE html>
     if (pending) return;
     pending = true;
     requestAnimationFrame(() => { pending = false; draw(); });
+  }
+
+  // 视角（-1..1）统一入口：滑杆、鼠标、摆动、卡牌拖拽都走这里，免得各改各的
+  function setView(v) {
+    view = Math.max(-1, Math.min(1, v));
+    $('viewRange').value = Math.round(view * 100);
+    $('viewVal').textContent = Math.round(view * 100);
+    requestDraw();
+  }
+
+  // 卡牌模式：把画布当成一张斜着的卡。
+  // 41° ≈ card.html 里 tiltGroup.rotation.y = hover.x * 0.72（rad）的最大值，
+  // 层内位移也是同一条公式（view × 幅度 × 卡宽）⇒ 这里就是成品卡上的观感。
+  function applyTilt() {
+    if (cardMode) {
+      CV.style.transform = 'perspective(1200px) rotateY(' + (view * 41).toFixed(2) + 'deg)';
+    } else if (CV.style.transform) {
+      CV.style.transform = '';
+    }
+  }
+  function setCardMode(on) {
+    cardMode = !!on;
+    CV.classList.toggle('card3d', cardMode);
+    $('cardTog').classList.toggle('on', cardMode);
+    $('cardChk').checked = cardMode;
+    // 卡牌模式下画布是 3D 变换过的：getBoundingClientRect 会失真，拖图层会算歪。
+    // 所以那个模式只用来「看」，拖动改成转卡（按 clientX 位移增量，不依赖坐标映射）。
+    dragging = false;
+    cardDrag = null;
+    $('hintbar').textContent = cardMode
+      ? '卡牌模式：左右拖动画面 = 转动卡牌 · 滚轮/拖动图层需切回平面模式 · 视角滑杆同样可用'
+      : '拖动图层移动 · 滚轮缩放 · 鼠标左右移画面看视差 · 选中层可调深度/投影';
+    requestDraw();
   }
 
   // ---------- 视差摆动 ----------
@@ -759,6 +832,13 @@ PARALLAX_HTML = r"""<!DOCTYPE html>
     return -1;
   }
   CV.addEventListener('pointerdown', (e) => {
+    if (cardMode) {
+      // 卡牌模式不编辑图层：左右拖动 = 转卡
+      cardDrag = { x: e.clientX, v0: view };
+      CV.classList.add('drag');
+      try { CV.setPointerCapture(e.pointerId); } catch (_) {}
+      return;
+    }
     const p = toCanvas(e);
     const i = hitTest(p);
     if (i >= 0) {
@@ -772,6 +852,13 @@ PARALLAX_HTML = r"""<!DOCTYPE html>
     }
   });
   CV.addEventListener('pointermove', (e) => {
+    if (cardMode) {
+      if (cardDrag) {
+        const w = CV.clientWidth || 1;
+        setView(cardDrag.v0 + (e.clientX - cardDrag.x) / (w * 1.15));
+      }
+      return;
+    }
     const p = toCanvas(e);
     if (dragging && sel >= 0) {
       const L = META.layers[sel];
@@ -780,8 +867,8 @@ PARALLAX_HTML = r"""<!DOCTYPE html>
       syncPanel(); requestDraw();
       return;
     }
-    // 未拖动时：鼠标左右移动 = 换视角，实时看视差
-    if (!sway) {
+    // 未拖动时：鼠标左右移动 = 换视角，实时看视差（可关）
+    if (!sway && follow) {
       const v = Math.max(-1, Math.min(1, (p.x / CW - 0.5) * 2.4));
       view = v;
       $('viewRange').value = Math.round(v * 100);
@@ -790,11 +877,13 @@ PARALLAX_HTML = r"""<!DOCTYPE html>
     }
   });
   CV.addEventListener('pointerup', (e) => {
-    dragging = false; CV.style.cursor = 'crosshair';
+    dragging = false; cardDrag = null;
+    CV.classList.remove('drag');
+    if (!cardMode) CV.style.cursor = 'crosshair';
     try { CV.releasePointerCapture(e.pointerId); } catch (_) {}
   });
   CV.addEventListener('wheel', (e) => {
-    if (sel < 0) return;
+    if (sel < 0 || cardMode) return;
     e.preventDefault();
     const L = META.layers[sel];
     const k = e.deltaY > 0 ? 0.96 : 1.042;
@@ -889,15 +978,23 @@ PARALLAX_HTML = r"""<!DOCTYPE html>
   // ---------- 全局控件 ----------
   $('viewRange').addEventListener('input', () => {
     sway = false; $('swayBtn').textContent = '▶ 摆动预览';
-    view = +$('viewRange').value / 100;
-    $('viewVal').textContent = $('viewRange').value;
-    requestDraw();
+    setView(+$('viewRange').value / 100);
   });
   $('swayBtn').onclick = () => {
     sway = !sway;
     $('swayBtn').textContent = sway ? '⏸ 停止' : '▶ 摆动预览';
     if (sway) swayT = Math.asin(Math.max(-1, Math.min(1, view)));
   };
+  $('viewReset').onclick = () => {
+    sway = false; $('swayBtn').textContent = '▶ 摆动预览';
+    setView(0);
+  };
+  $('followChk').onchange = () => {
+    follow = $('followChk').checked;
+    $('followTog').classList.toggle('on', follow);
+    if (!follow) msg('已暂停跟随鼠标：视角只用滑杆 / 摆动 / 卡牌模式拖动来调', '');
+  };
+  $('cardChk').onchange = () => setCardMode($('cardChk').checked);
   $('ampRange').addEventListener('input', () => {
     META.amp = +$('ampRange').value;
     $('ampVal').textContent = META.amp.toFixed(3).replace(/0+$/, '').replace(/\.$/, '');
@@ -1088,6 +1185,9 @@ PARALLAX_HTML = r"""<!DOCTYPE html>
   tick();
   window.__parallaxAPI = {
     meta: () => META, sel: () => sel, view: (v) => { view = v; requestDraw(); },
+    // 只读：当前视角 / 是否卡牌模式（自动验证与外部脚调用）
+    getView: () => view, cardMode: () => cardMode,
+    setCardMode: (on) => setCardMode(on), setFollow: (on) => { follow = !!on; $('followChk').checked = follow; $('followTog').classList.toggle('on', follow); },
     addLayer: (rec) => { META.layers.push(rec); renderList(); requestDraw(); },
     save: saveItem, load: loadItem,
   };

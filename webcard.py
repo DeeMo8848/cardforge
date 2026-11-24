@@ -1476,8 +1476,10 @@ __GLOW_INIT__
   aura.renderOrder = -1;
   flipGroup.add(aura);
 
+  __PARA_ROUND__
   __FG_BLOCK__
   __PARALLAX_LAYERS__
+  __LENTI_PARA_LAYERS__
 
   // ---- 主体描边层（白色贴纸边，可选；随前景组视差移动） ----
   __OUTLINE_LAYER__
@@ -1600,6 +1602,9 @@ __ENGINE_JS__
   // parallaxDist = 卡体中心到边框内沿距离（场景单位）；-1 表示无边框，不限制
   var parallaxDist = -1;
   var subjectBox = null; // { halfW, halfH, offX, offY } 主体可见包围盒（场景单位，Y 向上）
+  // 前景纹理是异步加载的：前几帧可能还是空图 ⇒ 需要重试。但光栅卡（前景是空白图）
+  // 永远算不出包围盒，不设上限就会每帧 createElement+getImageData 扫一遍（GC 抖动）。
+  var subjectBoxScan = 0;
   function computeSubjectBox() {
     var img = foregroundTexture.image;
     if (!img || !img.width) return null;
@@ -1629,7 +1634,10 @@ __ENGINE_JS__
   }
   // 限制后的目标位移：有边框时主体可见包围盒（含位移）不越过卡体外沿（卡体外沿=边框外沿），
   // 否则主体边缘会从边框旁露出穿帮；边框越窄余量越小，位移自动收窄
-  function clampParallax(rawX, rawY) {
+  // loose=true 时不限制：光栅卡「每帧视差主体」的层是整卡尺寸的透明图，位移是效果本身，
+  // 而那时前景是空白图（subjectBox 恒 null）⇒ 照常走这条会得到 {0,0}，整层动都不动。
+  function clampParallax(rawX, rawY, loose) {
+    if (loose) return { x: rawX, y: rawY };
     if (parallaxDist < 0) return { x: rawX, y: rawY };        // 无边框：保留原视差漂浮
     if (parallaxDist === 0 || !subjectBox) return { x: 0, y: 0 }; // 中心在边框外或无主体：关闭视差
     var b = subjectBox;
@@ -1710,9 +1718,13 @@ __ENGINE_JS__
 
     // 视差安全限制：主体可见包围盒（含位移）不越过边框内沿，窄边框自动收窄位移；
     // 主体偏移（用户手动调位）叠加进视差目标——仅偏移图像位置，蒙版随 syncWorld 钉在卡片坐标
-    if (!subjectBox) subjectBox = computeSubjectBox();
+    if (!subjectBox && subjectBoxScan < 120) {
+      subjectBoxScan++;
+      subjectBox = computeSubjectBox();
+    }
     const par = clampParallax(hoverCurrent.x * __PARA_AMP__ + __SUBJ_OFFSET_X__ * CARD_WIDTH,
-                              -hoverCurrent.y * 0.14 + __SUBJ_OFFSET_Y__ * CARD_HEIGHT);
+                              -hoverCurrent.y * 0.14 + __SUBJ_OFFSET_Y__ * CARD_HEIGHT,
+                              lentiParaGroups.length > 0);
     foregroundGroup.position.x = damp(foregroundGroup.position.x, par.x, 9.5, dt);
     foregroundGroup.position.y = damp(foregroundGroup.position.y, par.y, 9.5, dt);
     foregroundGroup.position.z = damp(foregroundGroup.position.z, 0.024, 9.5, dt);
@@ -1737,6 +1749,7 @@ __ENGINE_JS__
     cardMaterial.uniforms.uPointer.value.copy(pointer);
 __SEAL_TICK__
 __LENTI_TICK__
+__LENTI_PARA_TICK__
 __GLOW_TICK__
 
     __fx.tick(dt);
@@ -4101,6 +4114,45 @@ def _lenti_load_js(urls, n: int, o: dict) -> str:
     )
 
 
+PARA_ROUND_JS = r"""  // 视差层圆角：层图是整卡矩形，直接贴会从卡角露出方角（卡面本身是圆角剪的）。
+  // 走 canvas 把 alpha 削成圆角再当纹理用；FG_ROUND_JS 只能换 foregroundTexture
+  // 那一张，新加的层必须各做各的。
+  function _paraRound(src, cb) {
+    var im = new Image();
+    im.onload = function () {
+      var nv = document.createElement('canvas');
+      nv.width = im.width; nv.height = im.height;
+      var cx = nv.getContext('2d');
+      cx.clearRect(0, 0, nv.width, nv.height);
+      cx.drawImage(im, 0, 0);
+      var r = Math.min(38.4 * nv.width / 900, nv.height * 0.5);
+      cx.globalCompositeOperation = 'destination-in';
+      cx.beginPath();
+      cx.moveTo(r, 0); cx.lineTo(nv.width - r, 0);
+      cx.arcTo(nv.width, 0, nv.width, r, r);
+      cx.lineTo(nv.width, nv.height - r);
+      cx.arcTo(nv.width, nv.height, nv.width - r, nv.height, r);
+      cx.lineTo(r, nv.height);
+      cx.arcTo(0, nv.height, 0, nv.height - r, r);
+      cx.lineTo(0, r);
+      cx.arcTo(0, 0, r, 0, r);
+      cx.closePath(); cx.fill();
+      var t = new THREE.Texture();
+      t.colorSpace = THREE.SRGBColorSpace;
+      t.anisotropy = 8;
+      t.image = nv;
+      t.needsUpdate = true;
+      cb(t);
+    };
+    im.src = src;
+  }
+"""
+
+
+def _para_round_helper_js(needed: bool) -> str:
+    return PARA_ROUND_JS if needed else ""
+
+
 def _parallax_layers_js(payload: dict | None, round_foreground: bool = False) -> str:
     """视差主体的多层前景 JS（没有就给一段空壳，让 tick 里的循环自然跳过）。
 
@@ -4126,44 +4178,10 @@ def _parallax_layers_js(payload: dict | None, round_foreground: bool = False) ->
         "    { src: %s, d: %s }" % (json.dumps(L["src"]), repr(round(float(L.get("depth", 1.0)), 3)))
         for L in payload["layers"]
     )
-    helper = ""
-    if round_foreground:
-        helper = (
-            "  function _paraRound(src, cb) {\n"
-            "    var im = new Image();\n"
-            "    im.onload = function () {\n"
-            "      var nv = document.createElement('canvas');\n"
-            "      nv.width = im.width; nv.height = im.height;\n"
-            "      var cx = nv.getContext('2d');\n"
-            "      cx.clearRect(0, 0, nv.width, nv.height);\n"
-            "      cx.drawImage(im, 0, 0);\n"
-            "      var r = Math.min(38.4 * nv.width / 900, nv.height * 0.5);\n"
-            "      cx.globalCompositeOperation = 'destination-in';\n"
-            "      cx.beginPath();\n"
-            "      cx.moveTo(r, 0); cx.lineTo(nv.width - r, 0);\n"
-            "      cx.arcTo(nv.width, 0, nv.width, r, r);\n"
-            "      cx.lineTo(nv.width, nv.height - r);\n"
-            "      cx.arcTo(nv.width, nv.height, nv.width - r, nv.height, r);\n"
-            "      cx.lineTo(r, nv.height);\n"
-            "      cx.arcTo(0, nv.height, 0, nv.height - r, r);\n"
-            "      cx.lineTo(0, r);\n"
-            "      cx.arcTo(0, 0, r, 0, r);\n"
-            "      cx.closePath(); cx.fill();\n"
-            "      var t = new THREE.Texture();\n"
-            "      t.colorSpace = THREE.SRGBColorSpace;\n"
-            "      t.anisotropy = 8;\n"
-            "      t.image = nv;\n"
-            "      t.needsUpdate = true;\n"
-            "      cb(t);\n"
-            "    };\n"
-            "    im.src = src;\n"
-            "  }\n"
-        )
     return (
         "  const PARA_MAXD = %s;\n" % repr(round(float(payload.get("max_depth") or 1.0), 3)) +
         "  const PARA_ROUND = %s;\n" % ("true" if round_foreground else "false") +
         "  const paraLayers = [];\n" +
-        helper +
         "  (function () {\n"
         "    var defs = [\n" + defs + "\n    ];\n"
         "    defs.forEach(function (D, i) {\n"
@@ -4186,6 +4204,134 @@ def _parallax_layers_js(payload: dict | None, round_foreground: bool = False) ->
         "    if (paraLayers.length) fgMesh.visible = false;\n"
         "    window.__paraLayers = paraLayers;   // 调试/自动验证用：看各层实时位移\n"
         "  })();\n"
+    )
+
+
+def _lenti_para_layers_js(payload: dict | None, round_foreground: bool = False) -> str:
+    """光栅卡「每帧一个视差主体」的多层前景（没有就给空壳）。
+
+    payload 来自 webapp._lenti_para_payload()：
+        {"amp": 0.16,
+         "frames": [ None,                                  # 该帧没挂主体
+                     {"max_depth": 1.9, "amp": 0.16,
+                      "layers": [{"src": "parallax/p0/L00.webp", "depth": 0.15}, ...]},
+                     ... ]}                                 # 与光栅帧一一对应
+
+    ★ 每帧一整套 plane（帧数 × 层数），但只有「当前帧」那套是可见的，
+      按着色器同一条相位公式切组 ⇒ 倾斜时各层错动、换帧时整套跟着换。
+    ★ 贴图懒加载（_lentiParaEnsure）：6 帧 × 4 层全预载要几百 MB 显存，
+      而任意时刻最多两帧在过渡 —— 用到哪帧才传哪帧。
+    ★ 位移 = par × (d / maxd) × (该帧幅度 / 最大幅度)，group 已经吃了 par，
+      所以每层只补差额（和单主体同一套公式）。
+    """
+    frames = (payload or {}).get("frames") or []
+    if not frames or not any(frames):
+        return ("  const LENTI_PARA = [];\n"
+                "  const lentiParaGroups = [];\n"
+                "  function _lentiParaEnsure(i) { return null; }\n")
+    defs = []
+    for f in frames:
+        if not f or not f.get("layers"):
+            defs.append("null")
+            continue
+        items = ", ".join(
+            "{ src: %s, d: %s }" % (json.dumps(L["src"]), repr(round(float(L.get("depth", 1.0)), 3)))
+            for L in f["layers"])
+        defs.append("{ maxd: %s, amp: %s, items: [%s] }" % (
+            repr(round(float(f.get("max_depth") or 1.0), 3)),
+            repr(round(float(f.get("amp") or 0.0), 4)), items))
+    body = ",\n".join("    " + d for d in defs)
+    return (
+        "  const LENTI_PARA = [\n" + body + "\n  ];\n"
+        "  const lentiParaGroups = [];\n"
+        "  (function () {\n"
+        "    if (!LENTI_PARA.length) return;\n"
+        "    var ampMax = 0;\n"
+        "    LENTI_PARA.forEach(function (G) { if (G) ampMax = Math.max(ampMax, G.amp || 0); });\n"
+        "    if (ampMax <= 0) ampMax = 1;\n"
+        "    window.__lentiParaAmp = ampMax;\n"
+        "    LENTI_PARA.forEach(function (G) {\n"
+        "      if (!G) { lentiParaGroups.push(null); return; }\n"
+        "      var grp = { items: [], maxd: Math.max(G.maxd || 1, 1e-4),\n"
+        "                  k: (G.amp || ampMax) / ampMax, loaded: false };\n"
+        "      (G.items || []).forEach(function (D, i) {\n"
+        "        var mat = new THREE.MeshBasicMaterial({ transparent: true, opacity: 1.0,\n"
+        "          alphaTest: 0.02, depthWrite: false, side: THREE.FrontSide, toneMapped: false });\n"
+        "        var m = new THREE.Mesh(new THREE.PlaneGeometry(CARD_WIDTH, CARD_HEIGHT), mat);\n"
+        "        m.position.set(0, 0, fgMesh.position.z + 0.0002 * (i + 1));\n"
+        "        m.renderOrder = fgMesh.renderOrder + 0.02 * (i + 1);\n"
+        "        m.visible = false;\n"
+        "        foregroundGroup.add(m);\n"
+        "        grp.items.push({ m: m, mat: mat, d: D.d || 0, src: D.src });\n"
+        "      });\n"
+        "      lentiParaGroups.push(grp);\n"
+        "    });\n"
+        "    if (lentiParaGroups.length) fgMesh.visible = false;\n"
+        "    window.__lentiParaGroups = lentiParaGroups;   // 调试/验证用\n"
+        "  })();\n"
+        "  function _lentiParaEnsure(i) {\n"
+        "    var g = lentiParaGroups[i];\n"
+        "    if (!g || g.loaded) return g;\n"
+        "    g.loaded = true;\n"
+        "    g.items.forEach(function (it) {\n"
+        "      if (PARA_ROUND && typeof _paraRound === 'function') {\n"
+        "        _paraRound(it.src, function (t) { it.mat.map = t; it.mat.needsUpdate = true; });\n"
+        "      } else {\n"
+        "        var tx = loader.load(it.src);\n"
+        "        tx.colorSpace = THREE.SRGBColorSpace;\n"
+        "        tx.anisotropy = 8;\n"
+        "        it.mat.map = tx; it.mat.needsUpdate = true;\n"
+        "      }\n"
+        "    });\n"
+        "    return g;\n"
+        "  }\n"
+    )
+
+
+def _lenti_para_tick_js(fade: str) -> str:
+    """每帧按光栅相位切换视差层组（紧跟 __LENTI_TICK__，那里刚算好 __lentiLT）。"""
+    return (
+        "  if (lentiParaGroups.length) {\n"
+        "    // 组数必须与着色器帧数一致（uLentiN），否则切帧会差一帧\n"
+        "    var _lpN = lentiParaGroups.length;\n"
+        "    if (cardMaterial.uniforms.uLentiN) {\n"
+        "      _lpN = Math.min(_lpN, Math.round(cardMaterial.uniforms.uLentiN.value));\n"
+        "    }\n"
+        "    if (_lpN <= 0) _lpN = lentiParaGroups.length;\n"
+        "    var _lpLt = (typeof window.__lentiLT === 'number') ? window.__lentiLT : 0;\n"
+        "    var _lpI0 = Math.floor(_lpLt);\n"
+        "    var _lpW = _lpLt - _lpI0;\n"
+        "    if (" + json.dumps(fade or "stripe") + " === 'cut') {\n"
+        "      _lpW = _lpW >= 0.5 ? 1 : 0;\n"
+        "    } else {\n"
+        "      // 与着色器 whole/stripe 同一条 smoothstep 窗口：卡面在溶解，层组一起溶\n"
+        "      var _lpU = cardMaterial.uniforms;\n"
+        "      var _lpS = Math.max((_lpU.uLSoft ? _lpU.uLSoft.value : 0.2), 0.004);\n"
+        "      var _lpA = 0.5 - 0.5 * _lpS, _lpB = 0.5 + 0.5 * _lpS;\n"
+        "      var _lpT = Math.min(1, Math.max(0, (_lpW - _lpA) / Math.max(1e-5, _lpB - _lpA)));\n"
+        "      _lpW = _lpT * _lpT * (3 - 2 * _lpT);\n"
+        "    }\n"
+        "    var _lpF0 = ((_lpI0 % _lpN) + _lpN) % _lpN;\n"
+        "    var _lpF1 = (_lpF0 + 1) % _lpN;\n"
+        "    for (var _li = 0; _li < _lpN; _li++) {\n"
+        "      var _lg = lentiParaGroups[_li];\n"
+        "      if (!_lg) continue;\n"
+        "      var _lw = (_li === _lpF0) ? (1 - _lpW) : 0;\n"
+        "      if (_lpF1 === _li && _lpN > 1) _lw = _lpW;\n"
+        "      if (_lpF0 === _lpF1) _lw = 1;\n"
+        "      var _lon = _lw > 0.004;\n"
+        "      if (_lon) _lentiParaEnsure(_li);\n"
+        "      for (var _lj = 0; _lj < _lg.items.length; _lj++) {\n"
+        "        var _it = _lg.items[_lj];\n"
+        "        _it.m.visible = _lon;\n"
+        "        if (_lon) _it.mat.opacity = _lw;\n"
+        "        // 层的总位移 = par × k × d/maxd；group 已经吃了 par，这里只补差额\n"
+        "        var _lk = (_it.d / _lg.maxd) * _lg.k - 1.0;\n"
+        "        _it.m.position.x = damp(_it.m.position.x, par.x * _lk, 9.5, dt);\n"
+        "        _it.m.position.y = damp(_it.m.position.y, par.y * _lk, 9.5, dt);\n"
+        "      }\n"
+        "    }\n"
+        "  }\n"
     )
 
 
@@ -4247,7 +4393,8 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
                     lenti_images: list | None = None,
                     lenti_opts: dict | None = None,
                     bg_shader: str | None = None,
-                    parallax: dict | None = None) -> str:
+                    parallax: dict | None = None,
+                    lenti_parallax: dict | None = None) -> str:
     """生成自包含 3D 卡网页 HTML。
 
     three_rel: three.js 的 script src。默认是"上两级"的 ../../shared/lib/，
@@ -4286,6 +4433,9 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
     bg_shader: 程序化背景（"void" = 虚空星空；"end_portal" 是旧名别名）。开启后卡面颜色改由着色器
     生成（front 贴图不再提供颜色，只保留 alpha），不占任何纹理单元；2D 成品图仍用
     素材库那张静态 PNG，所以静态/动态观感一致。
+    parallax: 单主体多层视差（parallax.prepare_for_card 的返回）。
+    lenti_parallax: 光栅卡「每帧一个视差主体」，{"amp":…, "frames":[{layers,max_depth,amp}|None…]}；
+    与 parallax 二选一（两者都传时两套层会同时显示）。
     """
     fg_js = (
         # 浮于边框之上：前景组整体提升到边框层之上、卡封之下
@@ -4573,6 +4723,10 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
             "    _lv.ax.copy(_lv.ex).multiplyScalar(Math.cos(_la))\n"
             "      .addScaledVector(_lv.ey, -Math.sin(_la)).normalize();\n"
             "    cardMaterial.uniforms.uLViewS.value = _lv.vd.dot(_lv.ax);\n"
+            "    // 连续帧位置（与 shader 的 whole/cut 同一条公式）：光栅「每帧视差主体」\n"
+            "    // 靠它决定切哪一帧的层组。stripe 是逐像素相位，这里只能取卡面中心值。\n"
+            "    window.__lentiLT = (cardMaterial.uniforms.uLPhase ? cardMaterial.uniforms.uLPhase.value : 0)\n"
+            "      + _lv.vd.dot(_lv.ax) * (cardMaterial.uniforms.uLGyro ? cardMaterial.uniforms.uLGyro.value : 0);\n"
             "  }\n")
     else:
         lenti_glsl = lenti_face = lenti_load = lenti_uniform_values = ""
@@ -4614,6 +4768,15 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
     engine_js = _engine_js(foil_lenti_glsl, foil_lenti_face,
                            foil_bg_glsl, foil_bg_face, bg_share)
 
+    # 视差幅度换到场景单位：payload 的 amp 是「占卡宽的比例」（编辑器预览与文档都按这个口径），
+    # 而 tick 里 par 直接当场景位移用 ⇒ 要乘卡宽，否则卡上只有预览的 1/2.25（卡宽 2.25）。
+    # 没有视差主体时不乘：那 0.2 是普通主体的漂浮量，改了所有已存卡的手感都会变。
+    if parallax or lenti_parallax:
+        para_amp = float((parallax or {}).get("amp") or (lenti_parallax or {}).get("amp")
+                         or 0.2) * float(card_width)
+    else:
+        para_amp = 0.2
+
     return (
         CARD_HTML_TEMPLATE
         .replace("__THREE_SRC__", three_rel)
@@ -4634,8 +4797,11 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
         .replace("__FACE_MESH_JS__", _face_mesh_js(face_scales))
         .replace("__BG_LAYER__", _bg_layer_js(background_rel, face_scales))
         .replace("__FG_BLOCK__", fg_js)
+        .replace("__PARA_ROUND__",
+                 _para_round_helper_js(round_foreground and (bool(parallax) or bool(lenti_parallax))))
         .replace("__PARALLAX_LAYERS__", _parallax_layers_js(parallax, round_foreground))
-        .replace("__PARA_AMP__", repr(round(float((parallax or {}).get("amp") or 0.2), 4)))
+        .replace("__LENTI_PARA_LAYERS__", _lenti_para_layers_js(lenti_parallax, round_foreground))
+        .replace("__PARA_AMP__", repr(round(para_amp, 4)))
         .replace("__FG_ADAPT_JS__", _fg_adapt_js(adapt_limit, content_scale, follow_bg, bg_follow_rel))
         .replace("__FG_ROUND_JS__", FG_ROUND_JS if round_foreground else "")
         .replace("__OUTLINE_LAYER__", outline_layer)
@@ -4650,6 +4816,9 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
                  + scale_js + mask_js + offset_js)
         .replace("__SEAL_TICK__", _SEAL_TICK_JS + bg_tick)
         .replace("__LENTI_TICK__", lenti_tick)
+        .replace("__LENTI_PARA_TICK__",
+                 _lenti_para_tick_js(str(_lo.get("fade") or "stripe"))
+                 if (lenti_parallax and lenti_parallax.get("frames")) else "")
         .replace("__GLOW_TICK__", _GLOW_TICK_JS)
         .replace("__GLOW_INIT__", _glow_init_js(glow_name, glow_strength, glow_boost))
         .replace("__TEXT_LAYER__", _text_layer_js(description, text_type, text_pos))

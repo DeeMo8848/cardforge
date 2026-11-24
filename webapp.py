@@ -1456,6 +1456,59 @@ def _lenti_opts_of(data: dict) -> dict:
     return out
 
 
+def _lenti_para_payload(data: dict, dst: Path, n: int | None = None) -> dict | None:
+    """光栅卡「每帧一个视差主体」：把每帧挂的主体落到 dst/parallax/p<n>/。
+
+    data["lenti_frame_parallax"] 与 lenti_images 同序（空串/缺项 = 该帧不挂主体）。
+    同一个主体被多帧引用时只落一份（按 pid 去重，帧里共享同一套层图）。
+    n: 实际帧数（前端的下拉数组可能比图源多，多出来的必须裁掉 ——
+       层组数量要和着色器的 uLentiN 对齐，否则切帧会错位）。
+
+    返回 {"amp": 最大幅度, "frames": [{layers,max_depth,amp} | None, ...]}，
+    直接喂 webcard.build_card_html(lenti_parallax=...)。
+    """
+    pids = data.get("lenti_frame_parallax")
+    if not isinstance(pids, list):
+        return None
+    pids = [str(x or "").strip() for x in pids][:6]
+    if n:
+        pids = pids[:max(0, int(n))]
+    elif any(pids):
+        # 没给帧数就按「最后一个非空」截断，避免尾部空串多出一组 null
+        while pids and not pids[-1]:
+            pids.pop()
+    if not any(pids):
+        return None
+    loaded: dict[str, tuple | None] = {}   # pid -> (sub, payload) 或失败记 None
+    frames: list = []
+    amp_max = 0.0
+    for i, pid in enumerate(pids):
+        if not pid:
+            frames.append(None)
+            continue
+        if pid not in loaded:
+            sub = "p%d" % len(loaded)
+            try:
+                loaded[pid] = (sub, parallax.prepare_for_card(pid, dst, sub=sub))
+            except Exception as e:  # noqa: BLE001
+                print(f"[cardforge] 光栅第 {i + 1} 帧视差主体失败（{pid}）：{e}")
+                loaded[pid] = None
+        rec = loaded[pid]
+        if rec is None:
+            frames.append(None)
+            continue
+        pl = rec[1]
+        frames.append({"layers": pl["layers"], "max_depth": pl["max_depth"],
+                       "amp": pl["amp"]})
+        try:
+            amp_max = max(amp_max, float(pl.get("amp") or 0))
+        except (TypeError, ValueError):
+            pass
+    if not any(frames):
+        return None
+    return {"amp": amp_max or parallax.DEFAULT_AMP, "frames": frames}
+
+
 def _write_preview_html(html: str) -> dict:
     """把预览页写进 _preview/<token>/ 并返回访问 URL。
 
@@ -2140,7 +2193,11 @@ def _save_assembly(data: dict) -> dict:
     # 它自带每一层的透明图（栅格化到整卡尺寸）+ meta，卡里就不再是单张 foreground.png。
     # foreground.png 仍写一份各层合成图：2D 成品图、收集册缩略图、老逻辑都靠它。
     para_payload = None
-    if parallax_sel:
+    # 光栅卡「每帧视差主体」：每帧一套层图（parallax/p0、p1…），逐帧挂。
+    # ★ 视频/GIF 模式（帧是图集里抽的）不挂逐帧主体：帧数几十帧，逐帧配主体不现实。
+    lenti_para = (_lenti_para_payload(data, out, len(lenti_rel))
+                  if (lenti_rel and not lenti_video) else None)
+    if parallax_sel and not lenti_para:
         try:
             para_payload = parallax.bind_to_card(parallax_sel, out, CARD_W, CARD_H)
         except Exception as e:  # noqa: BLE001
@@ -2294,7 +2351,8 @@ def _save_assembly(data: dict) -> dict:
                                 lenti_images=lenti_rel,
                                 lenti_opts=lenti_opts,
                                 bg_shader=bg_shader,
-                                parallax=para_payload),
+                                parallax=para_payload,
+                                lenti_parallax=lenti_para),
         encoding="utf-8",
     )
 
@@ -2358,7 +2416,12 @@ def _save_assembly(data: dict) -> dict:
                  "alpha": bool(lenti_video.get("alpha")),
                  "opts": lenti_opts}
                 if lenti_video else
-                {"images": lenti_specs, "opts": lenti_opts} if lenti_rel else None),
+                {"images": lenti_specs, "opts": lenti_opts,
+                 # 每帧视差主体（与 images 同序，空串 = 该帧不挂）：重开时回填下拉
+                 **({"frame_parallax": [str(x or "") for x in
+                                        (data.get("lenti_frame_parallax") or [])][:6]}
+                    if lenti_para else {})}
+                if lenti_rel else None),
         },
     )
     # 卡封叠加层清单（重开这张卡时回填到拼装面板）
@@ -2371,6 +2434,14 @@ def _save_assembly(data: dict) -> dict:
         fg = None
         if (out / "foreground.png").stat().st_size > 0:
             fg = Image.open(out / "foreground.png")
+        # 光栅「每帧视差主体」：3D 里是逐帧的层组（图上没有），静态成品图就取
+        # 「第 1 帧挂的主体」合成一份，跟 3D 正面静止时的观感一致。
+        # ★ 只用来合成图片，不写回 foreground.png —— 那张是 3D 的主体纹理，
+        #   非空会让 frame_fit_subject 把边框缩到主体包围盒上（边框会缩进卡里）。
+        if lenti_para:
+            _fp = [str(x or "") for x in (data.get("lenti_frame_parallax") or [])]
+            if _fp and _fp[0]:
+                fg = parallax.composite(parallax.load_item(_fp[0]), (CARD_W, CARD_H))
         composed = compose_card(fg, style="transparent", front=_front_abs,
                                 background=str(bg_rel_path) if bg_rel_path else None,
                                 frame=str(frame_path) if frame_rel else None,
@@ -3508,12 +3579,21 @@ class Handler(BaseHTTPRequestHandler):
                     if tp.exists() and tp.stat().st_size > 0:
                         fg_im = Image.open(tp)
                 # 视差主体：2D 预览取「中性视角」的合成图（静止看不出层次，但构图对）
-                if parallax_sel:
+                if parallax_sel and not lenti_urls:
                     try:
                         fg_im = parallax.composite(parallax.load_item(parallax_sel),
                                                    (CARD_W, CARD_H))
                     except Exception as e:  # noqa: BLE001
                         print(f"[cardforge] 视差主体 2D 预览失败：{e}")
+                # 光栅「每帧视差主体」：静态图对应第 1 帧，取它挂的那套合成图
+                if lenti_urls:
+                    _fp = [str(x or "") for x in (data.get("lenti_frame_parallax") or [])]
+                    if _fp and _fp[0]:
+                        try:
+                            fg_im = parallax.composite(parallax.load_item(_fp[0]),
+                                                       (CARD_W, CARD_H))
+                        except Exception as e:  # noqa: BLE001
+                            print(f"[cardforge] 光栅首帧 2D 预览失败：{e}")
                 composed = compose_card(
                     fg_im, style="transparent", front=front_p,
                     background=str(bg_path) if bg_path else None,
@@ -3539,7 +3619,11 @@ class Handler(BaseHTTPRequestHandler):
             pdir = PREVIEW_DIR / token
             pdir.mkdir(parents=True, exist_ok=True)
             para_payload = None
-            if parallax_sel:
+            # 光栅卡「每帧视差主体」优先：它和单主体都是叠在前景组里的层，
+            # 同时挂等于两套层一起显示（所以有逐帧主体时忽略单主体）
+            lenti_para = (_lenti_para_payload(data, pdir, len(lenti_urls))
+                          if lenti_urls else None)
+            if parallax_sel and not lenti_para:
                 try:
                     para_payload = parallax.prepare_for_card(parallax_sel, pdir)
                 except Exception as e:  # noqa: BLE001
@@ -3577,7 +3661,8 @@ class Handler(BaseHTTPRequestHandler):
                                 # "../../shared/lib/" 会解析成 /preview/shared/... 而 404；
                                 # 预览页只在 http 下打开，直接用 /shared/ 路由的绝对路径。
                                 three_rel=webcard.THREE_SRC_ABS,
-                                parallax=para_payload)
+                                parallax=para_payload,
+                                lenti_parallax=lenti_para)
             (pdir / "preview.html").write_text(html, encoding="utf-8")
             _cleanup_old_previews()
             return {"ok": True, "url": f"/preview/_preview/{token}/preview.html"}
@@ -3780,6 +3865,15 @@ PAGE_HTML = r"""<!DOCTYPE html>
   }
   .lenti-chips .lc b { flex: 0 0 auto; color: #8d8072; cursor: pointer; }
   .lenti-chips .lc b:hover { color: #e07a5f; }
+  /* 光栅卡「每帧视差主体」：一帧一行，行内 select 撑满 */
+  #asmLentiParaBox[hidden] { display: none; }
+  .lenti-para { display: flex; flex-direction: column; gap: 4px; margin: 4px 0 6px; }
+  .lenti-para .lp-row { display: flex; align-items: center; gap: 8px; }
+  .lenti-para .lp-row > span {
+    flex: 0 0 108px; font-size: 11px; color: var(--muted);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .lenti-para .lp-row > select { flex: 1 1 auto; min-width: 0; font-size: 12px; padding: 3px 5px; }
   .arearow input[type=range] {
     flex: 1 1 90px; min-width: 80px; width: auto; height: 16px;
     accent-color: var(--gold); background: transparent;
@@ -4253,6 +4347,20 @@ PAGE_HTML = r"""<!DOCTYPE html>
             <span class="lval" id="asmLentiVFramesV"></span>
           </div>
           <div class="lenti-chips" id="asmLentiChips"></div>
+          <div id="asmLentiParaBox" hidden>
+            <div class="arearow" style="margin-bottom:4px">
+              <span>每帧视差主体</span>
+              <button class="btn small ghost" id="asmLentiParaAll" type="button"
+                      title="把第 1 帧选的视差主体复制到所有帧">全部同第 1 帧</button>
+            </div>
+            <div id="asmLentiParaRows" class="lenti-para"></div>
+            <div class="mini" style="color:#8d8477;font-size:11px;line-height:1.55;margin:2px 0 8px">
+              偏转卡牌时，这一帧的主体各层按深度错动；换帧时整套视差层跟着换。挂了逐帧主体后，
+              上面的「🧅 视差主体」不生效（两套层一起显示就是重影）。
+              换帧方式建议用「整幅柔和过渡 / 整幅直接切换」—— 条纹推进时卡面左右两端本来就是不同的帧，
+              视差层只能跟随中间那一帧。
+            </div>
+          </div>
           <div class="arearow" style="margin-bottom:4px">
             <span>换帧方式</span>
             <select id="asmLentiFade" style="flex:1">
@@ -5664,7 +5772,9 @@ const asmLentiBox = document.getElementById('asmLentiBox');
 const asmLentiChips = document.getElementById('asmLentiChips');
 const asmLentiAngleEl = document.getElementById('asmLentiAngle');
 const asmLentiVFramesEl = document.getElementById('asmLentiVFrames');
-const asmLenti = { list: [], video: null };
+const asmLenti = { list: [], video: null, framePara: [] };
+const escHtml = (s) => String(s == null ? '' : s).replace(/[&<>"]/g,
+  (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
 function asmLentiName(spec) {
   const t = String(spec || '').split(/[\\/:]/).filter(Boolean).pop() || '图片';
@@ -5713,16 +5823,56 @@ function asmLentiDraw() {
       '<span class="lc"><span>🎬 ' + (v.name || '视频') + ' · ' + v.frames + ' 帧（' +
       v.cols + '×' + v.rows + ' 图集' + (tags.length ? ' · ' + tags.join(' · ') : '') +
       '）</span><b id="asmLentiVideoDel" title="移除视频">×</b></span>';
+    asmLentiParaDraw();
     return;
   }
   if (!asmLenti.list.length) {
     asmLentiChips.innerHTML = '<span class="lc">还没有图源：上传 2~6 张，或「🎬 上传视频 / GIF」整段抽帧</span>';
+    asmLentiParaDraw();
     return;
   }
   asmLentiChips.innerHTML = asmLenti.list.map((sp, i) =>
     '<span class="lc"><span>' + (i + 1) + '. ' + asmLentiName(sp) + '</span>' +
     '<b data-lx="' + i + '">×</b></span>').join('');
+  asmLentiParaDraw();
 }
+// 每帧视差主体：只有「多张图片」模式才有（视频/GIF 几十帧，一帧帧挂主体不现实）
+function asmLentiParaDraw() {
+  const box = document.getElementById('asmLentiParaBox');
+  const rows = document.getElementById('asmLentiParaRows');
+  if (!box || !rows) return;
+  const show = !asmLenti.video && asmLenti.list.length > 0;
+  box.hidden = !show;
+  if (!show) { rows.innerHTML = ''; return; }
+  if (!Array.isArray(asmLenti.framePara)) asmLenti.framePara = [];
+  while (asmLenti.framePara.length < asmLenti.list.length) asmLenti.framePara.push('');
+  asmLenti.framePara.length = asmLenti.list.length;
+  const opts = ['<option value="">— 不挂 —</option>'].concat(
+    PARALLAX_ITEMS.map(it => '<option value="' + escHtml(it.id) + '">' +
+      escHtml(it.name) + '（' + it.layer_count + ' 层）</option>')
+  );
+  rows.innerHTML = asmLenti.list.map((sp, i) => {
+    const cur = asmLenti.framePara[i] || '';
+    const body = opts.map(o => {
+      // 直接在拼串里标 selected，省一次遍历
+      if (!cur) return o;
+      return o.replace('value="' + escHtml(cur) + '"', 'value="' + escHtml(cur) + '" selected');
+    }).join('');
+    return '<div class="lp-row"><span title="' + escHtml(asmLentiName(sp)) + '">' +
+      (i + 1) + '. ' + escHtml(asmLentiName(sp)) + '</span>' +
+      '<select data-lpara="' + i + '">' + body + '</select></div>';
+  }).join('');
+  rows.querySelectorAll('select[data-lpara]').forEach((s) => {
+    s.onchange = () => { asmLenti.framePara[+s.dataset.lpara] = s.value; scheduleAsmPreview(0); };
+  });
+}
+document.getElementById('asmLentiParaAll').addEventListener('click', () => {
+  const first = (asmLenti.framePara || [])[0] || '';
+  if (!asmLenti.list.length) return;
+  asmLenti.framePara = asmLenti.list.map(() => first);
+  asmLentiParaDraw();
+  scheduleAsmPreview(0);
+});
 function asmLentiActive() {
   return asmLentiEl.checked && (asmLenti.list.length > 0 || !!asmLenti.video);
 }
@@ -5766,7 +5916,14 @@ function asmLentiFadeSync() {
 function asmLentiReset(lc, cardId) {
   lc = lc || {};
   asmLenti.list.length = 0;
+  asmLenti.framePara = [];
   (Array.isArray(lc.images) ? lc.images : []).slice(0, 6).forEach((sp) => asmLenti.list.push(sp));
+  // 每帧视差主体（与 images 同序；旧卡没有这个键 ⇒ 全空）
+  if (Array.isArray(lc.frame_parallax)) {
+    for (let i = 0; i < asmLenti.list.length; i++) {
+      asmLenti.framePara.push(String(lc.frame_parallax[i] || ''));
+    }
+  }
   // 视频/GIF 卡有两种来历，都要能复原成「视频卡」状态：
   //   1) atlas_src = "lvid:<md5>-f<N>" —— 抽帧缓存还在，改帧数也能重抽
   //   2) 只有 atlas = "lenti/atlas.webp" —— 批量脚本出的卡/旧卡，图集就在卡目录里，
@@ -5828,6 +5985,8 @@ asmLentiChips.addEventListener('click', (e) => {
   const i = e.target.dataset && e.target.dataset.lx;
   if (i === undefined) return;
   asmLenti.list.splice(+i, 1);
+  // 逐帧视差主体跟着这一帧一起删，否则后面的帧会错位挂到前一帧的主体上
+  if (Array.isArray(asmLenti.framePara)) asmLenti.framePara.splice(+i, 1);
   asmLentiDraw();
   scheduleAsmPreview(200);
 });
@@ -6275,6 +6434,7 @@ async function postAsmPreview() {
         face_as_fg: asmFaceFgEl.checked,
         parallax: asmParallaxSel.value,
         lenti_images: asmLentiActive() ? asmLenti.list.slice(0, 6) : [],
+        lenti_frame_parallax: (asmLentiActive() && !asmLenti.video) ? (asmLenti.framePara || []).slice(0, 6) : [],
         lenti: asmLentiOpts(),
         frame: asmFrameSel.value,
         custom_bg: asmBgSel.value,
@@ -6329,6 +6489,7 @@ document.getElementById('asmSave').addEventListener('click', async () => {
         face_as_fg: asmFaceFgEl.checked,
         parallax: asmParallaxSel.value,
         lenti_images: asmLentiActive() ? asmLenti.list.slice(0, 6) : [],
+        lenti_frame_parallax: (asmLentiActive() && !asmLenti.video) ? (asmLenti.framePara || []).slice(0, 6) : [],
         lenti: asmLentiOpts(),
         frame: asmFrameSel.value,
         custom_bg: asmBgSel.value,

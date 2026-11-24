@@ -160,13 +160,50 @@ def _shift(im, dx: float, dy: float):
                         resample=Image.BICUBIC)
 
 
+def _carve_masks(matte, layers: int):
+    """主体遮罩 → `layers` 层同心掩膜（第 k 层 = 距离变换 ≥ k 档），做「立体卡雕」。
+
+    实体多层卡雕是拿一张画沿轮廓一层层往里挖、每层垫出一点厚度。单张 2D 图没有
+    真深度，但「离主体轮廓越远越靠前」这个近似跟卡雕的等值线天然一致：用
+    `distance_transform_edt(matte)` 归一化后分档，中心档位最高（最上层、位移最大），
+    轮廓边缘档位最低（正好贴在背景底板上）。
+
+    返回 None 表示抠图结果不可用（全白/主体太小），调用方应退回单层视差。
+    """
+    import numpy as np
+    try:
+        from scipy import ndimage as ndi
+    except ImportError:
+        return None
+    m = np.asarray(matte) > 110
+    if not m.any():
+        return None
+    d = ndi.distance_transform_edt(m)
+    dmax = float(d.max())
+    if dmax < 6:
+        return None
+    d = d / dmax
+    idx = np.zeros(m.shape, np.float32)
+    # d≈0 在轮廓边上 → 第 1 档；d=1 在主体最深处 → 第 layers 档
+    idx[m] = np.clip(np.floor(d[m] * layers) + 1, 1, layers)
+    return [(idx >= k - 1e-3) for k in range(1, layers + 1)]
+
+
 def parallax_frames(path, n: int = 5, aspect: float = DEFAULT_ASPECT,
                     depth: float = 1.0, pop: float = 0.55,
-                    bg_shift: float = 0.22):
+                    bg_shift: float = 0.22, layers: int = 1,
+                    carve: float = 0.55):
     """把一张画生成 n 帧横向视差序列（模拟立体光栅）。
 
-    depth: 位移幅度（占画宽的百分比，1.0 ≈ 2.6%）
-    pop:   主体随视差缩放（负值向内、正值向外凸）
+    depth:  位移幅度（占画宽的百分比，1.0 ≈ 2.6%）
+    pop:    主体随视差缩放（负值向内、正值向外凸）
+    layers: 主体内部再切几层（立体卡雕）。1 = 旧行为（单层主体贴在底板上）；
+            ≥2 时按距离变换分档，越靠内的层位移越大、层间带投影，倾斜时像
+            多层镂空卡雕在错动。上限建议 5
+            ★ 实测同一张画切同心碎片会**成重影**（尤其人像：脸和身体各自平移，
+              看着像画面被撕裂）。要「单张画起浮雕」的效果，改用深度视差：
+              `工作间/cardrip/_mk_carve_cards.py`（Depth Anything → 逐像素逆 warp）
+    carve:  层间投影强度（0 = 不打影，层与层就是硬拼接，立体感弱）
     """
     from PIL import Image
     base = load_frame(path, aspect)
@@ -190,30 +227,74 @@ def parallax_frames(path, n: int = 5, aspect: float = DEFAULT_ASPECT,
                                     int(big.height * 0.06) + H)))
         return frames
 
+    from PIL import Image as _I
     from PIL import ImageFilter
+
+    L = max(1, min(5, int(layers)))
+    carve = max(0.0, float(carve)) if L > 1 else 0.0
+    masks = _carve_masks(matte, L) if L > 1 else None
+    if masks is None:
+        L, carve = 1, 0.0
+        masks = [None]
+
     plate = _inpaint(base, matte)                      # 背景底板（主体区被填平）
     fg = base.convert("RGBA")
     fg.putalpha(matte.filter(ImageFilter.GaussianBlur(1.2)))
     S = 1.10                                            # 放大工作画布，位移不露边
     bw, bh = int(W * S), int(H * S)
     plate_b = plate.resize((bw, bh), Image.LANCZOS)
-    fg_b = fg.resize((bw, bh), Image.LANCZOS)
     amp = W * 0.026 * depth
+
+    # 每层图像：同一张画，各自按自己的掩膜裁出 alpha（上层只是下层的一块子集，
+    # 所以上层滑开后露出的天然是下层的同位置像素 —— 正好是卡雕错位的观感）
+    layer_imgs, layer_alpha = [], []
+    for k, mk in enumerate(masks, 1):
+        if mk is None:
+            layer_imgs.append(fg.resize((bw, bh), Image.LANCZOS))
+            layer_alpha.append(fg.resize((bw, bh), Image.LANCZOS).getchannel("A"))
+            continue
+        a = _I.fromarray((mk * 255).astype("uint8")).resize((bw, bh), Image.LANCZOS)
+        a = a.filter(ImageFilter.GaussianBlur(0.9))     # 羽化一点，硬边会像纸片剪影
+        li = base.convert("RGBA").resize((bw, bh), Image.LANCZOS)
+        li.putalpha(a)
+        layer_imgs.append(li)
+        layer_alpha.append(a)
+
+    full_white = _I.new("L", (bw, bh), 255)
+
+    def _shadow(alpha_l, below_l, dx, dy, strength, blur):
+        """上层投在下一层上的影子：只留在下一层范围内，否则会糊到卡面外。"""
+        sh = _I.new("RGBA", (bw, bh), (6, 5, 4, 255))
+        sh.putalpha(alpha_l.point(lambda v: int(v * strength)))
+        sh = sh.filter(ImageFilter.GaussianBlur(blur))
+        a = sh.getchannel("A")
+        if below_l is not None:
+            from PIL import ImageChops
+            a = ImageChops.multiply(a, below_l)
+            sh.putalpha(a)
+        return _shift(sh, dx, dy)
+
     for i in range(n):
         u = i / max(1, n - 1) - 0.5                     # -0.5 .. +0.5
-        dx_fg = u * 2.0 * amp
-        dx_bg = dx_fg * bg_shift
-        canvas = Image.new("RGB", (bw, bh), (0, 0, 0))
-        canvas.paste(_shift(plate_b, dx_bg, 0), (0, 0))
-        f = _shift(fg_b, dx_fg, 0)
-        if pop:
-            sc = 1.0 + pop * 0.02 * u * 2.0
-            nw, nh = int(round(bw * sc)), int(round(bh * sc))
-            f = f.resize((nw, nh), Image.LANCZOS)
-            f = f.crop(((nw - bw) // 2, (nh - bh) // 2,
-                        (nw - bw) // 2 + bw, (nh - bh) // 2 + bh))
-        canvas = canvas.convert("RGBA")
-        canvas.alpha_composite(f)
+        canvas = _I.new("RGBA", (bw, bh), (0, 0, 0, 0))
+        canvas.paste(_shift(plate_b, u * 2.0 * amp * bg_shift, 0), (0, 0))
+        for k in range(1, L + 1):
+            frac = k / L if L > 1 else 1.0
+            # 越靠内位移越大（贴底板的那层还有一点位移，避免「整块不动」）
+            dx = u * 2.0 * amp * (0.35 + 0.65 * frac) if L > 1 else u * 2.0 * amp
+            if carve > 0 and k >= 2:
+                below = layer_alpha[k - 2]
+                canvas.alpha_composite(
+                    _shadow(layer_alpha[k - 1], below, dx * 0.22 + 1.5,
+                            4.0 + 2.0 * frac, carve * 0.55, 6.0 + 3.0 * frac))
+            f = _shift(layer_imgs[k - 1], dx, 0)
+            if pop:
+                sc = 1.0 + pop * 0.02 * u * 2.0 * frac
+                nw, nh = int(round(bw * sc)), int(round(bh * sc))
+                f = f.resize((nw, nh), Image.LANCZOS)
+                f = f.crop(((nw - bw) // 2, (nh - bh) // 2,
+                            (nw - bw) // 2 + bw, (nh - bh) // 2 + bh))
+            canvas.alpha_composite(f)
         x0 = (bw - W) // 2
         y0 = (bh - H) // 2
         frames.append(canvas.crop((x0, y0, x0 + W, y0 + H)).convert("RGB"))
@@ -850,11 +931,12 @@ def build(name: str, paths, mode: str = "flip", frames: int = 5,
           aspect: float = DEFAULT_ASPECT, opts=None, out_root: Path | None = None,
           interlace_lpi: float = 0.0, dpi: float = 600.0,
           title: str | None = None, depth: float = 1.35,
-          pop: float = 0.55) -> Path:
+          pop: float = 0.55, layers: int = 1, carve: float = 0.55) -> Path:
     """生成一张光栅卡网页，返回产物目录。
 
     mode: flip = N 张图直接交替（变画卡）
           3d   = 每张图展开成 frames 帧视差（立体卡），张数 × 帧数 ≤ 6
+    layers/carve: 见 parallax_frames —— 3d 模式下做多层镂空的「立体卡雕」
     """
     root = Path(out_root or LENTI_ROOT) / _slug(name)
     root.mkdir(parents=True, exist_ok=True)
@@ -863,7 +945,8 @@ def build(name: str, paths, mode: str = "flip", frames: int = 5,
     if mode == "3d":
         per = max(2, min(6, 6 // max(1, len(paths))))
         for p in paths:
-            frames_imgs.extend(parallax_frames(p, per, aspect, depth=depth, pop=pop))
+            frames_imgs.extend(parallax_frames(p, per, aspect, depth=depth, pop=pop,
+                                               layers=layers, carve=carve))
     else:
         frames_imgs = [load_frame(p, aspect) for p in paths]
 
@@ -902,13 +985,17 @@ def main(argv=None):
     ap.add_argument("--lpi", type=float, default=0.0, help="同时导出印刷交错图")
     ap.add_argument("--depth", type=float, default=1.35, help="3d 模式视差强度（1.0≈2.6%% 画宽）")
     ap.add_argument("--pop", type=float, default=0.55, help="3d 模式主体缩放（出屏/内凹）")
+    ap.add_argument("--layers", type=int, default=1,
+                    help="3d 模式主体内部再切几层（立体卡雕），1=单层，建议 3~5")
+    ap.add_argument("--carve", type=float, default=0.55, help="层间投影强度（0~1）")
     a = ap.parse_args(argv)
 
     aspect = ASPECTS.get(a.aspect, float(a.aspect) if re.match(r"^[\d.]+$", a.aspect) else DEFAULT_ASPECT)
     name = a.name or Path(a.images[0]).stem
     root = build(name, a.images, mode=a.mode, frames=a.frames, aspect=aspect,
                  out_root=Path(a.out) if a.out else None,
-                 interlace_lpi=a.lpi, depth=a.depth, pop=a.pop)
+                 interlace_lpi=a.lpi, depth=a.depth, pop=a.pop,
+                 layers=a.layers, carve=a.carve)
     print(root / "lenti.html")
 
 

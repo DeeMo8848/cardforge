@@ -373,6 +373,31 @@ build_card_html(..., lenti_opts={
   当成缓存 key
 - 卡目录会多一份 `lenti/info.json`（frames/cols/rows/alpha），重开时就靠它复原
 
+**深度视差 → 立体卡雕（Depth Anything）**
+
+单张插画做「立体卡雕」有两条路，别走错：
+
+| 方案 | 做法 | 观感 |
+|---|---|---|
+| 同心分层 | `parallax_frames(layers=3~5)`：主体遮罩做距离变换分档，逐层错位 + 层间投影 | **会成重影**。同一张图切成同心碎片互相错位，看着像画面被撕裂，不像浮雕 |
+| 深度视差 | 单目深度图 → 逐像素逆 warp | 画内元素按真实远近连续错动，倾斜时像浮雕浮起 —— **要这个** |
+
+- 模型：`depth-anything/Depth-Anything-V2-Small-hf`（transformers + torch CPU，518 输入，
+  1200×1600 图推理 <1s，模型加载 ~3s；国内拉不动就 `HF_ENDPOINT=https://hf-mirror.com`）
+- 位移：`mx = xs - u * amp * dd`，`dd` = 归一化深度**减去 12% 分位再归一化** ——
+  让最远那批像素位移归零，否则整幅背景也在平移，像一张纸在动而不是景深
+- 深度图先 `GaussianBlur(sigma≈6)`：不模糊的话深度阶跃处逆 warp 会把背景拉成硬丝
+- ★ **`amp` 的语义容易估错**：它是「满视角位移的一半」，帧间差 =
+  `2*amp/(N-1)`。900px 宽卡面、6 帧时 `amp=0.07` 只给到帧间 18px，
+  `0.03` 基本看不出（早期就吃了这个亏），`0.10` 又像人物在画里滑动。**0.07 左右最像**
+- ★★ **必须同时调 `gain`（视角增益）**：图集模式的 `uLGyro = (N-1)*0.72*gain`，
+  默认 `gain=1.0` 时 6 帧只有 3.6 —— 倾斜 26° 的 `sv≈0.394` 只走 1.4 帧，等于白做。
+  卡雕要 **`gain≈1.5`**（26° 走 2~3 帧），`soft` 收到 0.22（帧差大，柔窗口宽了会叠影）
+- 流水线在 `工作间/cardrip/_mk_carve_cards.py`：
+  `cover → depth_map → 逆 warp 出 6 帧 → 拼图集 5×2（格 288×403）→ build_card_html(lenti_opts)
+  → save_preview + cards/<id>.json`；`--shot` 出五角度截图 + 倾斜 GIF
+- 成品卡是 `engine: "video-lenti"`（与视频光栅卡同一套图集 shader），收集册直接能看
+
 ## 程序化背景（虚空）
 
 `assets/backgrounds/虚空.png` + 同名 `.json`：

@@ -1477,6 +1477,7 @@ __GLOW_INIT__
   flipGroup.add(aura);
 
   __FG_BLOCK__
+  __PARALLAX_LAYERS__
 
   // ---- 主体描边层（白色贴纸边，可选；随前景组视差移动） ----
   __OUTLINE_LAYER__
@@ -1710,13 +1711,25 @@ __ENGINE_JS__
     // 视差安全限制：主体可见包围盒（含位移）不越过边框内沿，窄边框自动收窄位移；
     // 主体偏移（用户手动调位）叠加进视差目标——仅偏移图像位置，蒙版随 syncWorld 钉在卡片坐标
     if (!subjectBox) subjectBox = computeSubjectBox();
-    const par = clampParallax(hoverCurrent.x * 0.2 + __SUBJ_OFFSET_X__ * CARD_WIDTH,
+    const par = clampParallax(hoverCurrent.x * __PARA_AMP__ + __SUBJ_OFFSET_X__ * CARD_WIDTH,
                               -hoverCurrent.y * 0.14 + __SUBJ_OFFSET_Y__ * CARD_HEIGHT);
     foregroundGroup.position.x = damp(foregroundGroup.position.x, par.x, 9.5, dt);
     foregroundGroup.position.y = damp(foregroundGroup.position.y, par.y, 9.5, dt);
     foregroundGroup.position.z = damp(foregroundGroup.position.z, 0.024, 9.5, dt);
     foregroundGroup.rotation.x = hoverCurrent.y * 0.18;
     foregroundGroup.rotation.y = hoverCurrent.x * 0.18;
+    // 视差主体：每层再按自己的深度错开（group 已有 par 的位移，这里只补差额）。
+    // 层绝对位移 = par × 深度 ÷ 最大深度 ⇒ 最前那层刚好等于 par，clampParallax 的
+    // 边界对最远层成立，更靠后的层只会更小，不会露边。
+    // 必须在 __syncFgMask 之前更新：蒙版矩阵按 mesh 当前位置反算。
+    if (paraLayers.length) {
+      for (var _pi = 0; _pi < paraLayers.length; _pi++) {
+        var _pl = paraLayers[_pi];
+        var _pk = _pl.d / PARA_MAXD - 1.0;
+        _pl.m.position.x = damp(_pl.m.position.x, par.x * _pk, 9.5, dt);
+        _pl.m.position.y = damp(_pl.m.position.y, par.y * _pk, 9.5, dt);
+      }
+    }
     // 蒙版裁剪边界固定于卡片坐标系：随视差组位移反算 alphaMap 矩阵，主体永远不超出边框外沿
     if (window.__syncFgMask) window.__syncFgMask();
 
@@ -4088,6 +4101,94 @@ def _lenti_load_js(urls, n: int, o: dict) -> str:
     )
 
 
+def _parallax_layers_js(payload: dict | None, round_foreground: bool = False) -> str:
+    """视差主体的多层前景 JS（没有就给一段空壳，让 tick 里的循环自然跳过）。
+
+    payload 来自 parallax.prepare_for_card()：
+        {"amp": 0.16, "max_depth": 1.9,
+         "layers": [{"src": "parallax/L00.webp", "depth": 0.15}, ...]}   # 后 → 前
+
+    ★ 每层都是一张「整卡尺寸」的透明图（位置/缩放已烘进图里），所以这里只建
+      PlaneGeometry(CARD_WIDTH, CARD_HEIGHT)，不用管层的原始比例。
+    ★ 挂到 foregroundGroup 下：边框内蒙版（_fg_mask_js）是遍历 children 挂 alphaMap
+      的，新层自动被裁到边框内；__syncFgMask 也已把 mesh.position 算进矩阵，
+      所以层随视差移动时裁剪边界仍钉在卡片坐标上。
+    ★ 多层时把合成前景 fgMesh 隐藏 —— 它画的是所有层叠在一起的静态图，
+      不隐藏就等于在最上面盖一层不动的影子。
+    ★ round_foreground 的圆角要逐层单做：FG_ROUND_JS 只替换 foregroundTexture
+      那一张纹理，新加的层各用各的图，不套圆角就会从卡角露方块。
+    """
+    if not payload or not payload.get("layers"):
+        return ("  const PARA_MAXD = 1.0;\n"
+                "  const PARA_ROUND = false;\n"
+                "  const paraLayers = [];\n")
+    defs = ",\n".join(
+        "    { src: %s, d: %s }" % (json.dumps(L["src"]), repr(round(float(L.get("depth", 1.0)), 3)))
+        for L in payload["layers"]
+    )
+    helper = ""
+    if round_foreground:
+        helper = (
+            "  function _paraRound(src, cb) {\n"
+            "    var im = new Image();\n"
+            "    im.onload = function () {\n"
+            "      var nv = document.createElement('canvas');\n"
+            "      nv.width = im.width; nv.height = im.height;\n"
+            "      var cx = nv.getContext('2d');\n"
+            "      cx.clearRect(0, 0, nv.width, nv.height);\n"
+            "      cx.drawImage(im, 0, 0);\n"
+            "      var r = Math.min(38.4 * nv.width / 900, nv.height * 0.5);\n"
+            "      cx.globalCompositeOperation = 'destination-in';\n"
+            "      cx.beginPath();\n"
+            "      cx.moveTo(r, 0); cx.lineTo(nv.width - r, 0);\n"
+            "      cx.arcTo(nv.width, 0, nv.width, r, r);\n"
+            "      cx.lineTo(nv.width, nv.height - r);\n"
+            "      cx.arcTo(nv.width, nv.height, nv.width - r, nv.height, r);\n"
+            "      cx.lineTo(r, nv.height);\n"
+            "      cx.arcTo(0, nv.height, 0, nv.height - r, r);\n"
+            "      cx.lineTo(0, r);\n"
+            "      cx.arcTo(0, 0, r, 0, r);\n"
+            "      cx.closePath(); cx.fill();\n"
+            "      var t = new THREE.Texture();\n"
+            "      t.colorSpace = THREE.SRGBColorSpace;\n"
+            "      t.anisotropy = 8;\n"
+            "      t.image = nv;\n"
+            "      t.needsUpdate = true;\n"
+            "      cb(t);\n"
+            "    };\n"
+            "    im.src = src;\n"
+            "  }\n"
+        )
+    return (
+        "  const PARA_MAXD = %s;\n" % repr(round(float(payload.get("max_depth") or 1.0), 3)) +
+        "  const PARA_ROUND = %s;\n" % ("true" if round_foreground else "false") +
+        "  const paraLayers = [];\n" +
+        helper +
+        "  (function () {\n"
+        "    var defs = [\n" + defs + "\n    ];\n"
+        "    defs.forEach(function (D, i) {\n"
+        "      var mat = new THREE.MeshBasicMaterial({ transparent: true, opacity: 1.0,\n"
+        "        alphaTest: 0.02, depthWrite: false, side: THREE.FrontSide, toneMapped: false });\n"
+        "      var m = new THREE.Mesh(new THREE.PlaneGeometry(CARD_WIDTH, CARD_HEIGHT), mat);\n"
+        "      m.position.set(0, 0, fgMesh.position.z + 0.0002 * (i + 1));\n"
+        "      m.renderOrder = fgMesh.renderOrder + 0.02 * (i + 1);\n"
+        "      foregroundGroup.add(m);\n"
+        "      if (PARA_ROUND) {\n"
+        "        _paraRound(D.src, function (t) { mat.map = t; mat.needsUpdate = true; });\n"
+        "      } else {\n"
+        "        var tx = loader.load(D.src);\n"
+        "        tx.colorSpace = THREE.SRGBColorSpace;\n"
+        "        tx.anisotropy = 8;\n"
+        "        mat.map = tx; mat.needsUpdate = true;\n"
+        "      }\n"
+        "      paraLayers.push({ m: m, d: D.d });\n"
+        "    });\n"
+        "    if (paraLayers.length) fgMesh.visible = false;\n"
+        "    window.__paraLayers = paraLayers;   // 调试/自动验证用：看各层实时位移\n"
+        "  })();\n"
+    )
+
+
 def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: str, effects=None,
                     frame_rel: str | None = None, seal_rel: str | None = None,
                     seal_name: str | None = None,
@@ -4145,7 +4246,8 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
                     three_rel: str = THREE_SRC_REL,
                     lenti_images: list | None = None,
                     lenti_opts: dict | None = None,
-                    bg_shader: str | None = None) -> str:
+                    bg_shader: str | None = None,
+                    parallax: dict | None = None) -> str:
     """生成自包含 3D 卡网页 HTML。
 
     three_rel: three.js 的 script src。默认是"上两级"的 ../../shared/lib/，
@@ -4532,6 +4634,8 @@ def build_card_html(name: str, front_rel: str, foreground_rel: str, back_rel: st
         .replace("__FACE_MESH_JS__", _face_mesh_js(face_scales))
         .replace("__BG_LAYER__", _bg_layer_js(background_rel, face_scales))
         .replace("__FG_BLOCK__", fg_js)
+        .replace("__PARALLAX_LAYERS__", _parallax_layers_js(parallax, round_foreground))
+        .replace("__PARA_AMP__", repr(round(float((parallax or {}).get("amp") or 0.2), 4)))
         .replace("__FG_ADAPT_JS__", _fg_adapt_js(adapt_limit, content_scale, follow_bg, bg_follow_rel))
         .replace("__FG_ROUND_JS__", FG_ROUND_JS if round_foreground else "")
         .replace("__OUTLINE_LAYER__", outline_layer)

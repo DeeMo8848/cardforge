@@ -38,6 +38,7 @@ from engine import DEFAULT_MODEL, SUPPORTED_MODELS, create_engine, get_api_confi
 import webcard
 import packs
 import lenticular
+import parallax
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 ASSETS = PROJECT_ROOT / "assets"
@@ -401,6 +402,9 @@ def _list_cards_uncached() -> list[dict]:
                 "seal_frame_same": inherit.get("seal_frame_same"),
                 "face": inherit.get("face_name") or inherit.get("subject_name"),
                 "face_as_fg": bool(inherit.get("subject_name")),
+                # 视差主体 id（拼装页选这张卡时自动复原「多层主体」的下拉选项）
+                "parallax": (data.get("parallax") or {}).get("id")
+                            if isinstance(data.get("parallax"), dict) else None,
                 "background": inherit.get("background_name"),
                 "bg_scale": _parse_scale(data.get("background_scale", (data.get("extra") or {}).get("background_scale", 1.0))),
                 "frame_scale": _parse_scale(data.get("frame_scale", (data.get("extra") or {}).get("frame_scale", 1.0))),
@@ -1453,6 +1457,11 @@ def _lenti_opts_of(data: dict) -> dict:
 
 
 def _write_preview_html(html: str) -> dict:
+    """把预览页写进 _preview/<token>/ 并返回访问 URL。
+
+    ★ 3D 预览现在自己建 token 目录（要先落视差层图再生成 html），这里只服务
+      不需要额外素材的预览场景。
+    """
     token = uuid.uuid4().hex[:12]
     d = PREVIEW_DIR / token
     d.mkdir(parents=True, exist_ok=True)
@@ -1962,6 +1971,7 @@ def _save_assembly(data: dict) -> dict:
     if seal_frame_same:
         seal_frame_sel = seal_sel
     fg_url = (data.get("foreground") or "").strip()
+    parallax_sel = (data.get("parallax") or "").strip()   # 视差主体 id（可空）
     back = (data.get("back") or "sample-1.png").strip()
     desc = (data.get("desc") or "").strip() or None
     text_type = data.get("text_type") or "none"
@@ -2126,6 +2136,17 @@ def _save_assembly(data: dict) -> dict:
     else:
         Image_blank(out / "foreground.png")
 
+    # 视差主体（视差主体编辑器里做的多层主体）：替换刚铺好的前景层。
+    # 它自带每一层的透明图（栅格化到整卡尺寸）+ meta，卡里就不再是单张 foreground.png。
+    # foreground.png 仍写一份各层合成图：2D 成品图、收集册缩略图、老逻辑都靠它。
+    para_payload = None
+    if parallax_sel:
+        try:
+            para_payload = parallax.bind_to_card(parallax_sel, out, CARD_W, CARD_H)
+        except Exception as e:  # noqa: BLE001
+            para_payload = None
+            print(f"[cardforge] 视差主体应用失败（{parallax_sel}）：{e}")
+
     # 牌背（记录原始素材名，供再次拼装时反查）：素材库原图 → 只引用，不复制
     back_p = resolve_asset("backs", back)
     back_file = back if back_p else "sample-1.png"
@@ -2272,7 +2293,8 @@ def _save_assembly(data: dict) -> dict:
                                 subject_offset_y=subject_offset_y,
                                 lenti_images=lenti_rel,
                                 lenti_opts=lenti_opts,
-                                bg_shader=bg_shader),
+                                bg_shader=bg_shader,
+                                parallax=para_payload),
         encoding="utf-8",
     )
 
@@ -2319,6 +2341,11 @@ def _save_assembly(data: dict) -> dict:
             "glow_name": glow_name,
             "glow_strength": glow_strength,
             "effects": [{"name": e["name"], "pos": e["pos"]} for e in effect_instances],
+            # 视差主体：记 id + 层参数，重开成品卡时拼装页能复原「主体层」
+            "parallax": ({"id": parallax_sel,
+                          "amp": para_payload.get("amp"),
+                          "layers": para_payload.get("layers")}
+                         if para_payload else None),
             # 光栅卡：存的是原始图源 spec + 参数（重开时按源图重新规范化，不依赖临时文件）
             "lenti": (
                 {"atlas": "lenti/atlas.webp",
@@ -2709,6 +2736,28 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
 
+        if path in ("/parallax.html", "/parallax"):
+            body = parallax.PARALLAX_HTML.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        if path.startswith("/parallax/"):
+            # /parallax/<主体>/<文件>、/parallax/_uploads/<文件>
+            parts = [unquote(p) for p in path.strip("/").split("/")[1:]]
+            if parts and all(p and p != ".." and "/" not in p and "\\" not in p for p in parts):
+                f = parallax.PARALLAX_ROOT
+                for p in parts:
+                    f = f / p
+                if self._send_file(f):
+                    return
+            self._send_json({"ok": False, "error": "not found"}, 404)
+            return
+
         if path.startswith("/lenti/"):
             # /lenti/<目录>/<文件> —— 光栅卡产物（帧图 + lenti.html）
             parts = path.strip("/").split("/")
@@ -2840,6 +2889,18 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"ok": True,
                              "cards": album_cards() if _album_only else list_cards()})
             return
+        if path == "/api/parallax/list":
+            self._send_json({"ok": True, "items": parallax.list_items()})
+            return
+        if path == "/api/parallax/item":
+            qs = parse_qs(self.path.partition("?")[2] or "")
+            pid = (qs.get("id") or [""])[0]
+            m = parallax.load_item(pid) if pid else None
+            if not m:
+                self._send_json({"ok": False, "error": "没有这个视差主体"}, 404)
+                return
+            self._send_json({"ok": True, "meta": m})
+            return
         if path == "/api/albums":
             self._send_json({"ok": True, **albums_summary()})
             return
@@ -2870,6 +2931,20 @@ class Handler(BaseHTTPRequestHandler):
         _path, _, _qs = self.path.partition("?")
         # 视频/GIF 走裸字节上传（base64 会把体积放大 1/3，几十 MB 的片子没必要）
         # 光栅卡工作页的视频图源：抽 2~6 张独立帧喂多槽位预览（裸字节，同 /api/lenti/video）
+        # 视差主体编辑器：图层素材也走裸字节（PNG/WebP 转 RGBA 后落 _uploads/）
+        if _path == "/api/parallax/upload":
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                if length > parallax.MAX_UPLOAD_BYTES:
+                    raise ValueError("图片太大（>30MB），先压一下")
+                raw = self.rfile.read(length) if length else b""
+                name = unquote(self.headers.get("X-File-Name", "") or "layer.png")
+                self._send_json(parallax.save_upload(raw, name))
+            except ValueError as e:
+                self._send_json({"ok": False, "error": str(e)}, 400)
+            except Exception as e:
+                self._send_json({"ok": False, "error": str(e)}, 500)
+            return
         if _path in ("/api/lenti/video/split", "/api/lenti/video_frames"):
             try:
                 length = int(self.headers.get("Content-Length", 0))
@@ -2922,6 +2997,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(self._make(data))
             elif self.path == "/api/effect/save":
                 self._send_json(self._effect_save(data))
+            elif self.path == "/api/parallax/save":
+                self._send_json(parallax.save_item(data, (data.get("id") or "").strip() or None))
+            elif self.path == "/api/parallax/delete":
+                self._send_json(parallax.delete_item(data.get("id") or ""))
             elif self.path == "/api/effect/delete":
                 self._send_json(self._effect_delete(data))
             elif self.path == "/api/preview_html":
@@ -3246,6 +3325,7 @@ class Handler(BaseHTTPRequestHandler):
             if seal_frame_sel == "same":
                 seal_frame_sel = seal_sel
             fg = (data.get("foreground") or "").strip()
+            parallax_sel = (data.get("parallax") or "").strip()   # 视差主体 id（可空）
             back_sel = (data.get("back") or "").strip()
             back = back_sel if resolve_asset("backs", back_sel) else "sample-1.png"
             blank_url = _ensure_blank()
@@ -3427,6 +3507,13 @@ class Handler(BaseHTTPRequestHandler):
                     tp = TMP_DIR / Path(fg).name
                     if tp.exists() and tp.stat().st_size > 0:
                         fg_im = Image.open(tp)
+                # 视差主体：2D 预览取「中性视角」的合成图（静止看不出层次，但构图对）
+                if parallax_sel:
+                    try:
+                        fg_im = parallax.composite(parallax.load_item(parallax_sel),
+                                                   (CARD_W, CARD_H))
+                    except Exception as e:  # noqa: BLE001
+                        print(f"[cardforge] 视差主体 2D 预览失败：{e}")
                 composed = compose_card(
                     fg_im, style="transparent", front=front_p,
                     background=str(bg_path) if bg_path else None,
@@ -3446,6 +3533,17 @@ class Handler(BaseHTTPRequestHandler):
                 pname = f"asm_{uuid.uuid4().hex[:8]}.png"
                 composed.save(PREVIEW_DIR / pname)
                 return {"ok": True, "url": f"/preview/_preview/{pname}"}
+            # 3D 实时预览：视差主体要把每层图落到本预览目录（token 要先定，
+            # 所以这里自己建目录，不走 _write_preview_html）
+            token = uuid.uuid4().hex[:12]
+            pdir = PREVIEW_DIR / token
+            pdir.mkdir(parents=True, exist_ok=True)
+            para_payload = None
+            if parallax_sel:
+                try:
+                    para_payload = parallax.prepare_for_card(parallax_sel, pdir)
+                except Exception as e:  # noqa: BLE001
+                    print(f"[cardforge] 预览应用视差主体失败：{e}")
             html = webcard.build_card_html(name, front_url, fg, back_url, effects=effects,
                                            frame_rel=frame_url, seal_rel=seal_url,
                                            seal_name=seal_name if seal_url else None,
@@ -3478,7 +3576,12 @@ class Handler(BaseHTTPRequestHandler):
                                 # 预览页写在 assets/output/_preview/<token>/，比卡目录深一层，
                                 # "../../shared/lib/" 会解析成 /preview/shared/... 而 404；
                                 # 预览页只在 http 下打开，直接用 /shared/ 路由的绝对路径。
-                                three_rel=webcard.THREE_SRC_ABS)
+                                three_rel=webcard.THREE_SRC_ABS,
+                                parallax=para_payload)
+            (pdir / "preview.html").write_text(html, encoding="utf-8")
+            _cleanup_old_previews()
+            return {"ok": True, "url": f"/preview/_preview/{token}/preview.html"}
+        # kind == "effect"（特效 DIY 预览）走这里：不需要额外素材目录
         return _write_preview_html(html)
 
     def _tmp_upload(self, data: dict) -> dict:
@@ -3867,6 +3970,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
 <a class="tab" href="/codex.html" target="_blank" style="text-decoration:none">🐾 异兽牌</a>
 <a class="tab" href="/cutout.html" target="_blank" style="text-decoration:none">✂️ 抠图工具</a>
 <a class="tab" href="/lenti.html" target="_blank" style="text-decoration:none">🎞️ 光栅卡</a>
+<a class="tab" href="/parallax.html" target="_blank" style="text-decoration:none">🧅 视差主体</a>
   </nav>
 
   <!-- ============ 1 生成卡牌 ============ -->
@@ -4106,6 +4210,14 @@ PAGE_HTML = r"""<!DOCTYPE html>
             <input type="checkbox" id="asmFaceFg">
             <span>🪟 这张图只作透明前景层（主体）—— 勾选后底图改用「背景」，适合已经抠好的透明图</span>
           </label>
+        </div>
+        <div class="row">
+          <label>🧅 视差主体（多层主体，各层随视角错动；选了就取代上面的前景层）</label>
+          <div class="pickrow">
+            <select id="asmParallax"></select>
+            <button class="btn small ghost" id="asmParallaxOpen" type="button" title="打开视差主体编辑器制作/修改">✎ 制作</button>
+            <button class="btn small ghost" id="asmParallaxReload" type="button" title="刷新视差主体列表">⟳</button>
+          </div>
         </div>
         <div class="row">
           <label class="checkrow">
@@ -5374,6 +5486,23 @@ const asmFrameSel = document.getElementById('asmFrame');
 const asmBgSel = document.getElementById('asmBg');
 const asmSealSel = document.getElementById('asmSeal');
 const asmSealFrameSel = document.getElementById('asmSealFrame');
+// 视差主体：拼装页的「多层主体」来源（来自 /api/parallax/list）
+const asmParallaxSel = document.getElementById('asmParallax');
+let PARALLAX_ITEMS = [];
+async function loadParallaxList(keep) {
+  try {
+    const r = await fetch('/api/parallax/list');
+    const d = await r.json();
+    PARALLAX_ITEMS = d.items || [];
+  } catch (e) { PARALLAX_ITEMS = []; }
+  const cur = (keep === undefined) ? asmParallaxSel.value : keep;
+  fillSelect('asmParallax', ['', ...PARALLAX_ITEMS.map(i => i.id)],
+             ['—— 不使用 ——', ...PARALLAX_ITEMS.map(i => i.name + '（' + i.layer_count + ' 层）')]);
+  if (cur && [...asmParallaxSel.options].some(o => o.value === cur)) asmParallaxSel.value = cur;
+}
+document.getElementById('asmParallaxReload').addEventListener('click', () => loadParallaxList());
+document.getElementById('asmParallaxOpen').addEventListener('click', () => window.open('/parallax.html', '_blank'));
+loadParallaxList('');
 
 // 卡封叠加层：多层独立 shader，各层正/背强度分开（正面看封、牌背不封）
 const asmSealExtraBox = document.getElementById('asmSealExtra');
@@ -5954,6 +6083,12 @@ asmCardSel.addEventListener('change', () => {
     // 光栅卡：这张卡是光栅卡就把图源与参数一起回填（不是就清空）
     const lc = card.lenti || null;
     asmLentiReset(lc, card.id);
+    // 视差主体：这张卡是「多层主体」做的就选中它（不在列表里说明主体已被删，清空）
+    if (card.parallax && [...asmParallaxSel.options].some(o => o.value === card.parallax)) {
+      asmParallaxSel.value = card.parallax;
+    } else {
+      asmParallaxSel.value = '';
+    }
     if (typeof card.seal_strength_front === 'number' && isFinite(card.seal_strength_front)) document.getElementById('asmSealFront').value = card.seal_strength_front;
     if (typeof card.seal_strength_back === 'number' && isFinite(card.seal_strength_back)) document.getElementById('asmSealBack').value = card.seal_strength_back;
     if (typeof card.seal_frame_strength_front === 'number' && isFinite(card.seal_frame_strength_front)) document.getElementById('asmSealFrameFront').value = card.seal_frame_strength_front;
@@ -6069,6 +6204,7 @@ document.getElementById('asmReset').addEventListener('click', () => {
   document.getElementById('asmOffsetX').value = 0;
   document.getElementById('asmOffsetY').value = 0;
   asmTextTypeSel.value = 'none';
+  asmParallaxSel.value = '';
   refillAsmFrame();
   document.getElementById('asmDesc').value = '';
   [['asmAreaL', 8], ['asmAreaR', 92], ['asmAreaT', 70], ['asmAreaB', 92]].forEach(([id, v]) => {
@@ -6137,6 +6273,7 @@ async function postAsmPreview() {
         card: asmCardSel.value,
         face: asmFaceSel.value,
         face_as_fg: asmFaceFgEl.checked,
+        parallax: asmParallaxSel.value,
         lenti_images: asmLentiActive() ? asmLenti.list.slice(0, 6) : [],
         lenti: asmLentiOpts(),
         frame: asmFrameSel.value,
@@ -6190,6 +6327,7 @@ document.getElementById('asmSave').addEventListener('click', async () => {
         card: asmCardSel.value,
         face: asmFaceSel.value,
         face_as_fg: asmFaceFgEl.checked,
+        parallax: asmParallaxSel.value,
         lenti_images: asmLentiActive() ? asmLenti.list.slice(0, 6) : [],
         lenti: asmLentiOpts(),
         frame: asmFrameSel.value,

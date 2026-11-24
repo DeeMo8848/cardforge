@@ -79,6 +79,9 @@ settings.json
 # 光栅卡产物（帧图 + 生成的单独网页，体积大且可重新生成）
 assets/lenticular/
 
+# 视差主体：用户作品（层素材 + 预烤缓存），体积大且属于本地内容 → 不入库
+assets/parallax/
+
 # 图鉴产物（1800 版全量 <card>/card.html + card.webp + thumb.webp，目前 802 MB）
 # 由批量还原脚本生成，收集册本来也不读它（ALBUM_ROOTS 只收 assets/output）→ 不入库
 assets/ripit/

@@ -1253,6 +1253,71 @@ def _reframe_lenti_video(hash_or_key: str, frames=None) -> dict:
     return _lenti_vresult(key, md5, "clip")
 
 
+def _lenti_video_split(raw: bytes, name: str, frames=None) -> dict:
+    """视频/GIF → 2~6 张独立帧图，喂光栅卡工作页的多槽位预览。
+
+    与 `_make_lenti_video` 的分工：
+      · 那边拼一张图集（8~36 帧、只占 1 个采样器），给成品卡 shader 用；
+      · 这边输出 N 张独立 webp，直接进 `_lenti_panel` 预览页的 6 个贴图槽位。
+    好处是完全复用预览页现有渲染路径（不改 shader、不动 uT0..uT5），代价是
+    帧数上限 6 —— 要 8 帧以上的完整效果请用拼装页「🎞️ 光栅卡卡面」。
+    """
+    if not raw:
+        raise ValueError("没收到文件内容")
+    if len(raw) > LENTI_VIDEO_MAX_BYTES:
+        raise ValueError("文件太大（>60MB），先压一下或截短")
+    safe = _safe_name((name or "clip.mp4").replace("\\", "/").split("/")[-1])
+    if not safe.lower().endswith(_VIDEO_EXTS):
+        raise ValueError("不支持的格式：%s（支持 mp4/webm/mov/gif/webp）" % Path(safe).suffix)
+    try:
+        want = int(round(float(frames or 6)))
+    except (TypeError, ValueError):
+        want = 6
+    want = max(2, min(6, want))
+
+    token = uuid.uuid4().hex[:10]
+    _lenti_gc()
+    work = lenticular.LENTI_ROOT / "_work" / token
+    work.mkdir(parents=True, exist_ok=True)
+    src = work / ("_src" + Path(safe).suffix.lower())
+    src.write_bytes(raw)
+    try:
+        imgs = _video_frames(src, want)
+    finally:
+        # 原始视频别留在产物目录里：_lenti_save 是整目录 copytree，几十 MB 会被一起搬走
+        try:
+            src.unlink()
+        except OSError:
+            pass
+    if not imgs:
+        raise ValueError("抽帧失败：视频是空的或编码无法解码")
+
+    has_a = False
+    for f in imgs:
+        if f.mode == "RGBA":
+            try:
+                if f.getchannel("A").getextrema()[0] < 250:
+                    has_a = True
+                    break
+            except (OSError, ValueError):
+                pass
+
+    fw, fh = lenticular.frame_size(lenticular.DEFAULT_ASPECT)
+    names = []
+    for i, f in enumerate(imgs, 1):
+        nm = "f%02d.webp" % i
+        _cover_to(f, fw, fh, keep_alpha=has_a).save(
+            work / nm, "WEBP", quality=92, method=4,
+            **({"alpha_quality": 100} if has_a else {}))
+        names.append(nm)
+    (work / "meta.json").write_text(json.dumps(
+        {"images": names, "aspect": lenticular.DEFAULT_ASPECT, "opts": None,
+         "source": safe, "frames": len(names), "alpha": has_a},
+        ensure_ascii=False), encoding="utf-8")
+    return {"ok": True, "token": token, "base": "/lenti/_work/" + token + "/",
+            "images": names, "count": len(names), "mode": "video", "alpha": has_a}
+
+
 def _lenti_o(data: dict) -> dict:
     """把 lenti 与内嵌 opts 摊平（视频卡参数在 opts 下，写卡时在顶层）。"""
     o = data.get("lenti") or {}
@@ -1453,6 +1518,22 @@ _LENTI_PANEL = r"""
   <div class="chips" id="gChips"></div>
 </div>
 <div class="sec">
+  <h2>视频 / GIF 图源</h2>
+  <div class="sub">均匀抽 2~6 帧当「变画」帧，直接进左侧 3D 预览（透明 GIF 的透明区照常透出）。
+    要 8~36 帧的完整光栅卡，请用拼装页「🎞️ 光栅卡卡面」。</div>
+  <div class="btnrow" style="margin-top:8px">
+    <div class="btn" id="vPick">选择视频 / GIF</div>
+    <div class="btn" id="vClear">清空</div>
+  </div>
+  <div class="btnrow" style="margin-top:8px">
+    <div class="btn" data-vframes="3">3 帧</div>
+    <div class="btn" data-vframes="4">4 帧</div>
+    <div class="btn on" data-vframes="6">6 帧</div>
+  </div>
+  <input type="file" id="vFile" accept="video/*,.gif,.webp,.apng" hidden>
+  <div class="sub" id="vMsg" style="margin-top:6px"></div>
+</div>
+<div class="sec">
   <h2>生成</h2>
   <div class="btnrow">
     <div class="btn on" data-lmode="flip">变画（N 张交替）</div>
@@ -1534,6 +1615,42 @@ _LENTI_JS = r"""
       document.querySelectorAll('[data-lmode]').forEach((x) => x.classList.toggle('on', x === b));
     };
   });
+
+  // ---- 视频 / GIF 图源：抽 N 帧当变画帧，直接进 3D 预览 ----
+  const vMsg = document.getElementById('vMsg');
+  let vFrames = 6;
+  function vsay(t, err) {
+    vMsg.textContent = t || '';
+    vMsg.style.color = err ? 'var(--err)' : 'var(--muted)';
+  }
+  document.querySelectorAll('[data-vframes]').forEach((b) => {
+    b.onclick = () => {
+      vFrames = +b.dataset.vframes;
+      document.querySelectorAll('[data-vframes]').forEach((x) => x.classList.toggle('on', x === b));
+    };
+  });
+  document.getElementById('vPick').onclick = () => document.getElementById('vFile').click();
+  document.getElementById('vClear').onclick = () => { vsay(''); token = ''; };
+  document.getElementById('vFile').onchange = async (e) => {
+    const f = e.target.files && e.target.files[0];
+    e.target.value = '';
+    if (!f) return;
+    vsay('抽帧中…（大文件要等一会）');
+    try {
+      const r = await fetch('/api/lenti/video/split?frames=' + vFrames, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/octet-stream',
+                  'X-File-Name': encodeURIComponent(f.name)},
+        body: f
+      }).then((x) => x.json());
+      if (!r.ok) { vsay(r.error || '抽帧失败', true); return; }
+      token = r.token;
+      await window.__lentiAPI.setImages(r.images.map((n) => ({src: r.base + n, name: n})));
+      vsay('已抽 ' + r.count + ' 帧' + (r.alpha ? '（含透明通道）' : '') + ' · 左右拖动卡牌换帧');
+    } catch (err) {
+      vsay(String(err), true);
+    }
+  };
 
   document.getElementById('gBuild').onclick = async () => {
     if (!q.length) { say('队列是空的', true); return; }
@@ -2507,11 +2624,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def _send_json(self, obj, code=200):
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+            # 前端主动取消（关页面 / 重新选文件）时连接已经断了，再写就是噪声 traceback
+            pass
 
     def _send_bytes(self, data: bytes, ctype: str):
         self.send_response(200)
@@ -2745,6 +2866,21 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         _path, _, _qs = self.path.partition("?")
         # 视频/GIF 走裸字节上传（base64 会把体积放大 1/3，几十 MB 的片子没必要）
+        # 光栅卡工作页的视频图源：抽 2~6 张独立帧喂多槽位预览（裸字节，同 /api/lenti/video）
+        if _path in ("/api/lenti/video/split", "/api/lenti/video_frames"):
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                if length > LENTI_VIDEO_MAX_BYTES:
+                    raise ValueError("文件太大（>60MB），先压一下或截短")
+                raw = self.rfile.read(length) if length else b""
+                name = unquote(self.headers.get("X-File-Name", "") or "clip.mp4")
+                want = parse_qs(_qs).get("frames", [None])[0]
+                self._send_json(_lenti_video_split(raw, name, want))
+            except ValueError as e:
+                self._send_json({"ok": False, "error": str(e)}, 400)
+            except Exception as e:
+                self._send_json({"ok": False, "error": str(e)}, 500)
+            return
         if _path in ("/api/lenti/video", "/api/lenti/video_raw"):
             try:
                 length = int(self.headers.get("Content-Length", 0))

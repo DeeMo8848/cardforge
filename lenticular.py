@@ -424,14 +424,16 @@ float hash11(float p) {
   return fract(p);
 }
 
-vec3 frameAt(float idx, vec2 uv) {
+// 返回 vec4：透明 GIF（主体贴片）的透明区要靠 alpha 透出页面底色，
+// 旧版只取 .rgb，透明处会变成纯黑方块。
+vec4 frameAt(float idx, vec2 uv) {
   float k = mod(idx, uN);
-  if (k < 0.5) return texture2D(uT0, uv).rgb;
-  if (k < 1.5) return texture2D(uT1, uv).rgb;
-  if (k < 2.5) return texture2D(uT2, uv).rgb;
-  if (k < 3.5) return texture2D(uT3, uv).rgb;
-  if (k < 4.5) return texture2D(uT4, uv).rgb;
-  return texture2D(uT5, uv).rgb;
+  if (k < 0.5) return texture2D(uT0, uv);
+  if (k < 1.5) return texture2D(uT1, uv);
+  if (k < 2.5) return texture2D(uT2, uv);
+  if (k < 3.5) return texture2D(uT3, uv);
+  if (k < 4.5) return texture2D(uT4, uv);
+  return texture2D(uT5, uv);
 }
 
 float sdBox(vec2 p, vec2 b) {
@@ -483,9 +485,12 @@ void main() {
   float sw = max(uSwitch, 0.002);
   w = smoothstep(0.5 - 0.5 * sw, 0.5 + 0.5 * sw, w);
 
-  vec3 c0 = frameAt(i0, uv);
-  vec3 c1 = frameAt(i0 + 1.0, uv);
-  vec3 col = mix(c0, c1, w);
+  vec4 c0 = frameAt(i0, uv);
+  vec4 c1 = frameAt(i0 + 1.0, uv);
+  // 预乘 alpha 插值：透明帧的 rgb 是 0，直接 mix 会把黑混进过渡区（倾斜时出黑缝）
+  vec4 cp = mix(c0 * c0.a, c1 * c1.a, w);
+  float fa = clamp(mix(c0.a, c1.a, w), 0.0, 1.0);
+  vec3 col = cp.rgb / max(cp.a, 1e-4);
   float trans = 1.0 - abs(w * 2.0 - 1.0);
 
   // ---- 棱纹：每透镜一道余弦，AA 后过密会退化成平场，避免摩尔纹反噬 ----
@@ -532,7 +537,7 @@ void main() {
   col = mix(vec3(0.42), col, 1.07);
   col += 0.006;
 
-  gl_FragColor = vec4(clamp(col, 0.0, 1.0), alpha);
+  gl_FragColor = vec4(clamp(col, 0.0, 1.0), alpha * fa);
 }`;
 
 const RIM_FRAG = `
